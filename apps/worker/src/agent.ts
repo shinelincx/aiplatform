@@ -1,17 +1,33 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { statfs } from 'node:fs/promises';
-import { availableParallelism, totalmem } from 'node:os';
+import { availableParallelism, freemem, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { WebSocket } from 'ws';
-import { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerMaxPayloadBytes, workerProtocolVersion,
-  type WorkerCapabilities, type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
+import { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes, workerProtocolVersion,
+  type WorkerCapabilities, type WorkerEnvelope, type WorkerHeartbeat, type WorkerMessageType, type WorkerResources } from '@ado/shared';
 import { codexVersion, configureExecution, verifyCodexLogin } from './codex-execution';
 import { WorkerJobs } from './jobs';
 
 const exec = promisify(execFile);
 const acknowledgementTimeoutMs = 10_000;
+const bytesPerMiB = 1024 * 1024;
+
+function configuredDiskThreshold() {
+  const bytes = Number(process.env.ADO_MIN_FREE_DISK_MIB ?? '256') * bytesPerMiB;
+  if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error('Set a valid ADO_MIN_FREE_DISK_MIB');
+  return bytes;
+}
+
+async function sampleResources(directory: string, minFreeDiskBytes: number): Promise<WorkerResources> {
+  const disk = await statfs(directory).catch(() => null);
+  return {
+    diskFreeBytes: disk ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, disk.bavail * disk.bsize)) : 0,
+    memoryFreeBytes: freemem(),
+    minFreeDiskBytes,
+  };
+}
 
 async function toolVersion(executable: string) {
   try {
@@ -25,19 +41,16 @@ async function toolVersion(executable: string) {
   }
 }
 
-async function probe(): Promise<WorkerCapabilities> {
+async function probe(): Promise<Omit<WorkerCapabilities, 'diskFreeBytes'>> {
   const os = process.platform;
   if (os !== 'win32' && os !== 'linux' && os !== 'darwin') throw new Error('Unsupported Worker platform');
-  const [disk, gitVersion, dockerVersion] = await Promise.all([
-    statfs(process.cwd()), toolVersion('git'), toolVersion('docker'),
-  ]);
+  const [gitVersion, dockerVersion] = await Promise.all([toolVersion('git'), toolVersion('docker')]);
   return {
     os,
     arch: process.arch,
     nodeVersion: process.version,
     cpuCount: availableParallelism(),
     memoryBytes: totalmem(),
-    diskFreeBytes: disk.bavail * disk.bsize,
     gitVersion,
     dockerVersion,
   };
@@ -55,7 +68,8 @@ function gatewayUrl(baseUrl: string) {
 }
 
 function connect(url: URL, workerId: string, token: string,
-  capabilities: WorkerCapabilities, signal: AbortSignal, jobs?: WorkerJobs) {
+  capabilities: Omit<WorkerCapabilities, 'diskFreeBytes'>, sample: () => Promise<WorkerResources>,
+  signal: AbortSignal, jobs?: WorkerJobs) {
   return new Promise<{ registered: boolean; rejected: boolean }>((resolve) => {
     const socket = new WebSocket(url, {
       headers: { Authorization: `Bearer ${workerId}.${token}` },
@@ -97,26 +111,41 @@ function connect(url: URL, workerId: string, token: string,
     };
 
     const operate = async () => {
-      const result = await send('WORKER_REGISTER', 'REGISTER_ACK', capabilities);
-      if (result !== null) throw new Error('Unexpected registration payload');
+      let resources = await sample();
+      const result = await send('WORKER_REGISTER', 'REGISTER_ACK', { ...capabilities, ...resources });
+      const resourceHeartbeats = result !== null && typeof result === 'object' && result !== undefined
+        && 'resourceHeartbeats' in result && result.resourceHeartbeats === true;
+      if (result !== null && !resourceHeartbeats) throw new Error('Unexpected registration payload');
       registered = true;
       console.log(JSON.stringify({ service: 'ado-worker', event: 'registered', workerId, os: capabilities.os }));
       if (jobs?.runId) await jobs.reconcile(await send('WORKER_RECOVER', 'RECOVER_ACK', jobs.runId));
       let nextHeartbeat = Date.now() + workerHeartbeatMs;
-      while (!connection.signal.aborted) {
-        if (Date.now() >= nextHeartbeat) {
-          const lease = await send('WORKER_HEARTBEAT', 'HEARTBEAT_ACK', jobs?.runId ?? null);
-          if (jobs?.runId) {
-            if (lease && typeof lease === 'object' && 'stop' in lease && lease.stop === false) jobs.renew();
-            else jobs.cancel();
-          }
-          nextHeartbeat = Date.now() + workerHeartbeatMs;
+      const heartbeat = async (latest: WorkerResources) => {
+        const runId = jobs?.runId ?? null;
+        const payload: WorkerHeartbeat | string | null = resourceHeartbeats ? { runId, resources: latest } : runId;
+        const lease = await send('WORKER_HEARTBEAT', 'HEARTBEAT_ACK', payload);
+        if (runId) {
+          if (lease && typeof lease === 'object' && 'stop' in lease && lease.stop === false) jobs?.renew();
+          else jobs?.cancel();
         }
+        if (workerDiskPressure(latest) !== workerDiskPressure(resources)) {
+          console.log(JSON.stringify({ service: 'ado-worker', workerId,
+            event: workerDiskPressure(latest) ? 'disk_pressure' : 'disk_ready' }));
+        }
+        resources = latest;
+        nextHeartbeat = Date.now() + workerHeartbeatMs;
+      };
+      while (!connection.signal.aborted) {
+        if (Date.now() >= nextHeartbeat) await heartbeat(await sample());
         if (jobs?.runId) {
           await jobs.flush((event) => send('EXECUTION_EVENT', 'EXECUTION_ACK', event));
         } else if (jobs) {
-          const offer = await send('WORKER_CLAIM', 'CLAIM_ACK', null);
-          if (offer !== null) await jobs.start(offer);
+          const latest = await sample();
+          if (workerDiskPressure(latest) !== workerDiskPressure(resources)) await heartbeat(latest);
+          if (!workerDiskPressure(latest)) {
+            const offer = await send('WORKER_CLAIM', 'CLAIM_ACK', null);
+            if (offer !== null) await jobs.start(offer);
+          }
         }
         await delay(jobs?.runId ? 250 : jobs ? 2000 : Math.max(1, nextHeartbeat - Date.now()),
           undefined, { signal: connection.signal });
@@ -154,6 +183,8 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   const endpoint = gatewayUrl(baseUrl);
   const capabilities = await probe();
   const runtime = await configureExecution();
+  const minFreeDiskBytes = runtime ? configuredDiskThreshold() : 0;
+  const sample = () => sampleResources(runtime?.root ?? process.cwd(), minFreeDiskBytes);
   if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
   if (runtime) await verifyCodexLogin(runtime);
   const jobs = runtime ? new WorkerJobs(runtime, workerId, async (runId, bytes, cancellation) => {
@@ -177,7 +208,7 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   let retryMs = 500;
   try {
     while (!signal.aborted) {
-      const { registered, rejected } = await connect(endpoint, workerId, token, capabilities, signal, jobs);
+      const { registered, rejected } = await connect(endpoint, workerId, token, capabilities, sample, signal, jobs);
       if (signal.aborted) break;
       if (rejected) throw new Error('Worker credential or registration was rejected');
       retryMs = registered ? 500 : Math.min(retryMs * 2, 30_000);

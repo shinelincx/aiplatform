@@ -1,4 +1,5 @@
-import type { CheckFailureReason, CheckResult, ExecutionEvent, ExecutionRun, Project, Task, WorkerReport } from '@ado/shared';
+import { workerDiskPressure, type CheckFailureReason, type CheckResult, type ExecutionEvent, type ExecutionRun,
+  type Project, type Task, type WorkerReport } from '@ado/shared';
 import { changeExecutionWorker, publishExecution, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
@@ -55,8 +56,9 @@ function WorkerChoice({ workers, selected }: { workers: WorkerReport[]; selected
     <option value="">自动分配</option>
     {selected && !workers.some(({ id }) => id === selected) &&
       <option value={selected}>当前指定 Worker 不可用</option>}
-    {workers.map(({ id, name, status }) => (
-      <option key={id} value={id}>{name} · {status === 'online' ? '在线' : '离线'}</option>
+    {workers.map(({ id, name, status, capabilities }) => (
+      <option key={id} value={id}>{name} · {status !== 'online' ? '离线'
+        : capabilities && workerDiskPressure(capabilities) ? '磁盘空间不足' : '在线'}</option>
     ))}
   </select></label>;
 }

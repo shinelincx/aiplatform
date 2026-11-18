@@ -61,7 +61,9 @@ export function ProjectDetails({ project, members, users, overview, live }: {
           <div><dt>研发任务</dt><dd>{overview.tasks.open} 项进行中 · {overview.tasks.completed} 项已完成</dd></div>
           <div><dt>待审批方案</dt><dd>{overview.tasks.approval} 项</dd></div>
           <div><dt>已启用 Agent</dt><dd>{overview.agentsEnabled} 个</dd></div>
-          <div><dt>在线 Worker</dt><dd>{overview.workers.online} / {overview.workers.total}</dd></div>
+          <div><dt>在线 Worker</dt><dd>{overview.workers.online} / {overview.workers.total}</dd>
+            {overview.workers.diskPaused > 0 && <small>{overview.workers.diskPaused} 台因磁盘空间不足暂停领取</small>}
+          </div>
           <div><dt>执行队列</dt><dd>{overview.executions.queued} 项排队 · {overview.executions.running} 项运行</dd></div>
           <div><dt>成功执行</dt><dd>{overview.executions.succeeded} / {overview.executions.total}</dd></div>
         </dl>

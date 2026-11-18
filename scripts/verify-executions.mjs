@@ -183,6 +183,19 @@ try {
   await assign(null);
   assert.equal((await request(task.runs, { token }))[0].requestedWorkerId, null);
 
+  const diskLow = { diskFreeBytes: 32, memoryFreeBytes: 64, minFreeDiskBytes: 128 };
+  const diskReady = { ...diskLow, diskFreeBytes: 128, memoryFreeBytes: 256 };
+  assert.equal(await worker.send('WORKER_HEARTBEAT', { runId: null, resources: diskLow }), null);
+  assert.equal(await worker.send('WORKER_CLAIM'), null);
+  const overviewPath = `/projects/${first.id}/operations/overview`;
+  assert.equal((await request(overviewPath, { token })).workers.diskPaused, 1);
+  const workerState = (await request(`/projects/${first.id}/workers`, { token })).find(({ id }) => id === approved.workerId);
+  assert.equal(workerState.status, 'online');
+  assert.equal(workerState.capabilities.diskFreeBytes, diskLow.diskFreeBytes);
+  assert.equal(workerState.capabilities.memoryFreeBytes, diskLow.memoryFreeBytes);
+  assert.equal(await worker.send('WORKER_HEARTBEAT', { runId: null, resources: diskReady }), null);
+  assert.equal((await request(overviewPath, { token })).workers.diskPaused, 0);
+
   const offer = await worker.send('WORKER_CLAIM');
   assert.equal(offer.id, initial.id);
   assert.equal(offer.taskId, task.id);
@@ -191,6 +204,8 @@ try {
   assert.equal(offer.development.agent.version, pinnedDeveloper.version);
   assert.equal(offer.development.agent.model, pinnedDeveloper.model);
   assert(offer.development.agent.instructions.includes('Keep the approved behavior.'));
+  assert.deepEqual(await worker.send('WORKER_HEARTBEAT', { runId: offer.id, resources: diskLow }), { stop: false });
+  assert.equal((await request(overviewPath, { token })).workers.diskPaused, 1);
   assert.equal(await worker.send('WORKER_CLAIM'), null);
   const thread = { runId: offer.id, sequence: 1, kind: 'thread', payload: { threadId: 'fixture-thread' } };
   assert.deepEqual(await worker.send('EXECUTION_EVENT', thread), { stop: false, accepted: true });
@@ -563,6 +578,7 @@ try {
   console.log('Manual approvals pin developer Agent versions and migrated tasks get a default assignment');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');
   console.log('Worker assignment isolation, reassignment and structured check diagnostics passed');
+  console.log('Resource heartbeats pause new claims and preserve active Worker leases');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');
   console.log('Patch archive integrity, download and publication gates passed');
 } finally {

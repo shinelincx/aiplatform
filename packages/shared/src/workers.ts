@@ -48,11 +48,28 @@ export interface WorkerCapabilities {
   cpuCount: number;
   memoryBytes: number;
   diskFreeBytes: number;
+  memoryFreeBytes?: number;
+  minFreeDiskBytes?: number;
   gitVersion: string | null;
   dockerVersion: string | null;
   codexVersion?: string;
   verificationVersion?: 1;
   artifactVersion?: 1;
+}
+
+export interface WorkerResources {
+  diskFreeBytes: number;
+  memoryFreeBytes: number;
+  minFreeDiskBytes: number;
+}
+
+export interface WorkerHeartbeat {
+  runId: string | null;
+  resources?: WorkerResources;
+}
+
+export function workerDiskPressure(resources: Pick<WorkerCapabilities, 'diskFreeBytes' | 'minFreeDiskBytes'>) {
+  return resources.diskFreeBytes < (resources.minFreeDiskBytes ?? 0);
 }
 
 export interface WorkerReport {

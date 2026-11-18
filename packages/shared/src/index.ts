@@ -5,8 +5,10 @@ export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './ta
 export { agentRoleLabels, developerRoles, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
   DirectorPlan, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, SkillVersion } from './agents';
-export { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerMaxPayloadBytes, workerOfflineMs, workerProtocolVersion } from './workers';
-export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerMessageType, WorkerRecovery, WorkerReport } from './workers';
+export { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,
+  workerOfflineMs, workerProtocolVersion } from './workers';
+export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,
+  WorkerRecovery, WorkerReport, WorkerResources } from './workers';
 export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';

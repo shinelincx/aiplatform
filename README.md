@@ -73,8 +73,11 @@ Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研�
 | `ADO_CODEX_BIN` | Codex CLI 原生可执行文件的绝对路径 |
 | `ADO_CODEX_STATE_DIR` | 独立 Codex 状态目录的绝对路径，需预先创建，且位于工作目录之外 |
 | `ADO_CODEX_API_KEY` | 可选，设定后用于模型认证。也可通过 Codex CLI 在独立状态目录中登录 |
+| `ADO_MIN_FREE_DISK_MIB` | 执行目录的最低可用磁盘空间，默认 256 MiB |
 
 Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实际 Git worktree 中验证隔离。状态目录使用默认配置。测试代码、密钥和其他项目文件应放在工作目录之外。生产部署可在独立 Worker 服务上设置 CPU、内存和磁盘配额。
+
+Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时，Worker 继续处理已领取的任务并暂停领取新任务。工作台显示暂停状态，可用空间恢复后自动恢复领取。每个执行 Worker 同一时间运行一个任务。
 
 项目所有者可在已绑定仓库的任务通过审批后点击“派发任务”。PostgreSQL 保存队列、租约和有序事件。候选补丁摘要、变更文件列表和用量入库后进入“待测试”。补丁位于 Worker 工作目录的 `<runId>/changes.patch`，各轮补丁另存为 `attempt-N.patch`。
 

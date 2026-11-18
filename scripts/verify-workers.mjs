@@ -108,6 +108,9 @@ try {
   assert.equal(before.status, 'online');
   assert.equal(before.capabilities.os, process.platform);
   assert(before.capabilities.cpuCount > 0);
+  assert(before.capabilities.diskFreeBytes >= 0);
+  assert(before.capabilities.memoryFreeBytes >= 0);
+  assert.equal(before.capabilities.minFreeDiskBytes, 0);
   assert.equal(before.capabilities.nodeVersion, process.version);
   assert(!JSON.stringify(before).includes(credential.token));
 

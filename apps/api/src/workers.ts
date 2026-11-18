@@ -5,7 +5,7 @@ import {
 import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { isWorkerId, workerOfflineMs, type Account, type WorkerCapabilities, type WorkerCredential,
-  type WorkerReport } from '@ado/shared';
+  type WorkerHeartbeat, type WorkerReport, type WorkerResources } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
@@ -18,6 +18,8 @@ const hasActiveProject = `EXISTS (
 )`;
 export const workerOnline = `NOT w.disabled AND w.connection_id IS NOT NULL AND w.credential_expires_at > now()
   AND w.last_heartbeat_at >= now() - ($2 * interval '1 millisecond')`;
+export const workerDiskReady = `COALESCE((w.capabilities->>'diskFreeBytes')::bigint
+  >= (w.capabilities->>'minFreeDiskBytes')::bigint, true)`;
 
 function credentialHash(token: string) {
   return createHash('sha256').update(token).digest('hex');
@@ -31,25 +33,43 @@ export function parseWorkerCredentials(authorization?: string) {
 
 export type WorkerIdentity = NonNullable<ReturnType<typeof parseWorkerCredentials>>;
 
+function resourceNumber(input: Record<string, unknown>, key: string, min = 0) {
+  const value = input[key];
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+    throw new BadRequestException(`Invalid ${key}`);
+  }
+  return value;
+}
+
+function parseResources(input: Record<string, unknown>): WorkerResources {
+  return {
+    diskFreeBytes: resourceNumber(input, 'diskFreeBytes'),
+    memoryFreeBytes: resourceNumber(input, 'memoryFreeBytes'),
+    minFreeDiskBytes: resourceNumber(input, 'minFreeDiskBytes'),
+  };
+}
+
+export function parseWorkerHeartbeat(payload: unknown): WorkerHeartbeat {
+  if (payload === null || isWorkerId(payload)) return { runId: payload };
+  const { runId, resources } = objectInput(payload);
+  if (runId !== null && !isWorkerId(runId)) throw new BadRequestException('Invalid heartbeat run ID');
+  return { runId, resources: parseResources(objectInput(resources)) };
+}
+
 export function parseCapabilities(payload: unknown): WorkerCapabilities {
   const input = objectInput(payload);
   const { os } = input;
   if (os !== 'win32' && os !== 'linux' && os !== 'darwin') throw new BadRequestException('Unsupported worker OS');
-  const positive = (key: string, min: number) => {
-    const value = input[key];
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
-      throw new BadRequestException(`Invalid ${key}`);
-    }
-    return value;
-  };
+  const resources = input.memoryFreeBytes === undefined && input.minFreeDiskBytes === undefined
+    ? { diskFreeBytes: resourceNumber(input, 'diskFreeBytes') } : parseResources(input);
   const version = (key: string) => input[key] === null ? null : textInput(input[key], key, 100);
   return {
     os,
     arch: textInput(input.arch, 'arch', 30),
     nodeVersion: textInput(input.nodeVersion, 'nodeVersion', 40),
-    cpuCount: positive('cpuCount', 1),
-    memoryBytes: positive('memoryBytes', 1),
-    diskFreeBytes: positive('diskFreeBytes', 0),
+    cpuCount: resourceNumber(input, 'cpuCount', 1),
+    memoryBytes: resourceNumber(input, 'memoryBytes', 1),
+    ...resources,
     gitVersion: version('gitVersion'),
     dockerVersion: version('dockerVersion'),
     ...(input.codexVersion !== undefined && { codexVersion: textInput(input.codexVersion, 'codexVersion', 40) }),
@@ -173,11 +193,12 @@ export class WorkersService {
     return result.rowCount === 1;
   }
 
-  async heartbeat({ workerId, hash }: WorkerIdentity, connectionId: string) {
+  async heartbeat({ workerId, hash }: WorkerIdentity, connectionId: string, resources?: WorkerResources) {
     const result = await this.db.pool.query(
-      `UPDATE workers w SET last_heartbeat_at = now()
+      `UPDATE workers w SET last_heartbeat_at = now(),
+         capabilities = CASE WHEN $4::jsonb IS NULL THEN capabilities ELSE capabilities || $4::jsonb END
        WHERE w.id = $1 AND w.credential_hash = $2 AND w.connection_id = $3 AND w.credential_expires_at > now()
-         AND NOT w.disabled AND ${hasActiveProject}`, [workerId, hash, connectionId],
+         AND NOT w.disabled AND ${hasActiveProject}`, [workerId, hash, connectionId, resources ?? null],
     );
     return result.rowCount === 1;
   }

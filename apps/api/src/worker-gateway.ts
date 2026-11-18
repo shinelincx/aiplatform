@@ -5,7 +5,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
 import { decodeWorkerMessage, isWorkerId, workerMaxPayloadBytes, workerOfflineMs, workerProtocolVersion,
   type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
-import { parseCapabilities, parseWorkerCredentials, WorkersService, type WorkerIdentity } from './workers';
+import { parseCapabilities, parseWorkerCredentials, parseWorkerHeartbeat, WorkersService, type WorkerIdentity } from './workers';
 import { ExecutionsService } from './executions';
 
 @Injectable()
@@ -82,7 +82,8 @@ export class WorkerGateway implements OnModuleDestroy {
           await disconnect();
           return;
         }
-        this.ack(socket, identity, message, 'REGISTER_ACK');
+        this.ack(socket, identity, message, 'REGISTER_ACK', capabilities.minFreeDiskBytes === undefined
+          ? null : { resourceHeartbeats: true });
         clearTimeout(idle);
         idle = setTimeout(onIdle, workerOfflineMs).unref();
         return;
@@ -103,18 +104,18 @@ export class WorkerGateway implements OnModuleDestroy {
         this.ack(socket, identity, message, 'RECOVER_ACK', checkpoint);
         return;
       }
-      if (message.message_type !== 'WORKER_HEARTBEAT' || (message.payload !== null && !isWorkerId(message.payload))) {
+      if (message.message_type !== 'WORKER_HEARTBEAT') {
         socket.close(1008, 'Invalid heartbeat');
         return;
       }
-      if (!await this.workers.heartbeat(identity, connectionId)) {
+      const { runId, resources } = parseWorkerHeartbeat(message.payload);
+      if (!await this.workers.heartbeat(identity, connectionId, resources)) {
         socket.close(4001, 'Worker authorization ended');
         return;
       }
       if (socket.readyState === WebSocket.OPEN) {
         idle.refresh();
-        const payload = message.payload === null ? null
-          : { stop: !await this.executions.renew(lease, message.payload) };
+        const payload = runId === null ? null : { stop: !await this.executions.renew(lease, runId) };
         this.ack(socket, identity, message, 'HEARTBEAT_ACK', payload);
       }
     };

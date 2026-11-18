@@ -17,7 +17,7 @@ import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
-import type { WorkerIdentity } from './workers';
+import { workerDiskReady, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
@@ -329,10 +329,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async lockWorker(client: PoolClient, worker: WorkerLease) {
-    const result = await client.query<{ canExecute: boolean; canVerify: boolean; canArchive: boolean }>(
+    const result = await client.query<{ canExecute: boolean; canVerify: boolean; canArchive: boolean; diskReady: boolean }>(
       `SELECT capabilities ? 'codexVersion' AS "canExecute", capabilities->'verificationVersion' = '1'::jsonb AS "canVerify",
-         capabilities->'artifactVersion' = '1'::jsonb AS "canArchive"
-       FROM workers
+         capabilities->'artifactVersion' = '1'::jsonb AS "canArchive", ${workerDiskReady} AS "diskReady"
+       FROM workers w
        WHERE id = $1 AND credential_hash = $2 AND connection_id = $3
          AND credential_expires_at > now() AND NOT disabled FOR UPDATE`,
       [worker.workerId, worker.hash, worker.connectionId],
@@ -343,7 +343,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async claim(worker: WorkerLease): Promise<ExecutionOffer | null> {
     const claimed = await this.db.transaction(async (client) => {
       const capabilities = await this.lockWorker(client, worker);
-      if (!capabilities?.canExecute) return null;
+      if (!capabilities?.canExecute || !capabilities.diskReady) return null;
       const assigned = await client.query(
         `SELECT id FROM execution_runs WHERE worker_id = $1 AND status = 'running'`, [worker.workerId],
       );

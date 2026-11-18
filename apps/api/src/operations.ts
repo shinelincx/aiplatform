@@ -5,7 +5,7 @@ import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput } from './input';
 import { ProjectsService } from './projects';
-import { workerOnline } from './workers';
+import { workerDiskReady, workerOnline } from './workers';
 
 const rateFields = `model, input_usd::text AS "inputUsdPerMillion", cached_input_usd::text AS "cachedInputUsdPerMillion",
   output_usd::text AS "outputUsdPerMillion"`;
@@ -54,7 +54,8 @@ export class OperationsService {
           'approval', count(*) FILTER (WHERE status = 'WAITING_APPROVAL')
         ) FROM current_tasks) AS tasks,
         ($3::int - (SELECT count(*)::int FROM project_agent_settings WHERE project_id = $1 AND NOT enabled)) AS "agentsEnabled",
-        (SELECT jsonb_build_object('online', count(*) FILTER (WHERE ${workerOnline}), 'total', count(*))
+        (SELECT jsonb_build_object('online', count(*) FILTER (WHERE ${workerOnline}), 'total', count(*),
+           'diskPaused', count(*) FILTER (WHERE ${workerOnline} AND NOT ${workerDiskReady} AND w.capabilities ? 'codexVersion'))
          FROM workers w JOIN worker_projects wp ON wp.worker_id = w.id WHERE wp.project_id = $1) AS workers,
         (SELECT jsonb_build_object(
            'queued', count(*) FILTER (WHERE status = 'queued'), 'running', count(*) FILTER (WHERE status = 'running'),
