@@ -5,7 +5,7 @@ import type { RequirementContent } from './projects';
 
 export interface DevelopmentHandoff {
   agent: AgentAssignment;
-  plan: ArchitecturePlan;
+  plan?: ArchitecturePlan;
   requirement?: RequirementContent;
 }
 

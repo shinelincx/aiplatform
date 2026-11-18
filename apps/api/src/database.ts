@@ -266,6 +266,16 @@ const migrations = [
     retired_at timestamptz
   );
   CREATE INDEX project_active_requirements ON project_requirements (project_id, approved_at DESC) WHERE retired_at IS NULL;`,
+  `ALTER TABLE tasks ADD COLUMN approved_developer jsonb;`,
+  `CREATE TABLE project_model_rates (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL REFERENCES projects(id),
+    model varchar(100) NOT NULL,
+    input_usd numeric(15,6) NOT NULL CHECK (input_usd >= 0),
+    cached_input_usd numeric(15,6) NOT NULL CHECK (cached_input_usd >= 0),
+    output_usd numeric(15,6) NOT NULL CHECK (output_usd >= 0),
+    UNIQUE (project_id, model)
+  );`,
 ];
 
 @Injectable()

@@ -12,6 +12,7 @@ import { URL } from 'node:url';
 import pg from 'pg';
 import { WebSocket } from 'ws';
 import { ArtifactStore } from '../apps/api/src/artifacts.ts';
+import { AgentRegistryService } from '../apps/api/src/agent-registry.ts';
 import { AuthService } from '../apps/api/src/auth.ts';
 import { Database } from '../apps/api/src/database.ts';
 import { DeliveriesService } from '../apps/api/src/deliveries.ts';
@@ -117,18 +118,28 @@ try {
   );
 
   const tasks = `/projects/${first.id}/tasks`;
-  const newTask = async (code) => {
+  const newTask = async (code, developerRole) => {
     const created = await request(tasks, { token, method: 'POST', status: 201, body: {
       code, title: code, description: 'Exercise the platform execution protocol',
       repositoryId: repository.id, acceptanceCriteria: ['Report tracked file changes'],
     } });
     const base = `${tasks}/${created.id}`;
     for (const status of ['PLANNING', 'WAITING_APPROVAL', 'READY']) {
-      await request(`${base}/transition`, { token, method: 'POST', body: { status } });
+      await request(`${base}/transition`, { token, method: 'POST',
+        body: { status, ...(status === 'READY' && developerRole && { developerRole }) } });
     }
     return { id: created.id, path: base, runs: `${base}/executions` };
   };
-  const task = await newTask('WEB-EXECUTION');
+  const frontendVersions = `/projects/${first.id}/agent-registry/agents/FRONTEND_DEVELOPER/versions`;
+  const pinnedDeveloper = await request(frontendVersions, {
+    token, method: 'POST', status: 201, body: { model: 'fixture-codex-approved', instructions: 'Keep the approved behavior.' },
+  });
+  const task = await newTask('WEB-EXECUTION', 'FRONTEND_DEVELOPER');
+  const taskDeveloper = (await request(task.path, { token })).developer;
+  assert.deepEqual(taskDeveloper, { role: 'FRONTEND_DEVELOPER', version: pinnedDeveloper.version, model: pinnedDeveloper.model });
+  await request(frontendVersions, {
+    token, method: 'POST', status: 201, body: { model: 'fixture-codex-later', instructions: 'Later version.' },
+  });
   await request(task.runs, { token, method: 'POST', body: { workerId: foreignCredential.workerId }, status: 409 });
   assert.deepEqual(await request(task.runs, { token }), []);
   const home = await globalThis.fetch(web);
@@ -145,7 +156,9 @@ try {
   const selected = new URL(`/?project=${first.id}&task=${task.id}`, web);
   const rendered = await globalThis.fetch(selected, { headers: { Cookie: cookie } });
   assert.equal(rendered.status, 200);
-  const formHtml = (await rendered.text()).match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*派发任务<\/button><\/form>/)?.[0];
+  const workbench = await rendered.text();
+  assert(workbench.includes('责任 Agent') && workbench.includes('前端工程师'));
+  const formHtml = workbench.match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*派发任务<\/button><\/form>/)?.[0];
   const action = formHtml?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
   assert(action, 'Expected approved task dispatch form');
   assert(formHtml.includes(approved.workerId), 'Expected a project Worker in the dispatch form');
@@ -175,6 +188,9 @@ try {
   assert.equal(offer.taskId, task.id);
   await assign(alternateCredential.workerId, 409);
   assert.equal(offer.repository, 'test/execution-fixture');
+  assert.equal(offer.development.agent.version, pinnedDeveloper.version);
+  assert.equal(offer.development.agent.model, pinnedDeveloper.model);
+  assert(offer.development.agent.instructions.includes('Keep the approved behavior.'));
   assert.equal(await worker.send('WORKER_CLAIM'), null);
   const thread = { runId: offer.id, sequence: 1, kind: 'thread', payload: { threadId: 'fixture-thread' } };
   assert.deepEqual(await worker.send('EXECUTION_EVENT', thread), { stop: false, accepted: true });
@@ -264,8 +280,12 @@ try {
   assert.equal((await request(cancelled.path, { token })).status, 'CANCELLED');
 
   const timed = await newTask('TIMEOUT-EXECUTION');
+  await db.query('UPDATE tasks SET approved_developer = NULL WHERE id = $1', [timed.id]);
   const timedRun = await request(timed.runs, { token, method: 'POST', status: 201 });
-  assert.equal((await worker.send('WORKER_CLAIM')).id, timedRun.id);
+  const legacyOffer = await worker.send('WORKER_CLAIM');
+  assert.equal(legacyOffer.id, timedRun.id);
+  assert.equal(legacyOffer.development.agent.role, 'BACKEND_DEVELOPER');
+  assert.equal((await request(timed.path, { token })).developer.role, 'BACKEND_DEVELOPER');
   await worker.close();
   await db.query("UPDATE execution_runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [timedRun.id]);
   let timedOut = false;
@@ -423,7 +443,8 @@ try {
           updatedAt: '2026-01-01T00:00:00Z', state: 'open' };
       },
     };
-    publisher = new DeliveriesService(publisherDb, new TasksService(publisherDb, projects), projects,
+    const publisherTasks = new TasksService(publisherDb, projects, new AgentRegistryService(publisherDb, projects));
+    publisher = new DeliveriesService(publisherDb, publisherTasks, projects,
       github, new ArtifactStore(), (input, signal) => {
         assert.equal(input.remote, 'https://github.com/test/execution-fixture.git');
         assert.equal(input.baseCommit, baseline);
@@ -539,6 +560,7 @@ try {
   assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
   assert.equal((await request(rejected.runs, { token }))[0].delivery, null);
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
+  console.log('Manual approvals pin developer Agent versions and migrated tasks get a default assignment');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');
   console.log('Worker assignment isolation, reassignment and structured check diagnostics passed');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');

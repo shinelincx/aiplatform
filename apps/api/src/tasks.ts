@@ -3,8 +3,9 @@ import {
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, UseGuards,
 } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
-import { canTransitionTask, taskPriorities, type Account, type Task, type TaskDetail,
-  type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
+import { canTransitionTask, developerRoles, taskPriorities, type Account, type AgentAssignment, type ArchitecturePlan,
+  type DeveloperRole, type RequirementContent, type Task, type TaskDetail, type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
+import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
@@ -12,7 +13,10 @@ import { ProjectsService } from './projects';
 
 const taskColumns = `id, project_id AS "projectId", task_code AS code, title, description, status, priority,
   repository_id AS "repositoryId", parent_task_id AS "parentTaskId",
-  acceptance_criteria AS "acceptanceCriteria", archived_at AS "archivedAt", created_at AS "createdAt"`;
+  acceptance_criteria AS "acceptanceCriteria", archived_at AS "archivedAt", created_at AS "createdAt",
+  CASE WHEN approved_developer IS NOT NULL THEN jsonb_build_object(
+    'role', approved_developer->'role', 'version', approved_developer->'version', 'model', approved_developer->'model'
+  ) END AS developer`;
 const editable = new Set<TaskStatus>(['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED']);
 const userTransitions = new Set<TaskStatus>(['PLANNING', 'WAITING_APPROVAL', 'READY', 'REJECTED', 'CANCELLED']);
 const running = new Set<TaskStatus>(['QUEUED', 'RUNNING', 'TESTING', 'REVIEW', 'MERGED', 'RETRYING']);
@@ -51,6 +55,7 @@ export class TasksService {
   constructor(
     @Inject(Database) private readonly db: Database,
     @Inject(ProjectsService) private readonly projects: ProjectsService,
+    @Inject(AgentRegistryService) private readonly registry: AgentRegistryService,
   ) {}
 
   async list(actor: Account, projectId: string) {
@@ -162,8 +167,13 @@ export class TasksService {
   }
 
   async transition(actor: Account, projectId: string, id: string, body: unknown) {
-    const to = objectInput(body).status as TaskStatus;
+    const input = objectInput(body);
+    const to = input.status as TaskStatus;
     if (!userTransitions.has(to)) throw new BadRequestException('Transition is reserved for the execution workflow');
+    const role = developerRoles.find((candidate) => candidate === input.developerRole);
+    if (input.developerRole != null && (to !== 'READY' || !role)) {
+      throw new BadRequestException('Invalid developer role for task approval');
+    }
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, {
         write: true, active: true, owner: to === 'READY' || to === 'REJECTED',
@@ -185,20 +195,61 @@ export class TasksService {
       if (to === 'WAITING_APPROVAL' && task.acceptanceCriteria.length === 0) {
         throw new ConflictException('Acceptance criteria are required before review');
       }
+      let approved: AgentAssignment | undefined;
       if (to === 'READY') {
         const blocked = await client.query(
           `SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id
            WHERE d.project_id = $1 AND d.task_id = $2 AND t.status <> 'COMPLETED' LIMIT 1`, [projectId, id],
         );
         if (blocked.rowCount) throw new ConflictException('Prerequisite tasks must be completed');
+        const planned = await this.plannedDevelopment(client, task);
+        if (planned && role && role !== planned.agent.role) throw new ConflictException('Developer differs from the Agent plan');
+        approved = planned?.agent ?? await this.selectDeveloper(client, projectId, role);
         await this.projects.audit(client, actor.id, projectId, 'task.approved', id);
       }
       if (to === 'REJECTED') await this.projects.audit(client, actor.id, projectId, 'task.rejected', id);
-      await client.query('UPDATE tasks SET status = $3, updated_at = now() WHERE project_id = $1 AND id = $2',
-        [projectId, id, to]);
-      await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to });
-      return { ...task, status: to };
+      const { rows: [updated] } = await client.query<Task>(
+        `UPDATE tasks SET status = $3, updated_at = now(),
+           approved_developer = CASE WHEN $3 = 'PLANNING' THEN NULL ELSE COALESCE($4, approved_developer) END
+         WHERE project_id = $1 AND id = $2 RETURNING ${taskColumns}`, [projectId, id, to, approved ?? null]);
+      await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to,
+        ...(updated.developer && { developer: updated.developer.role, developerVersion: updated.developer.version }) });
+      return { ...updated, dependencies: task.dependencies };
     });
+  }
+
+  async plannedDevelopment(client: PoolClient, task: Task) {
+    const { rows: [planned] } = await client.query<{
+      plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null; requirement: RequirementContent | null;
+    }>(
+      `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent,
+         assignments->'QA_ENGINEER' AS qa,
+         CASE WHEN input ? 'requirement' THEN jsonb_build_object(
+           'title', input->'requirement'->>'title', 'excerpt', input->'requirement'->>'excerpt'
+         ) END AS requirement
+       FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state = 'completed'`, [task.projectId, task.id]);
+    if (planned && !planned.agent) throw new ConflictException('Approved developer assignment is missing');
+    return planned;
+  }
+
+  async approvedDeveloper(client: PoolClient, task: Task, planned?: AgentAssignment): Promise<AgentAssignment> {
+    const { rows: [row] } = await client.query<{ agent: AgentAssignment | null }>(
+      'SELECT approved_developer AS agent FROM tasks WHERE project_id = $1 AND id = $2', [task.projectId, task.id]);
+    if (row?.agent) return row.agent;
+    const agent = planned ?? await this.selectDeveloper(client, task.projectId);
+    await client.query('UPDATE tasks SET approved_developer = $3 WHERE project_id = $1 AND id = $2',
+      [task.projectId, task.id, agent]);
+    return agent;
+  }
+
+  private async selectDeveloper(client: PoolClient, projectId: string, role?: DeveloperRole) {
+    const registry = await this.registry.view(projectId, client);
+    const choices: DeveloperRole[] = role ? [role] : ['BACKEND_DEVELOPER', 'FRONTEND_DEVELOPER'];
+    for (const choice of choices) {
+      const agent = this.registry.snapshot(registry, choice, '');
+      if (agent) return agent;
+    }
+    throw new ConflictException('No eligible developer Agent is enabled in this project');
   }
 
   async archive(actor: Account, projectId: string, id: string) {

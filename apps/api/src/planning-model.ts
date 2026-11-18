@@ -1,13 +1,13 @@
-import type { AgentAssignment, ArchitecturePlan, DirectorPlan, ModelUsage, PlanningOutput, PlanningRole, ProductPlan } from '@ado/shared';
+import { developerRoles, type AgentAssignment, type ArchitecturePlan, type DirectorPlan, type ModelUsage,
+  type PlanningOutput, type PlanningRole, type ProductPlan } from '@ado/shared';
 import { objectInput, textInput } from './input';
 
 const string = { type: 'string' };
 const strings = { type: 'array', items: string };
-const developers = ['FRONTEND_DEVELOPER', 'BACKEND_DEVELOPER'] as const;
 const properties = {
   PROJECT_DIRECTOR: { objective: string, constraints: strings },
   PRODUCT_MANAGER: { title: string, userStory: string, requirements: strings, acceptanceCriteria: strings },
-  ARCHITECT: { developer: { type: 'string', enum: developers }, steps: strings, risks: strings, testApproach: strings },
+  ARCHITECT: { developer: { type: 'string', enum: developerRoles }, steps: strings, risks: strings, testApproach: strings },
 };
 
 function lines(input: unknown, key: string, required = false): string[] {
@@ -33,7 +33,7 @@ export function validatePlanningOutput(role: PlanningRole, input: unknown): Plan
       acceptanceCriteria: lines(value.acceptanceCriteria, 'criterion', true),
     } satisfies ProductPlan;
   }
-  const developer = developers.find((item) => item === value.developer);
+  const developer = developerRoles.find((item) => item === value.developer);
   if (!developer) throw new Error('Invalid developer role');
   return {
     developer, steps: lines(value.steps, 'implementation step', true),

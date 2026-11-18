@@ -24,8 +24,8 @@ assert(!process.env.ADO_AGENT_API_KEY, 'Run the fixture without an external plan
 const db = new Database();
 const auth = new AuthService(db);
 const projects = new ProjectsService(db, auth);
-const tasks = new TasksService(db, projects);
 const registry = new AgentRegistryService(db, projects);
+const tasks = new TasksService(db, projects, registry);
 const github = new GitHubApp();
 const deliveries = new DeliveriesService(db, tasks, projects, github, new ArtifactStore(), pushCandidate);
 const executions = new ExecutionsService(db, projects, tasks, github, deliveries);
@@ -213,7 +213,11 @@ try {
   assert(html.includes('用 Agent 规划需求') && html.includes('批准方案') && html.includes('实施步骤') && html.includes('Agent 与 Skill'));
   assert(html.includes(requirement.referenceUrl) && html.includes('规划使用的批准摘录'));
 
-  await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
+  await request(`${taskPath}/transition`, {
+    token, method: 'POST', status: 409, body: { status: 'READY', developerRole: 'BACKEND_DEVELOPER' },
+  });
+  const planApproval = await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
+  assert.deepEqual(planApproval.developer, { role: 'FRONTEND_DEVELOPER', version: 2, model: config.model });
   await request(`${prefix}/repositories/${repo.id}/checks`, {
     token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }] },
   });
@@ -292,7 +296,7 @@ try {
   const operations = await request(operationsPath, { token });
   const pmUsage = operations.usage.find(({ role }) => role === 'PRODUCT_MANAGER');
   assert.deepEqual(pmUsage, { role: 'PRODUCT_MANAGER', model: 'fixture-pm-resolved',
-    inputTokens: '40', cachedInputTokens: '10', outputTokens: '16' });
+    inputTokens: '40', cachedInputTokens: '10', outputTokens: '16', estimatedUsd: null });
   assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
   assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
   for (const action of ['requirement.approved', 'requirement.retired', 'task.approved', 'agent.step_completed', 'task.status_changed',
@@ -300,6 +304,21 @@ try {
     assert(operations.audit.some((entry) => entry.action === action), `Missing ${action} in the project audit`);
   }
   assert.equal((await request(operationsPath, { token: viewerToken })).audit, null);
+  const ratePath = `${operationsPath}/rates/fixture-pm-resolved`;
+  const rate = { inputUsdPerMillion: '2', cachedInputUsdPerMillion: '0.4', outputUsdPerMillion: '10' };
+  await request(ratePath, { token: viewerToken, method: 'PUT', body: rate, status: 403 });
+  await request(ratePath, { token, method: 'PUT', body: { ...rate, outputUsdPerMillion: '-1' }, status: 400 });
+  const savedRate = await request(ratePath, { token, method: 'PUT', body: rate });
+  assert.equal(savedRate.cachedInputUsdPerMillion, '0.400000');
+  await request(`/projects/${second.id}/operations/rates/fixture-pm-resolved`, {
+    token, method: 'PUT', body: { ...rate, outputUsdPerMillion: '50' },
+  });
+  const estimates = await request(operationsPath, { token });
+  assert.equal(estimates.usage.find(({ role }) => role === 'PRODUCT_MANAGER').estimatedUsd, '0.000224000000');
+  assert.equal(estimates.usage.find(({ role }) => role === 'QA_ENGINEER').estimatedUsd, null);
+  assert.equal(estimates.rates.length, 1);
+  assert(estimates.audit.some(({ action }) => action === 'operations.model_rate_updated'));
+  assert.equal((await request(operationsPath, { token: viewerToken })).rates, null);
   assert.deepEqual((await request(`/projects/${second.id}/operations`, { token })).usage, []);
   await request(`/projects/${second.id}/operations`, { token: viewerToken, status: 404 });
   const otherOverview = `/projects/${second.id}/operations/overview`;
@@ -312,6 +331,7 @@ try {
   assert.equal(metricsPage.status, 200);
   const metricsHtml = await metricsPage.text();
   assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
+  assert(metricsHtml.includes('估算费用 US$0.000224'));
 
   const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference' });
   const inFlight = planning.runNext();
@@ -328,7 +348,7 @@ try {
   assert.deepEqual(plan.steps, []);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
-  process.stdout.write('Approved requirement snapshots, Agent planning, Worker handoff, patch-bound QA, project usage and audit verified.\n');
+  process.stdout.write('Approved requirements, Agent handoff, QA, project usage, rate estimates and audit verified.\n');
 } finally {
   await db.onModuleDestroy();
 }

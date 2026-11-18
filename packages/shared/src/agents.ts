@@ -12,7 +12,8 @@ export const agentRoleLabels = {
 } as const;
 
 export type AgentRole = keyof typeof agentRoleLabels;
-export type DeveloperRole = 'FRONTEND_DEVELOPER' | 'BACKEND_DEVELOPER';
+export const developerRoles = ['FRONTEND_DEVELOPER', 'BACKEND_DEVELOPER'] as const;
+export type DeveloperRole = (typeof developerRoles)[number];
 export const planningRoles = ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT'] as const;
 export type PlanningRole = (typeof planningRoles)[number];
 

@@ -1,3 +1,5 @@
+import type { AgentAssignment } from './agents';
+
 export const taskTransitions = {
   CREATED: ['PLANNING', 'CANCELLED'],
   PLANNING: ['WAITING_APPROVAL', 'CANCELLED', 'BLOCKED'],
@@ -38,6 +40,7 @@ export interface Task {
   acceptanceCriteria: string[];
   archivedAt: string | null;
   createdAt: string;
+  developer?: Pick<AgentAssignment, 'role' | 'version' | 'model'> | null;
 }
 
 export interface TaskDetail extends Task {

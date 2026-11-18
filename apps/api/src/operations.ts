@@ -1,10 +1,21 @@
-import { Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, UseGuards } from '@nestjs/common';
-import { agentRoleLabels, workerOfflineMs, type Account, type ModelUsageRow, type ProjectAuditEntry,
+import { BadRequestException, Body, Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, Put, UseGuards } from '@nestjs/common';
+import { agentRoleLabels, workerOfflineMs, type Account, type ModelRate, type ModelUsageRow, type ProjectAuditEntry,
   type ProjectOperations, type ProjectOverview } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
+import { objectInput } from './input';
 import { ProjectsService } from './projects';
 import { workerOnline } from './workers';
+
+const rateFields = `model, input_usd::text AS "inputUsdPerMillion", cached_input_usd::text AS "cachedInputUsdPerMillion",
+  output_usd::text AS "outputUsdPerMillion"`;
+
+function rateInput(value: unknown) {
+  if (typeof value !== 'string' || !/^\d{1,9}(\.\d{1,6})?$/.test(value)) {
+    throw new BadRequestException('Expected a non-negative decimal rate per million tokens');
+  }
+  return value;
+}
 
 @Injectable()
 export class OperationsService {
@@ -57,7 +68,8 @@ export class OperationsService {
 
   async list(actor: Account, projectId: string): Promise<ProjectOperations> {
     const project = await this.projects.access(actor.id, projectId);
-    const [usage, audit] = await Promise.all([
+    const canManage = project.role === 'owner';
+    const [usage, audit, rates] = await Promise.all([
       this.db.pool.query<ModelUsageRow>(
         `WITH usage_records AS (
           SELECT payload->>'role' AS role, payload->'usage'->>'model' AS model, payload->'usage' AS usage
@@ -68,12 +80,18 @@ export class OperationsService {
           FROM execution_runs r JOIN LATERAL (
             SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result' ORDER BY sequence DESC LIMIT 1
           ) latest ON true WHERE r.project_id = $1
+         ), token_totals AS (
+           SELECT role, model, SUM((usage->>'inputTokens')::numeric) AS inputs,
+             SUM((usage->>'cachedInputTokens')::numeric) AS cached, SUM((usage->>'outputTokens')::numeric) AS outputs,
+             bool_and((usage->>'cachedInputTokens')::numeric <= (usage->>'inputTokens')::numeric) AS valid
+           FROM usage_records GROUP BY role, model
          )
-         SELECT role, model, SUM((usage->>'inputTokens')::numeric)::text AS "inputTokens",
-           SUM((usage->>'cachedInputTokens')::numeric)::text AS "cachedInputTokens",
-           SUM((usage->>'outputTokens')::numeric)::text AS "outputTokens"
-         FROM usage_records GROUP BY role, model ORDER BY role, model`, [projectId]),
-      project.role === 'owner' ? this.db.pool.query<ProjectAuditEntry>(
+         SELECT t.role, t.model, t.inputs::text AS "inputTokens", t.cached::text AS "cachedInputTokens", t.outputs::text AS "outputTokens",
+           CASE WHEN t.valid THEN round(((t.inputs - t.cached) * r.input_usd + t.cached * r.cached_input_usd
+             + t.outputs * r.output_usd) / 1000000, 12)::text END AS "estimatedUsd"
+         FROM token_totals t LEFT JOIN project_model_rates r ON r.project_id = $1 AND r.model = t.model
+         ORDER BY t.role, t.model`, [projectId]),
+      canManage ? this.db.pool.query<ProjectAuditEntry>(
         `SELECT id, action, actor, "resourceId", "createdAt" FROM (
           SELECT a.id::text, a.action, u.name AS actor, a.resource_id AS "resourceId", a.created_at AS "createdAt"
           FROM audit_logs a JOIN users u ON u.id = a.actor_id WHERE a.project_id = $1
@@ -88,8 +106,26 @@ export class OperationsService {
             OR (t.event_type = 'task.status_changed' AND t.payload ? 'workerId')
           )
          ) activity ORDER BY "createdAt" DESC, id DESC LIMIT 25`, [projectId]) : null,
+      canManage ? this.db.pool.query<ModelRate>(
+        `SELECT ${rateFields} FROM project_model_rates WHERE project_id = $1 ORDER BY model`, [projectId]) : null,
     ]);
-    return { usage: usage.rows, audit: audit?.rows ?? null };
+    return { usage: usage.rows, audit: audit?.rows ?? null, rates: rates?.rows ?? null };
+  }
+
+  async saveRate(actor: Account, projectId: string, model: string, body: unknown) {
+    if (!/^[\w.-]{1,100}$/.test(model)) throw new BadRequestException('Invalid model identifier');
+    const input = objectInput(body);
+    const rates = [rateInput(input.inputUsdPerMillion), rateInput(input.cachedInputUsdPerMillion), rateInput(input.outputUsdPerMillion)];
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [{ id, ...saved }] } = await client.query<ModelRate & { id: string }>(
+        `INSERT INTO project_model_rates (project_id, model, input_usd, cached_input_usd, output_usd)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (project_id, model) DO UPDATE
+         SET input_usd = EXCLUDED.input_usd, cached_input_usd = EXCLUDED.cached_input_usd, output_usd = EXCLUDED.output_usd
+         RETURNING id, ${rateFields}`, [projectId, model, ...rates]);
+      await this.projects.audit(client, actor.id, projectId, 'operations.model_rate_updated', id);
+      return saved;
+    });
   }
 }
 
@@ -106,5 +142,11 @@ export class OperationsController {
   @Get('overview')
   overview(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string) {
     return this.operations.overview(actor, projectId);
+  }
+
+  @Put('rates/:model')
+  saveRate(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('model') model: string, @Body() body: unknown) {
+    return this.operations.saveRate(actor, projectId, model, body);
   }
 }

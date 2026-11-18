@@ -70,6 +70,19 @@ export async function updateProject(form: FormData) {
   redirect(query);
 }
 
+export async function saveModelRate(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const model = String(form.get('model') ?? '').trim();
+  const target = `${query}&section=operations`;
+  if (!/^[\w.-]{1,100}$/.test(model)) redirect(`${target}&issue=model-rate#operations`);
+  const response = await execute(`${endpoint}/operations/rates/${encodeURIComponent(model)}`, { method: 'PUT', body: JSON.stringify({
+    inputUsdPerMillion: form.get('inputUsdPerMillion'), cachedInputUsdPerMillion: form.get('cachedInputUsdPerMillion'),
+    outputUsdPerMillion: form.get('outputUsdPerMillion'),
+  }) });
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'model-rate')}#operations`);
+  redirect(`${target}#operations`);
+}
+
 export async function archiveProject(form: FormData) {
   const { query, endpoint } = projectPath(form);
   const response = await execute(`${endpoint}/archive`, { method: 'POST' });
@@ -247,7 +260,7 @@ export async function transitionTask(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
   const response = await execute(`${endpoint}/transition`, {
-    method: 'POST', body: JSON.stringify({ status: form.get('status') }),
+    method: 'POST', body: JSON.stringify({ status: form.get('status'), developerRole: form.get('developerRole') || null }),
   });
   if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
   redirect(`${query}#task-detail`);

@@ -16,6 +16,14 @@ export interface ModelUsageRow {
   inputTokens: string;
   cachedInputTokens: string;
   outputTokens: string;
+  estimatedUsd: string | null;
+}
+
+export interface ModelRate {
+  model: string;
+  inputUsdPerMillion: string;
+  cachedInputUsdPerMillion: string;
+  outputUsdPerMillion: string;
 }
 
 export interface ProjectAuditEntry {
@@ -29,6 +37,7 @@ export interface ProjectAuditEntry {
 export interface ProjectOperations {
   usage: ModelUsageRow[];
   audit: ProjectAuditEntry[] | null;
+  rates: ModelRate[] | null;
 }
 
 export interface ProjectOverview {

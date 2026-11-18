@@ -1,6 +1,6 @@
 import Link from 'next/link';
-import { canTransitionTask, taskPriorities, type Project, type RepositoryBinding, type Task,
-  type AgentPlan, type ProjectRequirement, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
+import { agentRoleLabels, canTransitionTask, developerRoles, taskPriorities, type Project, type RepositoryBinding, type Task,
+  type AgentPlan, type AgentRegistry, type ProjectRequirement, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
 import { archiveTask, registerRequirement, retireRequirement, saveTask, startAgentPlan, transitionTask } from './actions';
 import { PlanProgress } from './agents';
 import { read } from './api-client';
@@ -79,6 +79,9 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
   const manageRequirements = project.role === 'owner' && project.status === 'active';
   const plan = planning?.plan;
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
+  const chooseDeveloper = manageRequirements && task?.status === 'WAITING_APPROVAL' && plan?.state !== 'completed';
+  const registry = chooseDeveloper ? await read<AgentRegistry>(`/projects/${project.id}/agent-registry`) : null;
+  const developers = developerRoles.filter((role) => registry?.agents.some((agent) => agent.role === role && agent.enabled));
   const boundRepository = repositories?.find(({ id }) => id === task?.repositoryId);
   const taskLink = (id: string) => `/?project=${project.id}&task=${id}#task-detail`;
   const labels = new Map(tasks.map(({ id, code }) => [id, code]));
@@ -140,6 +143,7 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
       {task && <article id="task-detail" key={task.id}>
         <h3>{task.code} · {task.title}</h3>
         <p className="muted">{task.priority} · {statusLabels[task.status]}{task.archivedAt && ' · 已归档'}</p>
+        {task.developer && <p>责任 Agent · {agentRoleLabels[task.developer.role]} · v{task.developer.version}</p>}
         <p className="description">{task.description}</p>
         {task.acceptanceCriteria.length > 0 && <>
           <h4>验收条件</h4><ul>{task.acceptanceCriteria.map((criterion, i) => <li key={i}>{criterion}</li>)}</ul>
@@ -157,8 +161,15 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
             {taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
               && (!managedPlan || status === 'CANCELLED')
               && (!ownerOnly || project.role === 'owner')).map(({ status, label }) => (
-              <form action={transitionTask} key={status}>
-                {taskIdentity}<button name="status" value={status}>{label}</button>
+              <form action={transitionTask} key={status} className={status === 'READY' && chooseDeveloper ? 'fields' : undefined}>
+                {taskIdentity}
+                {status === 'READY' && chooseDeveloper && (
+                  developers.length ? <label>责任 Agent<select name="developerRole" defaultValue={developers.includes('BACKEND_DEVELOPER')
+                    ? 'BACKEND_DEVELOPER' : developers[0]}>
+                    {developers.map((role) => <option key={role} value={role}>{agentRoleLabels[role]}</option>)}
+                  </select></label> : <p>请先启用开发 Agent。</p>
+                )}
+                <button name="status" value={status} disabled={status === 'READY' && chooseDeveloper && !developers.length}>{label}</button>
               </form>
             ))}
           </div>}

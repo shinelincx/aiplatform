@@ -2,17 +2,17 @@ export type { Account, GitHubInstallation, GitHubRepository, Project, ProjectMem
   ProjectRequirement, RepositoryBinding, RequirementContent, Session } from './projects';
 export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
-export { agentRoleLabels, planningRoles } from './agents';
+export { agentRoleLabels, developerRoles, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
   DirectorPlan, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, SkillVersion } from './agents';
 export { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerMaxPayloadBytes, workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerMessageType, WorkerRecovery, WorkerReport } from './workers';
-export type { ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
+export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
 export { canRepair, checkFailureStatuses, maxVerificationAttempts, parseCheckPlan } from './verification';
 export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
-export type { ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
+export type { ModelRate, ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
 
 export interface ApiHealth {
   service: 'ado-api';

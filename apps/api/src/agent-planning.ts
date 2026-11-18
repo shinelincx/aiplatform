@@ -3,7 +3,7 @@ import {
   type OnApplicationBootstrap, type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
+import { developerRoles, isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
   type ArchitecturePlan, type ModelUsage, type ProductPlan, type ProjectRequirement } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { AgentRegistryService } from './agent-registry';
@@ -14,7 +14,6 @@ import { PLANNING_MODEL, validatePlanningOutput, type PlanningModel } from './pl
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
 
-const developerRoles = ['FRONTEND_DEVELOPER', 'BACKEND_DEVELOPER'] as const;
 const planFields = `task_id AS "taskId", project_id AS "projectId", state, input, assignments, steps, error,
   lease_id AS "leaseId"`;
 
