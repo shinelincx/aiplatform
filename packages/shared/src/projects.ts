@@ -46,6 +46,7 @@ export interface ProjectRequirement extends RequirementContent {
 export interface GitHubInstallation {
   id: number;
   account: string;
+  canPublish: boolean;
 }
 
 export interface GitHubRepository {

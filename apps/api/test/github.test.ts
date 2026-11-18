@@ -23,7 +23,13 @@ it('lists authorized repositories and narrows the branch token to one repository
     .mockResolvedValueOnce(Response.json({ token: 'pull-read' }))
     .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 42 } } }))
     .mockResolvedValueOnce(Response.json({ token: 'pull-read' }))
-    .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 43 } } }));
+    .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 43 } } }))
+    .mockResolvedValueOnce(Response.json([
+      { id: 7, account: { login: 'org' }, suspended_at: null, permissions: { contents: 'write', pull_requests: 'write' } },
+      { id: 8, account: { login: 'read-only' }, suspended_at: null, permissions: { contents: 'write', pull_requests: 'read' } },
+      { id: 9, account: { login: 'suspended' }, suspended_at: '2026-01-01T00:00:00Z',
+        permissions: { contents: 'write', pull_requests: 'write' } },
+    ]));
   vi.stubGlobal('fetch', mock);
 
   const github = new GitHubApp();
@@ -52,6 +58,10 @@ it('lists authorized repositories and narrows the branch token to one repository
   expect(mock.mock.calls[5][0]).toBe('https://api.github.com/repos/org/project/pulls/13');
   expect(mock.mock.calls[5][1]?.method).toBe('GET');
   expect(new Headers(mock.mock.calls[5][1]?.headers).get('Authorization')).toBe('Bearer pull-read');
+  expect(await github.installations()).toEqual([
+    { id: 7, account: 'org', canPublish: true },
+    { id: 8, account: 'read-only', canPublish: false },
+  ]);
 });
 
 it('requests delivery-only permissions and recovers a draft creation after a lost response', async () => {

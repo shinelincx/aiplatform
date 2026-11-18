@@ -13,6 +13,7 @@ interface InstallationResponse {
   id: number;
   account: { login: string } | null;
   suspended_at: string | null;
+  permissions?: { contents?: string; pull_requests?: string };
 }
 
 interface RepositoryResponse {
@@ -98,7 +99,10 @@ export class GitHubApp {
       );
       for (const item of data) {
         if (item.account && !item.suspended_at) {
-          results.push({ id: item.id, account: item.account.login });
+          results.push({
+            id: item.id, account: item.account.login,
+            canPublish: item.permissions?.contents === 'write' && item.permissions?.pull_requests === 'write',
+          });
         }
       }
       if (!hasNextPage) return results;

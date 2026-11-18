@@ -156,13 +156,15 @@ WEB_PORT=23100 API_PORT=23101 POSTGRES_PORT=25432 REDIS_PORT=26379 S3_PORT=29000
 
 ## 试点验收
 
-试点验收命令会检查 Fitbest 和 ADO 的仓库绑定、模型配置、Worker 及需求来源。
+试点开始前，用拥有两个项目的管理员账号运行预检。
 
 ```sh
-node --env-file=.env scripts/verify-pilots.mjs
+node --env-file=.env scripts/verify-pilots.mjs --preflight
 ```
 
-有实际试点任务后，依次传入 Fitbest 和 ADO 的任务编号。脚本会核对规划、人工审批、Codex 事件、自动检查、QA、补丁摘要、GitHub 合并提交和对应 PR 的 GitHub Actions 运行。Fitbest 需要通过前端、浏览器及数据库联调步骤，ADO 需要通过 `checks` 和 `compose` 作业及备份恢复步骤。失败项会逐条报告并返回非零退出码。
+预检会核对仓库绑定、GitHub App 安装和写权限、自动检查和草稿 PR 配置、Agent 岗位、模型配置以及 Fitbest 批准的需求。两个项目都须有能够运行各自检查并归档补丁的在线 Worker，合计至少两台不同 Worker。[GitHub App 安装权限](https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app)
+
+有实际交付记录后，依次传入 Fitbest 和 ADO 的任务编号。脚本会核对规划、人工审批、Codex 事件、自动检查、QA、补丁摘要、自动排队的草稿 PR、GitHub 合并提交和 PR 对应的 GitHub Actions 运行。Fitbest 需要通过前端、浏览器及数据库联调步骤，ADO 需要通过 `checks` 和 `compose` 作业及备份恢复步骤。两种模式都逐条报告失败项并返回非零退出码。
 
 可使用 `ADO_VERIFY_EMAIL` 和 `ADO_VERIFY_PASSWORD` 指定项目所有者账号。私有仓库可设置具备 `Pull requests: Read` 和 `Actions: Read` 权限的 `ADO_VERIFY_GITHUB_TOKEN`。[GitHub PR 查询](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request) · [GitHub Actions 运行查询](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)
 
