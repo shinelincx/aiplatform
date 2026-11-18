@@ -89,6 +89,15 @@ export class ProjectsService {
       const project = await this.access(actor.id, projectId, { owner: true }, client);
       if (project.status === 'archived') return;
       await client.query("UPDATE projects SET status = 'archived', updated_at = now() WHERE id = $1", [projectId]);
+      await client.query(
+        `WITH cancelled AS (
+          UPDATE task_agent_plans SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL,
+            error = NULL, updated_at = now()
+          WHERE project_id = $1 AND state IN ('queued','running','failed') RETURNING project_id, task_id
+         )
+         INSERT INTO task_events (project_id, task_id, event_type, payload)
+         SELECT project_id, task_id, 'agent.plan_cancelled', jsonb_build_object('actorId', $2::uuid) FROM cancelled`,
+        [projectId, actor.id]);
       await this.audit(client, actor.id, projectId, 'project.archived', projectId);
     });
   }

@@ -1,5 +1,6 @@
 import { checkApiHealth, type Account, type Project, type ProjectMember } from '@ado/shared';
 import { login, logout } from './actions';
+import { Agents } from './agents';
 import { read } from './api-client';
 import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
 import { Repositories } from './repositories';
@@ -24,6 +25,9 @@ const issues: Record<string, string> = {
   'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
+  'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
+  'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
+  'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
 };
 
 export default async function Home({ searchParams }: {
@@ -70,6 +74,7 @@ export default async function Home({ searchParams }: {
               {selected && <Repositories project={selected} installation={query.installation}
                 manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {selected && <Tasks project={selected} selectedId={query.task} />}
+              {selected && <Agents project={selected} />}
               {selected && <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {admin && <CreateAccount users={users ?? []} />}
             </div>

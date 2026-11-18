@@ -1,7 +1,8 @@
 import Link from 'next/link';
 import { canTransitionTask, taskPriorities, type Project, type RepositoryBinding, type Task,
-  type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
-import { archiveTask, saveTask, transitionTask } from './actions';
+  type AgentPlan, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
+import { archiveTask, saveTask, startAgentPlan, transitionTask } from './actions';
+import { PlanProgress } from './agents';
 import { read } from './api-client';
 import { Executions } from './executions';
 
@@ -68,11 +69,14 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
   const tasks = await read<Task[]>(path) ?? [];
   const selected = tasks.find(({ id }) => selectedId === id);
   const canWrite = project.status === 'active' && project.role !== 'viewer';
-  const [task, events, repositories] = await Promise.all([
+  const [task, events, repositories, planning] = await Promise.all([
     selected ? read<TaskDetail>(`${path}/${selected.id}`) : null,
     selected ? read<TaskEvent[]>(`${path}/${selected.id}/events`) : null,
     canWrite ? read<RepositoryBinding[]>(`/projects/${project.id}/repositories`) : null,
+    selected ? read<{ plan: AgentPlan | null }>(`${path}/${selected.id}/agent-plan`) : null,
   ]);
+  const plan = planning?.plan;
+  const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
   const taskLink = (id: string) => `/?project=${project.id}&task=${id}#task-detail`;
   const labels = new Map(tasks.map(({ id, code }) => [id, code]));
   const taskIdentity = task && <>
@@ -91,6 +95,16 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
           </Link>
         ))}
       </nav>
+      {canWrite && Boolean(repositories?.length) && <details><summary>用 Agent 规划需求</summary>
+        <form className="fields" action={startAgentPlan}>
+          <input type="hidden" name="projectId" value={project.id} />
+          <label>目标仓库<select name="repositoryId" required>
+            {repositories?.map(({ id, fullName }) => <option key={id} value={id}>{fullName}</option>)}
+          </select></label>
+          <label>需求<textarea name="request" maxLength={8000} required /></label>
+          <button>开始规划</button>
+        </form>
+      </details>}
       {canWrite && <details><summary>创建研发任务</summary>
         <TaskForm projectId={project.id} tasks={tasks} repositories={repositories ?? []} />
       </details>}
@@ -105,12 +119,14 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
         {task.dependencies.length > 0 && <p>前置任务 {task.dependencies.map((id) => (
           <Link key={id} href={taskLink(id)} className="task-link">{labels.get(id)}</Link>
         ))}</p>}
+        {plan && <PlanProgress projectId={project.id} plan={plan} canRetry={canWrite && task.status === 'PLANNING'} />}
         {canWrite && !task.archivedAt && <>
-          {editable.includes(task.status) && <details><summary>编辑任务</summary>
+          {!managedPlan && editable.includes(task.status) && <details><summary>编辑任务</summary>
             <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories ?? []} />
           </details>}
           {canManageStates.includes(task.status) && <div className="inline-fields">
             {taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
+              && (!managedPlan || status === 'CANCELLED')
               && (!ownerOnly || project.role === 'owner')).map(({ status, label }) => (
               <form action={transitionTask} key={status}>
                 {taskIdentity}<button name="status" value={status}>{label}</button>

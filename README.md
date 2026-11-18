@@ -51,6 +51,12 @@ npm run dev -w @ado/worker
 
 默认 API 地址为 `http://127.0.0.1:3101`，可用 `API_BASE_URL` 覆盖。远程 Worker 使用 HTTPS 或 WSS 地址，由提供 TLS 的代理转发 `/workers/ws`。注册后可在项目工作台看到平台、架构和在线状态。凭证有效期为 8 小时，更新凭证会使旧凭证失效。项目所有者可撤回该项目的授权。
 
+## Agent 规划与角色配置
+
+在 `.env` 设置 `ADO_AGENT_API_KEY` 和支持 Structured Outputs 的 `ADO_AGENT_MODEL`，再重启 API。项目成员可在“用 Agent 规划需求”选择项目仓库并输入需求。控制面将需求和仓库标识发给 OpenAI Responses API，由项目总监、产品经理和架构师依次整理范围、验收条件、实施步骤与风险。任务工作台会保留各阶段结果。失败时可从失败阶段重试，项目所有者审批后才可派发。
+
+项目所有者可在“Agent 与 Skill”启停角色、发布和切换 Agent 版本，以及将 Skill 的指定版本关联到 Agent。规划开始时固定角色、模型和 Skill 内容，已批准的实施方案与开发者配置会随任务交给 Worker。规划角色在控制面只生成结构化文本。开发角色配置使用 Worker 已有的 Codex 执行权限。
+
 ## 执行已审批任务
 
 在非 root Linux 或 WSL 上使用 Node.js 24、Git 和 Codex CLI `0.170.0`。从 npm 安装依赖后，为 Worker 设置以下环境变量。
@@ -105,4 +111,4 @@ npm run check
 | `@ado/worker` | `apps/worker` | Node.js Worker 注册、心跳、重连和连通检查 |
 | `@ado/shared` | `packages/shared` | Web、API、Worker 共用的数据类型和协议 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Worker 注册、派发、事件重放、检查与审核、补丁归档和签名 Webhook。Git 交付测试使用本地仓库，GitHub API 和 Worker 协议测试使用夹具。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Agent 规划与重试、Worker 注册、派发、事件重放、检查与审核、补丁归档和签名 Webhook。Git 交付测试使用本地仓库，规划模型、GitHub API 和 Worker 协议测试使用夹具。

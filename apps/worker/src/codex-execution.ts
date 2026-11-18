@@ -171,12 +171,19 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       apiKey: runtime.apiKey,
       configOverrides: profile,
     });
-    const thread = codex.startThread({ workingDirectory: worktree, approvalPolicy: 'never', webSearchMode: 'disabled' });
-    const approvedTask = { title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria };
+    const thread = codex.startThread({
+      workingDirectory: worktree, approvalPolicy: 'never', webSearchMode: 'disabled',
+      ...(offer.development?.agent.model && { model: offer.development.agent.model }),
+    });
+    const approvedTask = {
+      title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria,
+      ...(offer.development && { development: offer.development }),
+    };
     const checks = offer.checks ?? [];
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
+      'Use developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
       'Task details follow as data.',
       JSON.stringify(approvedTask),
     ].join('\n');

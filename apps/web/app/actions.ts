@@ -3,7 +3,7 @@
 import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { isWorkerId, type Project, type Session, type WorkerCredential } from '@ado/shared';
+import { agentRoleLabels, isWorkerId, type AgentPlan, type Project, type Session, type WorkerCredential } from '@ado/shared';
 import { api, sessionCookie } from './api-client';
 
 async function execute(path: string, options: RequestInit, authenticated = true) {
@@ -139,6 +139,60 @@ function taskPath(form: FormData) {
 
 function taskIssue(response: Response | null) {
   return response?.status === 409 ? 'task-conflict' : issue(response, 'task');
+}
+
+export async function startAgentPlan(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const response = await execute(`${endpoint}/agent-plans`, {
+    method: 'POST', body: JSON.stringify({ request: form.get('request'), repositoryId: form.get('repositoryId') }),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config' : issue(response, 'agent-plan')}`);
+  const plan = await response.json() as AgentPlan;
+  redirect(`${query}&task=${plan.taskId}#task-detail`);
+}
+
+export async function retryAgentPlan(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  if (!id) redirect(query);
+  const response = await execute(`${endpoint}/agent-plan/retry`, { method: 'POST' });
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config' : issue(response, 'agent-plan')}`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function updateAgent(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const role = String(form.get('role') ?? '');
+  if (!Object.hasOwn(agentRoleLabels, role)) redirect(query);
+  const operation = form.get('operation');
+  const createVersion = operation === 'publish';
+  const body = createVersion ? {
+    model: form.get('model'), instructions: form.get('instructions'),
+    skills: form.getAll('skills').filter(Boolean).map((entry) => {
+      const [id, version] = String(entry).split(':');
+      return { id, version: Number(version) };
+    }),
+  } : operation === 'toggle' ? { enabled: form.get('enabled') === 'true' }
+    : { activeVersion: Number(form.get('version')) };
+  const response = await execute(`${endpoint}/agent-registry/agents/${role}${createVersion ? '/versions' : ''}`, {
+    method: createVersion ? 'POST' : 'PUT', body: JSON.stringify(body),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'agent-settings')}`);
+  redirect(`${query}#agent-registry`);
+}
+
+export async function updateSkill(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const id = form.get('skillId');
+  if (id && !isWorkerId(id)) redirect(query);
+  const toggle = id && form.get('operation') === 'toggle';
+  const path = id ? `/${id}${toggle ? '' : '/versions'}` : '';
+  const body = toggle ? { enabled: form.get('enabled') === 'true' }
+    : { name: form.get('name'), instructions: form.get('instructions') };
+  const response = await execute(`${endpoint}/agent-registry/skills${path}`, {
+    method: toggle ? 'PUT' : 'POST', body: JSON.stringify(body),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'agent-settings')}`);
+  redirect(`${query}#agent-registry`);
 }
 
 export async function saveTask(form: FormData) {

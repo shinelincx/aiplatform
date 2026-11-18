@@ -94,6 +94,9 @@ export class TasksService {
         if (existing && (existing.archivedAt || !editable.has(existing.status))) {
           throw new ConflictException('Task cannot be edited in its current state');
         }
+        if (existing && await this.hasActiveAgentPlan(client, existing)) {
+          throw new ConflictException('An Agent plan is already managing this task');
+        }
         const input = taskInput(body, existing);
         await this.validateLinks(client, projectId, input, id);
         const values = [input.title, input.description, input.priority, JSON.stringify(input.acceptanceCriteria),
@@ -169,6 +172,16 @@ export class TasksService {
       if (task.archivedAt || running.has(task.status) || !canTransitionTask(task.status, to)) {
         throw new ConflictException('Invalid task transition');
       }
+      if (to !== 'CANCELLED' && await this.hasActiveAgentPlan(client, task)) {
+        throw new ConflictException('An Agent plan is already managing this task');
+      }
+      if (to === 'CANCELLED' || to === 'PLANNING') {
+        const cancelled = await client.query(
+          `UPDATE task_agent_plans SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL, error = NULL,
+           updated_at = now() WHERE project_id = $1 AND task_id = $2 AND state <> 'cancelled'`,
+          [projectId, id]);
+        if (cancelled.rowCount) await this.event(client, task, 'agent.plan_cancelled', { actorId: actor.id });
+      }
       if (to === 'WAITING_APPROVAL' && task.acceptanceCriteria.length === 0) {
         throw new ConflictException('Acceptance criteria are required before review');
       }
@@ -213,6 +226,13 @@ export class TasksService {
   async event(client: PoolClient, task: Task, eventType: string, payload: object) {
     await client.query('INSERT INTO task_events (project_id, task_id, event_type, payload) VALUES ($1,$2,$3,$4)',
       [task.projectId, task.id, eventType, payload]);
+  }
+
+  private async hasActiveAgentPlan(client: PoolClient, task: Task) {
+    if (task.status !== 'PLANNING') return false;
+    const plan = await client.query(
+      "SELECT 1 FROM task_agent_plans WHERE task_id = $1 AND state IN ('queued','running','failed')", [task.id]);
+    return Boolean(plan.rowCount);
   }
 }
 

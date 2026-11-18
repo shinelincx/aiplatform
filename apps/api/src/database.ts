@@ -191,6 +191,55 @@ const migrations = [
     id uuid PRIMARY KEY,
     received_at timestamptz NOT NULL DEFAULT now()
   );`,
+  `CREATE TABLE project_agent_settings (
+    project_id uuid NOT NULL REFERENCES projects(id),
+    role text NOT NULL CHECK (role IN ('PROJECT_DIRECTOR','PRODUCT_MANAGER','ARCHITECT','UI_UX_DESIGNER',
+      'FRONTEND_DEVELOPER','BACKEND_DEVELOPER','QA_ENGINEER','RELEASE_ENGINEER')),
+    enabled boolean NOT NULL,
+    active_version integer NOT NULL CHECK (active_version > 0),
+    PRIMARY KEY (project_id, role)
+  );
+  CREATE TABLE project_agent_versions (
+    project_id uuid NOT NULL,
+    role text NOT NULL,
+    version integer NOT NULL CHECK (version > 1),
+    model varchar(100) NOT NULL,
+    instructions text NOT NULL,
+    skills jsonb NOT NULL,
+    PRIMARY KEY (project_id, role, version),
+    FOREIGN KEY (project_id, role) REFERENCES project_agent_settings(project_id, role)
+  );
+  CREATE TABLE project_skills (
+    project_id uuid NOT NULL REFERENCES projects(id),
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    name varchar(100) NOT NULL,
+    enabled boolean NOT NULL DEFAULT true,
+    PRIMARY KEY (project_id, id),
+    UNIQUE (project_id, name)
+  );
+  CREATE TABLE project_skill_versions (
+    project_id uuid NOT NULL,
+    skill_id uuid NOT NULL,
+    version integer NOT NULL CHECK (version > 0),
+    instructions text NOT NULL,
+    PRIMARY KEY (project_id, skill_id, version),
+    FOREIGN KEY (project_id, skill_id) REFERENCES project_skills(project_id, id)
+  );
+  CREATE TABLE task_agent_plans (
+    task_id uuid PRIMARY KEY,
+    project_id uuid NOT NULL,
+    state text NOT NULL CHECK (state IN ('queued','running','failed','completed','cancelled')),
+    input jsonb NOT NULL,
+    assignments jsonb NOT NULL,
+    steps jsonb NOT NULL DEFAULT '[]',
+    lease_id uuid,
+    lease_expires_at timestamptz,
+    error text,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id)
+  );
+  CREATE INDEX task_agent_plan_queue ON task_agent_plans (state, updated_at);
+  ALTER TABLE execution_runs ADD COLUMN developer_assignment jsonb;`,
 ];
 
 @Injectable()

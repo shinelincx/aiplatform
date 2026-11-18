@@ -1,5 +1,11 @@
 import type { ExecutionReview, VerificationCheck, VerificationReport } from './verification';
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
+import type { AgentAssignment, ArchitecturePlan } from './agents';
+
+export interface DevelopmentHandoff {
+  agent: AgentAssignment;
+  plan: ArchitecturePlan;
+}
 
 export interface ExecutionOffer {
   id: string;
@@ -13,6 +19,7 @@ export interface ExecutionOffer {
   acceptanceCriteria: string[];
   checks?: VerificationCheck[];
   archivePatch?: boolean;
+  development?: DevelopmentHandoff | null;
 }
 
 export type ExecutionState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';

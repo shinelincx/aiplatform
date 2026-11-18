@@ -6,7 +6,7 @@ import {
 import type { PoolClient } from 'pg';
 import {
   canRepair, canTransitionTask, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account, type CheckResult,
-  type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
+  type AgentAssignment, type ArchitecturePlan, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
   type VerificationCheck, type VerificationReport,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -181,12 +181,17 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         await this.move(client, task, 'RETRYING', { actorId: actor.id });
         task.status = 'RETRYING';
       }
+      const { rows: [planned] } = await client.query<{ plan: ArchitecturePlan; agent: AgentAssignment }>(
+        `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent
+         FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state = 'completed'`, [projectId, taskId]);
+      if (planned && !planned.agent) throw new ConflictException('Approved developer assignment is missing');
       const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch)
-         SELECT $1, $2, id, check_plan, default_branch FROM repositories WHERE project_id = $1 AND id = $3
-         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`, [projectId, taskId, task.repositoryId],
+        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment)
+         SELECT $1, $2, id, check_plan, default_branch, $4 FROM repositories WHERE project_id = $1 AND id = $3
+         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`, [projectId, taskId, task.repositoryId, planned ?? null],
       );
-      await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id });
+      await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
+        ...(planned && { developer: planned.agent.role, developerVersion: planned.agent.version }) });
       return run;
     });
   }
@@ -273,7 +278,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         `SELECT r.id, r.task_id AS "taskId", r.project_id AS "projectId", t.title, t.description,
            t.acceptance_criteria AS "acceptanceCriteria", g.owner || '/' || g.repo_name AS repository,
            COALESCE(r.source_branch, g.default_branch) AS "defaultBranch", g.installation_id::text AS "installationId",
-           g.github_repository_id::text AS "githubId", r.check_plan AS checks
+           g.github_repository_id::text AS "githubId", r.check_plan AS checks, r.developer_assignment AS development
          FROM execution_runs r
          JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = $1
          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
