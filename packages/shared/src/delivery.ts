@@ -13,5 +13,6 @@ export interface ExecutionDelivery {
   pullNumber: number | null;
   pullUrl: string | null;
   pullState: 'open' | 'closed' | 'merged' | 'changed' | null;
+  commitSha?: string | null;
   error: string | null;
 }

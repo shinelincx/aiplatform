@@ -159,7 +159,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
            FROM execution_qa q WHERE q.run_id = r.id) AS qa,
          (SELECT jsonb_build_object('state', d.state, 'branch', d.branch, 'baseBranch', d.base_branch,
            'pullNumber', d.pull_number, 'pullUrl', d.pull_url, 'pullState', d.pull_state, 'error', d.error,
-           'configured', $3::boolean)
+           'configured', $3::boolean, 'commitSha', d.commit_sha)
            FROM execution_deliveries d WHERE d.run_id = r.id) AS delivery
        FROM execution_runs r WHERE project_id = $1 AND task_id = $2
        ORDER BY created_at DESC, id DESC LIMIT 20`, [projectId, taskId, this.github.configured],

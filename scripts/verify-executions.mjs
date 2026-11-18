@@ -478,6 +478,7 @@ try {
     assert.equal(publication.state, 'published', publication.error ?? 'Publication did not finish');
     assert.equal(pullCalls, 1);
     const sha = git('rev-parse', branch).trim();
+    assert.equal(publication.commitSha, sha);
     assert.equal(git('rev-parse', 'main').trim(), baseline);
     const webhook = async (kind, event, id = randomUUID(), valid = true) => {
       const body = JSON.stringify({
@@ -536,6 +537,7 @@ try {
     }
     assert.equal(draft?.state, 'published', draft?.error ?? 'Approval did not publish the draft pull request');
     assert.equal(draft.pullNumber, 2);
+    assert.equal(draft.commitSha, git('rev-parse', `ado/${autoRun.id}`).trim());
     assert.equal(pullCalls, 2);
     const autoEvents = (await request(`${automatic.path}/events`, { token }))
       .filter(({ eventType }) => eventType === 'task.delivery_queued');

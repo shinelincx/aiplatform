@@ -126,6 +126,16 @@ WEB_PORT=23100 API_PORT=23101 POSTGRES_PORT=25432 REDIS_PORT=26379 S3_PORT=29000
 
 恢复使用同一版 Compose 配置和对象存储凭据，并要求新的 Compose 项目名。恢复实例首次启动时禁用外部模型和 GitHub 集成。成功后可以用备份中的账号登录，核对项目、任务和受测补丁。需要启用集成时，请为恢复实例单独配置。
 
+## 试点验收
+
+试点验收命令会检查 Fitbest 和 ADO 的仓库绑定、模型配置、Worker 及需求来源。
+
+```sh
+node --env-file=.env scripts/verify-pilots.mjs
+```
+
+有实际试点任务后，依次传入 Fitbest 和 ADO 的任务编号，脚本会核对规划、人工审批、Codex 事件、自动检查、QA、补丁摘要和 GitHub 合并提交。可使用 `ADO_VERIFY_EMAIL` 和 `ADO_VERIFY_PASSWORD` 指定项目所有者账号。私有仓库可设置具备 PR 读取权限的 `ADO_VERIFY_GITHUB_TOKEN`。失败项会逐条报告并返回非零退出码。[GitHub PR 查询权限](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)
+
 ## Monorepo 与 CI
 
 使用 Node.js 24 和 npm workspaces，在仓库根目录安装并验证所有包。
