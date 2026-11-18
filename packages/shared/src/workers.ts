@@ -2,7 +2,10 @@ export const workerProtocolVersion = 1;
 export const workerHeartbeatMs = 15_000;
 export const workerOfflineMs = 3 * workerHeartbeatMs;
 
-export const workerMessageTypes = ['WORKER_REGISTER', 'REGISTER_ACK', 'WORKER_HEARTBEAT', 'HEARTBEAT_ACK'] as const;
+export const workerMessageTypes = [
+  'WORKER_REGISTER', 'REGISTER_ACK', 'WORKER_HEARTBEAT', 'HEARTBEAT_ACK',
+  'WORKER_CLAIM', 'CLAIM_ACK', 'EXECUTION_EVENT', 'EXECUTION_ACK',
+] as const;
 export type WorkerMessageType = (typeof workerMessageTypes)[number];
 
 export interface WorkerEnvelope {
@@ -45,6 +48,7 @@ export interface WorkerCapabilities {
   diskFreeBytes: number;
   gitVersion: string | null;
   dockerVersion: string | null;
+  codexVersion?: string;
 }
 
 export interface WorkerReport {

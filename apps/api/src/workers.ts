@@ -50,6 +50,7 @@ export function parseCapabilities(payload: unknown): WorkerCapabilities {
     diskFreeBytes: positive('diskFreeBytes', 0),
     gitVersion: version('gitVersion'),
     dockerVersion: version('dockerVersion'),
+    ...(input.codexVersion !== undefined && { codexVersion: textInput(input.codexVersion, 'codexVersion', 40) }),
   };
 }
 

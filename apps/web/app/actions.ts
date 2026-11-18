@@ -158,6 +158,23 @@ export async function archiveTask(form: FormData) {
   redirect(`${query}#task-detail`);
 }
 
+export async function startExecution(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  if (!id) redirect(query);
+  const response = await execute(`${endpoint}/executions`, { method: 'POST' });
+  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function stopExecution(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/cancel`, { method: 'POST' });
+  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  redirect(`${query}#task-detail`);
+}
+
 export interface WorkerAccessState {
   error?: string;
   notice?: string;

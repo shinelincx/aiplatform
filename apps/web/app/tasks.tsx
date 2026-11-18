@@ -3,6 +3,7 @@ import { canTransitionTask, taskPriorities, type Project, type RepositoryBinding
   type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
 import { archiveTask, saveTask, transitionTask } from './actions';
 import { read } from './api-client';
+import { Executions } from './executions';
 
 const statusLabels: Record<TaskStatus, string> = {
   CREATED: '草稿', PLANNING: '规划中', WAITING_APPROVAL: '待审批', READY: '待派发', QUEUED: '排队中',
@@ -119,6 +120,7 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
           {project.role === 'owner' && ['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status) &&
             <form action={archiveTask} className="repository-form">{taskIdentity}<button className="secondary">归档任务</button></form>}
         </>}
+        <Executions project={project} task={task} />
         <details>
           <summary>任务记录</summary>
           <ol className="members">

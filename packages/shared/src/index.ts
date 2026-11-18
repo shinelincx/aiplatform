@@ -4,6 +4,7 @@ export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
 export { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerMessageType, WorkerReport } from './workers';
+export type { ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
 
 export interface ApiHealth {
   service: 'ado-api';

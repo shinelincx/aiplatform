@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ado/shared": "0.1.0",
+    "@openai/codex-sdk": "0.170.0",
     "ws": "^8.23.0"
   },
   "devDependencies": {

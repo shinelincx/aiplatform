@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import { WebSocket } from 'ws';
 import { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerProtocolVersion,
   type WorkerCapabilities, type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
+import { codexVersion, configureExecution, verifyCodexLogin } from './codex-execution';
+import { WorkerJobs } from './jobs';
 
 const exec = promisify(execFile);
 const acknowledgementTimeoutMs = 10_000;
@@ -53,66 +55,92 @@ function gatewayUrl(baseUrl: string) {
 }
 
 function connect(url: URL, workerId: string, token: string,
-  capabilities: WorkerCapabilities, signal: AbortSignal) {
+  capabilities: WorkerCapabilities, signal: AbortSignal, jobs?: WorkerJobs) {
   return new Promise<{ registered: boolean; rejected: boolean }>((resolve) => {
     const socket = new WebSocket(url, {
       headers: { Authorization: `Bearer ${workerId}.${token}` },
       handshakeTimeout: acknowledgementTimeoutMs,
-      maxPayload: 8192,
+      maxPayload: 65536,
       perMessageDeflate: false,
     });
+    const connection = new AbortController();
     let registered = false;
-    let pendingId: string | undefined;
-    let acknowledgement: ReturnType<typeof setTimeout> | undefined;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let pending: { id: string; expected: WorkerMessageType; success: (payload: unknown) => void;
+      failure: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
     const stop = () => socket.terminate();
     const finish = (rejected: boolean) => {
-      clearTimeout(acknowledgement);
-      clearInterval(heartbeat);
+      connection.abort();
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.failure(new Error('Worker connection closed'));
+        pending = undefined;
+      }
       signal.removeEventListener('abort', stop);
       resolve({ registered, rejected });
     };
 
-    const send = (type: WorkerMessageType, payload: unknown) => {
-      if (socket.readyState !== WebSocket.OPEN || pendingId) return;
-      const message: WorkerEnvelope = {
-        message_id: randomUUID(),
-        worker_id: workerId,
-        timestamp: new Date().toISOString(),
-        message_type: type,
-        correlation_id: null,
-        payload,
-        protocol_version: workerProtocolVersion,
-      };
-      pendingId = message.message_id;
-      socket.send(JSON.stringify(message));
-      acknowledgement = setTimeout(stop, acknowledgementTimeoutMs);
+    const send = (type: WorkerMessageType, expected: WorkerMessageType, payload: unknown) => {
+      if (socket.readyState !== WebSocket.OPEN || pending) return Promise.reject(new Error('Worker connection unavailable'));
+      return new Promise<unknown>((success, failure) => {
+        const message: WorkerEnvelope = {
+          message_id: randomUUID(),
+          worker_id: workerId,
+          timestamp: new Date().toISOString(),
+          message_type: type,
+          correlation_id: null,
+          payload,
+          protocol_version: workerProtocolVersion,
+        };
+        pending = { id: message.message_id, expected, success, failure, timer: setTimeout(stop, acknowledgementTimeoutMs) };
+        socket.send(JSON.stringify(message));
+      });
     };
 
+    const operate = async () => {
+      const result = await send('WORKER_REGISTER', 'REGISTER_ACK', capabilities);
+      if (result !== null) throw new Error('Unexpected registration payload');
+      registered = true;
+      console.log(JSON.stringify({ service: 'ado-worker', event: 'registered', workerId, os: capabilities.os }));
+      let nextHeartbeat = Date.now() + workerHeartbeatMs;
+      while (!connection.signal.aborted) {
+        if (Date.now() >= nextHeartbeat) {
+          const lease = await send('WORKER_HEARTBEAT', 'HEARTBEAT_ACK', jobs?.runId ?? null);
+          if (jobs?.runId) {
+            if (lease && typeof lease === 'object' && 'stop' in lease && lease.stop === false) jobs.renew();
+            else jobs.cancel();
+          }
+          nextHeartbeat = Date.now() + workerHeartbeatMs;
+        }
+        if (jobs?.runId) {
+          await jobs.flush((event) => send('EXECUTION_EVENT', 'EXECUTION_ACK', event));
+        } else if (jobs) {
+          const offer = await send('WORKER_CLAIM', 'CLAIM_ACK', null);
+          if (offer !== null) jobs.start(offer);
+        }
+        await delay(jobs?.runId ? 250 : jobs ? 2000 : Math.max(1, nextHeartbeat - Date.now()),
+          undefined, { signal: connection.signal });
+      }
+    };
     signal.addEventListener('abort', stop, { once: true });
-    socket.on('error', () => socket.terminate());
+    socket.on('error', stop);
     socket.on('close', (code) => finish(code === 4001 || code === 1008));
     socket.on('unexpected-response', (request, response) => {
       response.resume();
       finish(response.statusCode === 401 || response.statusCode === 403 || response.statusCode === 404);
       request.destroy();
     });
-    socket.on('open', () => send('WORKER_REGISTER', capabilities));
+    socket.on('open', () => { void operate().catch(stop); });
     socket.on('message', (data, binary) => {
       const message = binary ? null : decodeWorkerMessage(data.toString());
-      const expected = registered ? 'HEARTBEAT_ACK' : 'REGISTER_ACK';
-      if (!pendingId || message?.correlation_id !== pendingId || message.message_type !== expected
-        || message.worker_id !== workerId || message.payload !== null) {
+      if (!pending || message?.correlation_id !== pending.id || message.message_type !== pending.expected
+        || message.worker_id !== workerId) {
         socket.close(1008, 'Invalid gateway acknowledgement');
         return;
       }
-      clearTimeout(acknowledgement);
-      pendingId = undefined;
-      if (!registered) {
-        registered = true;
-        console.log(JSON.stringify({ service: 'ado-worker', event: 'registered', workerId, os: capabilities.os }));
-        heartbeat = setInterval(() => send('WORKER_HEARTBEAT', null), workerHeartbeatMs);
-      }
+      const response = pending;
+      pending = undefined;
+      clearTimeout(response.timer);
+      response.success(message.payload);
     });
     if (signal.aborted) stop();
   });
@@ -124,15 +152,24 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   }
   const endpoint = gatewayUrl(baseUrl);
   const capabilities = await probe();
+  const runtime = await configureExecution();
+  if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
+  if (runtime) await verifyCodexLogin(runtime);
+  const jobs = runtime ? new WorkerJobs(runtime) : undefined;
+  if (jobs) capabilities.codexVersion = codexVersion;
   let retryMs = 500;
-  while (!signal.aborted) {
-    const { registered, rejected } = await connect(endpoint, workerId, token, capabilities, signal);
-    if (signal.aborted) break;
-    if (rejected) throw new Error('Worker credential or registration was rejected');
-    retryMs = registered ? 500 : Math.min(retryMs * 2, 30_000);
-    console.log(JSON.stringify({ service: 'ado-worker', event: 'reconnecting', retryMs }));
-    await delay(retryMs + Math.random() * 250, undefined, { signal }).catch((error) => {
-      if (!signal.aborted) throw error;
-    });
+  try {
+    while (!signal.aborted) {
+      const { registered, rejected } = await connect(endpoint, workerId, token, capabilities, signal, jobs);
+      if (signal.aborted) break;
+      if (rejected) throw new Error('Worker credential or registration was rejected');
+      retryMs = registered ? 500 : Math.min(retryMs * 2, 30_000);
+      console.log(JSON.stringify({ service: 'ado-worker', event: 'reconnecting', retryMs }));
+      await delay(retryMs + Math.random() * 250, undefined, { signal }).catch((error) => {
+        if (!signal.aborted) throw error;
+      });
+    }
+  } finally {
+    jobs?.cancel();
   }
 }

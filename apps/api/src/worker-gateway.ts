@@ -3,17 +3,21 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
-import { decodeWorkerMessage, workerOfflineMs, workerProtocolVersion,
+import { decodeWorkerMessage, isWorkerId, workerOfflineMs, workerProtocolVersion,
   type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
 import { parseCapabilities, parseWorkerCredentials, WorkersService, type WorkerIdentity } from './workers';
+import { ExecutionsService } from './executions';
 
 @Injectable()
 export class WorkerGateway implements OnModuleDestroy {
   private readonly log = new Logger(WorkerGateway.name);
-  private readonly gateway = new WebSocketServer({ noServer: true, maxPayload: 8192 });
+  private readonly gateway = new WebSocketServer({ noServer: true, maxPayload: 65536 });
   private server?: Server;
 
-  constructor(@Inject(WorkersService) private readonly workers: WorkersService) {}
+  constructor(
+    @Inject(WorkersService) private readonly workers: WorkersService,
+    @Inject(ExecutionsService) private readonly executions: ExecutionsService,
+  ) {}
 
   attach(server: Server) {
     this.server = server;
@@ -48,6 +52,7 @@ export class WorkerGateway implements OnModuleDestroy {
 
   private bind(socket: WebSocket, identity: WorkerIdentity) {
     const connectionId = randomUUID();
+    const lease = { ...identity, connectionId };
     let registered = false;
     let busy = false;
     const onIdle = () => socket.terminate();
@@ -83,7 +88,17 @@ export class WorkerGateway implements OnModuleDestroy {
         return;
       }
 
-      if (message.message_type !== 'WORKER_HEARTBEAT' || message.payload !== null) {
+      if (message.message_type === 'WORKER_CLAIM' && message.payload === null) {
+        const offer = await this.executions.claim(lease);
+        this.ack(socket, identity, message, 'CLAIM_ACK', offer);
+        return;
+      }
+      if (message.message_type === 'EXECUTION_EVENT') {
+        const result = await this.executions.record(lease, message.payload);
+        this.ack(socket, identity, message, 'EXECUTION_ACK', result);
+        return;
+      }
+      if (message.message_type !== 'WORKER_HEARTBEAT' || (message.payload !== null && !isWorkerId(message.payload))) {
         socket.close(1008, 'Invalid heartbeat');
         return;
       }
@@ -93,7 +108,9 @@ export class WorkerGateway implements OnModuleDestroy {
       }
       if (socket.readyState === WebSocket.OPEN) {
         idle.refresh();
-        this.ack(socket, identity, message, 'HEARTBEAT_ACK');
+        const payload = message.payload === null ? null
+          : { stop: !await this.executions.renew(lease, message.payload) };
+        this.ack(socket, identity, message, 'HEARTBEAT_ACK', payload);
       }
     };
 
@@ -115,14 +132,16 @@ export class WorkerGateway implements OnModuleDestroy {
     });
   }
 
-  private ack(socket: WebSocket, { workerId }: WorkerIdentity, request: WorkerEnvelope, messageType: WorkerMessageType) {
+  private ack(socket: WebSocket, { workerId }: WorkerIdentity, request: WorkerEnvelope,
+    messageType: WorkerMessageType, payload: unknown = null) {
+    if (socket.readyState !== WebSocket.OPEN) return;
     const response: WorkerEnvelope = {
       message_id: randomUUID(),
       worker_id: workerId,
       timestamp: new Date().toISOString(),
       message_type: messageType,
       correlation_id: request.message_id,
-      payload: null,
+      payload,
       protocol_version: workerProtocolVersion,
     };
     socket.send(JSON.stringify(response));

@@ -117,6 +117,33 @@ const migrations = [
     PRIMARY KEY (worker_id, project_id)
   );
   CREATE INDEX worker_projects_project_id ON worker_projects (project_id, worker_id);`,
+  `CREATE TABLE execution_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    worker_id uuid REFERENCES workers(id),
+    status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','succeeded','failed','cancelled','timed_out')),
+    cancel_requested boolean NOT NULL DEFAULT false,
+    lease_expires_at timestamptz,
+    thread_id text,
+    last_sequence integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz,
+    FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id),
+    FOREIGN KEY (project_id, repository_id) REFERENCES repositories(project_id, id)
+  );
+  CREATE UNIQUE INDEX execution_active_task ON execution_runs (task_id) WHERE status IN ('queued', 'running');
+  CREATE UNIQUE INDEX execution_active_worker ON execution_runs (worker_id) WHERE status = 'running';
+  CREATE INDEX execution_queue ON execution_runs (project_id, status, created_at);
+  CREATE TABLE execution_events (
+    run_id uuid NOT NULL REFERENCES execution_runs(id),
+    sequence integer NOT NULL CHECK (sequence > 0),
+    kind text NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, sequence)
+  );`,
 ];
 
 @Injectable()

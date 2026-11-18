@@ -1,6 +1,6 @@
 # ADO 研发平台
 
-Web 工作台支持登录、切换项目、管理成员、绑定 GitHub 仓库及维护研发任务。Worker 支持项目授权、注册、心跳和断线重连，任务派发和 Codex 执行仍在 M2 实现。
+Web 工作台支持登录、项目权限、仓库绑定、任务审批、派发和执行记录。Worker 支持项目授权、注册、心跳和断线重连。
 
 ## 启动开发环境
 
@@ -51,6 +51,21 @@ npm run dev -w @ado/worker
 
 默认 API 地址为 `http://127.0.0.1:3101`，可用 `API_BASE_URL` 覆盖。远程 Worker 使用 HTTPS 或 WSS 地址，由提供 TLS 的代理转发 `/workers/ws`。注册后可在项目工作台看到平台、架构和在线状态。凭证有效期为 8 小时，更新凭证会使旧凭证失效。项目所有者可撤回该项目的授权。
 
+## 执行已审批任务
+
+在非 root Linux 或 WSL 上使用 Node.js 24、Git 和 Codex CLI `0.170.0`。从 npm 安装依赖后，为 Worker 设置以下环境变量。
+
+| 变量 | 用途 |
+| --- | --- |
+| `ADO_EXECUTION_ROOT` | 专用工作目录的绝对路径，需预先创建 |
+| `ADO_CODEX_BIN` | Codex CLI 原生可执行文件的绝对路径 |
+| `ADO_CODEX_STATE_DIR` | 独立 Codex 状态目录的绝对路径，需预先创建，且位于工作目录之外 |
+| `ADO_CODEX_API_KEY` | 可选，设定后用于模型认证。也可通过 Codex CLI 在独立状态目录中登录 |
+
+Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实际 Git worktree 中验证隔离。状态目录使用默认配置。测试代码、密钥和其他项目文件应放在工作目录之外。生产部署可在独立 Worker 服务上设置 CPU、内存和磁盘配额。
+
+项目所有者可在已绑定仓库的任务通过审批后点击“派发任务”。PostgreSQL 保存队列、租约和有序事件。代码变更通过 SDK 生成，变更文件列表、补丁摘要和用量入库后进入“待测试”。补丁文件位于 Worker 工作目录的 `<runId>/changes.patch`。断线期间保留事件并在同一 Worker 进程重连后重发；未能恢复的运行会超时，由项目所有者决定是否重试。
+
 ## Monorepo 与 CI
 
 使用 Node.js 24 和 npm workspaces，在仓库根目录安装并验证所有包。
@@ -67,4 +82,4 @@ npm run check
 | `@ado/worker` | `apps/worker` | Node.js Worker 注册、心跳、重连和连通检查 |
 | `@ado/shared` | `packages/shared` | Web、API、Worker 共用的数据类型和协议 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 在 push、pull request 或手动触发时运行同一组检查，并从干净的 Compose 环境验证 Web 登录、会话撤销、项目隔离和 Worker 注册及重连。集成验证脚本会创建测试用户和项目，建议在独立 Compose 实例中执行。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Worker 注册及重连，以及派发、事件重放、取消、超时和重试。执行协议测试使用本地 Worker 消息夹具，不需要连接 GitHub 或模型服务。

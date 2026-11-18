@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import type { ApiHealth } from '@ado/shared';
 import { AuthController, AuthService, SessionGuard } from './auth';
 import { Database } from './database';
+import { ExecutionsController, ExecutionsService } from './executions';
 import { GitHubApp, RepositoriesController } from './github';
 import { ProjectsController, ProjectsService } from './projects';
 import { TasksController, TasksService } from './tasks';
@@ -19,8 +20,10 @@ class HealthController {
 }
 
 @Module({
-  controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController, WorkersController],
-  providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService, WorkersService, WorkerGateway],
+  controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController, WorkersController,
+    ExecutionsController],
+  providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService, WorkersService, WorkerGateway,
+    ExecutionsService],
 })
 class AppModule {}
 
