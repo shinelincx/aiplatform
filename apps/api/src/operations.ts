@@ -79,7 +79,8 @@ export class OperationsService {
           SELECT r.developer_assignment->'agent'->>'role', NULLIF(r.developer_assignment->'agent'->>'model', ''),
             latest.payload->'usage'
           FROM execution_runs r JOIN LATERAL (
-            SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result' ORDER BY sequence DESC LIMIT 1
+            SELECT payload FROM execution_events WHERE run_id = r.id AND kind IN ('result', 'turn', 'cancelled')
+              AND payload ? 'usage' ORDER BY sequence DESC LIMIT 1
           ) latest ON true WHERE r.project_id = $1
          ), token_totals AS (
            SELECT role, model, SUM((usage->>'inputTokens')::numeric) AS inputs,

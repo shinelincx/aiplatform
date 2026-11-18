@@ -48,6 +48,7 @@ function offerInput(value: unknown): ExecutionOffer {
     || typeof offer.title !== 'string' || typeof offer.description !== 'string'
     || (offer.archivePatch !== undefined && typeof offer.archivePatch !== 'boolean')
     || (offer.detailedEvents !== undefined && offer.detailedEvents !== true)
+    || (offer.turnUsage !== undefined && offer.turnUsage !== true)
     || !Array.isArray(offer.acceptanceCriteria) || !offer.acceptanceCriteria.every((item) => typeof item === 'string')
     || (offer.repositoryToken !== undefined && typeof offer.repositoryToken !== 'string')) {
     throw new Error('Invalid execution offer');
@@ -135,7 +136,9 @@ export class WorkerJobs {
     if (job.signal.signal.aborted && !job.completed) return;
     let event = job.checkpoint.events[job.cursor];
     if (job.signal.signal.aborted) {
-      event = { kind: 'cancelled', payload: {} };
+      const latest = job.checkpoint.events.slice().reverse().find(({ kind, payload }) =>
+        (kind === 'turn' || kind === 'cancelled') && 'usage' in payload);
+      event = { kind: 'cancelled', payload: latest && 'usage' in latest.payload ? { usage: latest.payload.usage } : {} };
       await this.replace(job, [...job.checkpoint.events.slice(0, job.cursor), event]);
     } else if (!event) {
       if (!job.completed) return;

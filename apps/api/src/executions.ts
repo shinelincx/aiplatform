@@ -66,6 +66,18 @@ function checkResult(value: unknown): CheckResult {
     ...(reason && { reason: reason as CheckFailureReason }) };
 }
 
+function tokenUsage(value: unknown) {
+  const input = objectInput(value);
+  const tokens = (key: string) => {
+    const count = input[key];
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) throw new BadRequestException('Invalid usage');
+    return count;
+  };
+  const usage = { inputTokens: tokens('inputTokens'), cachedInputTokens: tokens('cachedInputTokens'), outputTokens: tokens('outputTokens') };
+  if (usage.cachedInputTokens > usage.inputTokens) throw new BadRequestException('Invalid cached token count');
+  return usage;
+}
+
 function executionEvent(body: unknown) {
   const data = objectInput(body);
   const { runId, sequence, kind } = data;
@@ -93,7 +105,9 @@ function executionEvent(body: unknown) {
       : typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs < 0) {
       throw new BadRequestException('Invalid Codex turn duration');
     }
-    return { runId, sequence, kind: 'turn' as const, payload: { phase, attempt, ...(durationMs !== undefined && { durationMs }) } };
+    if (input.usage !== undefined && phase !== 'completed') throw new BadRequestException('Expected a completed Codex turn for usage');
+    return { runId, sequence, kind: 'turn' as const, payload: { phase, attempt, ...(durationMs !== undefined && { durationMs }),
+      ...(input.usage !== undefined && { usage: tokenUsage(input.usage) }) } };
   }
   if (kind === 'item') {
     const { itemType, phase, status, exitCode, fileCount } = input;
@@ -114,7 +128,8 @@ function executionEvent(body: unknown) {
     if (typeof input.code !== 'string' || !failureCodes.includes(input.code)) throw new BadRequestException('Invalid error code');
     return { runId, sequence, kind: 'failed' as const, payload: { code: input.code } };
   }
-  if (kind === 'cancelled') return { runId, sequence, kind: 'cancelled' as const, payload: {} };
+  if (kind === 'cancelled') return { runId, sequence, kind: 'cancelled' as const,
+    payload: input.usage === undefined ? {} : { usage: tokenUsage(input.usage) } };
   if (kind === 'result') {
     const baseCommit = textInput(input.baseCommit, 'base commit', 40);
     const patchHash = textInput(input.patchHash, 'patch hash', 64);
@@ -123,15 +138,7 @@ function executionEvent(body: unknown) {
       throw new BadRequestException('Invalid result metadata');
     }
     const files = input.files.map((value) => textInput(value, 'file', 350));
-    const metrics = objectInput(input.usage);
-    const usage = Object.fromEntries(['inputTokens', 'cachedInputTokens', 'outputTokens'].map((key) => {
-      const value = metrics[key];
-      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-        throw new BadRequestException('Invalid usage');
-      }
-      return [key, value];
-    }));
-    if (usage.cachedInputTokens > usage.inputTokens) throw new BadRequestException('Invalid cached token count');
+    const usage = tokenUsage(input.usage);
     const attempt = input.attempt === undefined ? undefined : attemptInput(input.attempt);
     return { runId, sequence, kind: 'result' as const, payload: { baseCommit, patchHash, files, usage,
       ...(attempt !== undefined && { attempt }) } };
@@ -390,6 +397,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       if (!offer) return null;
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
       offer.detailedEvents = true;
+      offer.turnUsage = true;
       await client.query(
         `UPDATE execution_runs SET status = 'running', worker_id = $2, lease_expires_at = now() + ($3 * interval '1 millisecond'),
           archive_patch = $4, source_branch = $5 WHERE id = $1`,

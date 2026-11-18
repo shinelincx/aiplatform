@@ -243,7 +243,10 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       if (attempt > 1) await report('progress', { stage: 'repair' });
       const startedAt = performance.now();
       const turnFinished = async (phase: 'completed' | 'failed') => {
-        if (offer.detailedEvents) await report('turn', { attempt, phase, durationMs: Math.round(performance.now() - startedAt) });
+        if (offer.detailedEvents) await report('turn', {
+          attempt, phase, durationMs: Math.round(performance.now() - startedAt),
+          ...(phase === 'completed' && offer.turnUsage && { usage: { ...usage } }),
+        });
       };
       const { events } = await thread.runStreamed(prompt, { signal });
       let completed = false;

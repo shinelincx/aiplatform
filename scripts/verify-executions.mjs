@@ -233,6 +233,7 @@ try {
 
   workerJournal = mkdtempSync(join(tmpdir(), 'ado-worker-journal-'));
   const proofRuntime = { root: workerJournal, binary: '', env: {} };
+  const interruptedUsage = { inputTokens: 17, cachedInputTokens: 3, outputTokens: 6 };
   const recoverJob = async (code, complete) => {
     const target = await newTask(code);
     const run = await request(target.runs, { token, method: 'POST', status: 201 });
@@ -244,6 +245,7 @@ try {
         await emit('thread', { threadId: 'restart-fixture' });
         await emit('progress', { stage: 'collecting' });
         if (complete) await emit('result', result.payload);
+        else await emit('turn', { attempt: 1, phase: 'completed', durationMs: 150, usage: interruptedUsage });
         saved.resolve();
       } catch (error) {
         saved.reject(error);
@@ -271,31 +273,68 @@ try {
     await afterRestart.reconcile(recovery);
     await afterRestart.flush((event) => worker.send('EXECUTION_EVENT', event));
     await afterRestart.flush((event) => worker.send('EXECUTION_EVENT', event));
+    if (!complete) await afterRestart.flush((event) => worker.send('EXECUTION_EVENT', event));
     assert.equal(afterRestart.runId, null);
     assert.equal(restartedExecution, false);
     assert.equal((await request(target.path, { token })).status, complete ? 'TESTING' : 'FAILED');
-    assert.deepEqual(await worker.send('WORKER_RECOVER', run.id), { state: 'finished', lastSequence: 3 });
+    const kinds = complete ? ['thread', 'progress', 'result'] : ['thread', 'progress', 'turn', 'failed'];
+    assert.deepEqual(await worker.send('WORKER_RECOVER', run.id), { state: 'finished', lastSequence: kinds.length });
     const restored = await request(`${target.runs}/${run.id}/events`, { token });
     assert.deepEqual(restored.map(({ sequence, kind }) => [sequence, kind]),
-      [[1, 'thread'], [2, 'progress'], [3, complete ? 'result' : 'failed']]);
-    if (!complete) assert.equal(restored[2].payload.code, 'worker_restarted');
+      kinds.map((kind, index) => [index + 1, kind]));
+    if (!complete) {
+      assert.deepEqual(restored[2].payload.usage, interruptedUsage);
+      assert.equal(restored[3].payload.code, 'worker_restarted');
+    }
     const savedEvents = JSON.parse(readFileSync(join(workerJournal, `${run.id}.events.json`), 'utf8'));
-    assert.equal(savedEvents.events.length, 3);
+    assert.equal(savedEvents.events.length, kinds.length);
     assert(!Object.hasOwn(savedEvents, 'repositoryToken'));
   };
   await recoverJob('RECOVER-COMPLETE', true);
   await recoverJob('RECOVER-INTERRUPTED', false);
 
+  const backendUsage = async () => {
+    const { usage } = await request(`/projects/${first.id}/operations`, { token });
+    const backend = usage.filter(({ role }) => role === 'BACKEND_DEVELOPER');
+    return ['inputTokens', 'cachedInputTokens', 'outputTokens']
+      .map((key) => backend.reduce((total, row) => total + Number(row[key]), 0));
+  };
+  assert.deepEqual(await backendUsage(), [27, 4, 11]);
+
   const cancelled = await newTask('CANCEL-EXECUTION');
   const secondRun = await request(cancelled.runs, { token, method: 'POST', status: 201 });
-  assert.equal((await worker.send('WORKER_CLAIM')).id, secondRun.id);
+  const cancelledOffer = await worker.send('WORKER_CLAIM');
+  assert.equal(cancelledOffer.id, secondRun.id);
+  assert.equal(cancelledOffer.turnUsage, true);
+  const ledgerSaved = Promise.withResolvers();
+  const latestUsage = { inputTokens: 20, cachedInputTokens: 5, outputTokens: 9 };
+  const cancelledJob = new WorkerJobs(proofRuntime, approved.workerId, async () => true, async (_runtime, _offer, emit) => {
+    try {
+      await emit('turn', { attempt: 1, phase: 'completed', durationMs: 140, usage: interruptedUsage });
+      await emit('turn', { attempt: 2, phase: 'completed', durationMs: 210, usage: latestUsage });
+      ledgerSaved.resolve();
+    } catch (error) {
+      ledgerSaved.reject(error);
+    }
+  });
+  await cancelledJob.start(cancelledOffer);
+  await ledgerSaved.promise;
   await request(`${cancelled.runs}/${secondRun.id}/cancel`, { token, method: 'POST', status: 204 });
   assert.deepEqual(await worker.send('WORKER_RECOVER', secondRun.id), { state: 'cancelling', lastSequence: 0 });
   assert.deepEqual(await worker.send('WORKER_HEARTBEAT', secondRun.id), { stop: true });
-  assert.deepEqual(await worker.send('EXECUTION_EVENT', {
-    runId: secondRun.id, sequence: 1, kind: 'cancelled', payload: {},
-  }), { stop: false, accepted: true });
+  cancelledJob.cancel();
+  const sendCancelled = (event) => worker.send('EXECUTION_EVENT', event);
+  await assert.rejects(cancelledJob.flush(async (event) => {
+    assert.deepEqual(await sendCancelled(event), { stop: false, accepted: true });
+    throw new Error('Lost cancellation acknowledgement');
+  }), /Lost cancellation acknowledgement/);
+  await cancelledJob.flush(sendCancelled);
   assert.equal((await request(cancelled.path, { token })).status, 'CANCELLED');
+  const cancellationEvents = await request(`${cancelled.runs}/${secondRun.id}/events`, { token });
+  assert.equal(cancellationEvents.length, 1);
+  assert.deepEqual(cancellationEvents[0].payload, { usage: latestUsage });
+  assert.deepEqual(await backendUsage(), [47, 9, 20]);
+  console.log('Codex usage from completed turns survived interrupted runs, cancellation and event replay');
 
   const timed = await newTask('TIMEOUT-EXECUTION');
   await db.query('UPDATE tasks SET approved_developer = NULL WHERE id = $1', [timed.id]);

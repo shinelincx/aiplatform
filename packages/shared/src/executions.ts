@@ -22,6 +22,7 @@ export interface ExecutionOffer {
   checks?: VerificationCheck[];
   archivePatch?: boolean;
   detailedEvents?: true;
+  turnUsage?: true;
   development?: DevelopmentHandoff | null;
 }
 
