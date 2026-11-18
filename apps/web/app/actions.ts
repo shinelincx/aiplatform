@@ -1,8 +1,9 @@
 'use server';
 
 import { cookies } from 'next/headers';
+import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import type { Project, Session } from '@ado/shared';
+import { isWorkerId, type Project, type Session, type WorkerCredential } from '@ado/shared';
 import { api, sessionCookie } from './api-client';
 
 async function execute(path: string, options: RequestInit, authenticated = true) {
@@ -155,4 +156,33 @@ export async function archiveTask(form: FormData) {
   const response = await execute(`${endpoint}/archive`, { method: 'POST' });
   if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
   redirect(`${query}#task-detail`);
+}
+
+export interface WorkerAccessState {
+  error?: string;
+  notice?: string;
+  credential?: WorkerCredential;
+}
+
+export async function changeWorkerAccess(_: WorkerAccessState, form: FormData): Promise<WorkerAccessState> {
+  const { endpoint } = projectPath(form);
+  const collection = `${endpoint}/workers`;
+  const operation = form.get('operation');
+  const workerId = form.get('workerId');
+  let response: Response | null;
+  if (operation === 'create') {
+    response = await execute(collection, { method: 'POST', body: JSON.stringify({ name: form.get('name') }) });
+  } else if (isWorkerId(workerId) && operation === 'rotate') {
+    response = await execute(`${collection}/${workerId}/credential`, { method: 'POST' });
+  } else if (isWorkerId(workerId) && (operation === 'grant' || operation === 'revoke')) {
+    response = await execute(`${collection}/${workerId}`, { method: operation === 'grant' ? 'PUT' : 'DELETE' });
+  } else {
+    return { error: '请输入有效的 Worker ID。' };
+  }
+  if (!response?.ok) return { error: '操作失败，请检查项目权限和 Worker 状态。' };
+  revalidatePath('/');
+  if (operation === 'create' || operation === 'rotate') {
+    return { credential: await response.json() as WorkerCredential };
+  }
+  return { notice: operation === 'grant' ? 'Worker 已获项目授权。' : 'Worker 的项目权限已撤回。' };
 }

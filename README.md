@@ -1,6 +1,6 @@
 # ADO 研发平台
 
-Web 工作台支持登录、切换项目、管理成员、绑定 GitHub 仓库及维护研发任务。Worker 当前提供一次性连通性检查，注册、心跳和任务执行在 M2 接入。
+Web 工作台支持登录、切换项目、管理成员、绑定 GitHub 仓库及维护研发任务。Worker 支持项目授权、注册、心跳和断线重连，任务派发和 Codex 执行仍在 M2 实现。
 
 ## 启动开发环境
 
@@ -39,6 +39,18 @@ docker compose down
 
 API 和 Web 源码挂载到开发容器。修改共享包、依赖或配置后重新运行启动命令。数据库、Redis 和对象存储使用命名卷，普通 `docker compose down` 保留数据。
 
+## 注册 Worker
+
+项目所有者可在工作台的“项目 Worker”中生成注册凭证。将 `ADO_WORKER_ID` 和 `ADO_WORKER_TOKEN` 加入 Worker 进程的环境变量，从仓库根目录执行以下命令。
+
+```sh
+npm ci
+npm run build:shared
+npm run dev -w @ado/worker
+```
+
+默认 API 地址为 `http://127.0.0.1:3101`，可用 `API_BASE_URL` 覆盖。远程 Worker 使用 HTTPS 或 WSS 地址，由提供 TLS 的代理转发 `/workers/ws`。注册后可在项目工作台看到平台、架构和在线状态。凭证有效期为 8 小时，更新凭证会使旧凭证失效。项目所有者可撤回该项目的授权。
+
 ## Monorepo 与 CI
 
 使用 Node.js 24 和 npm workspaces，在仓库根目录安装并验证所有包。
@@ -52,7 +64,7 @@ npm run check
 | --- | --- | --- |
 | `@ado/web` | `apps/web` | Next.js 开发控制台 |
 | `@ado/api` | `apps/api` | NestJS API 和 `GET /health` |
-| `@ado/worker` | `apps/worker` | Node.js Worker 入口及 API 连通检查 |
-| `@ado/shared` | `packages/shared` | Web、API、Worker 共用的健康响应契约 |
+| `@ado/worker` | `apps/worker` | Node.js Worker 注册、心跳、重连和连通检查 |
+| `@ado/shared` | `packages/shared` | Web、API、Worker 共用的数据类型和协议 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 在 push、pull request 或手动触发时运行同一组检查，并从干净的 Compose 环境验证 Worker 连通性、Web 登录、会话撤销和项目隔离。集成验证脚本会创建测试用户和项目，建议在独立 Compose 实例中执行。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 在 push、pull request 或手动触发时运行同一组检查，并从干净的 Compose 环境验证 Web 登录、会话撤销、项目隔离和 Worker 注册及重连。集成验证脚本会创建测试用户和项目，建议在独立 Compose 实例中执行。

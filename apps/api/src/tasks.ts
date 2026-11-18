@@ -81,7 +81,7 @@ export class TasksService {
     await this.get(actor, projectId, id);
     const { rows } = await this.db.pool.query<TaskEvent>(
       `SELECT id::text, event_type AS "eventType", payload, created_at AS "createdAt"
-       FROM task_events WHERE project_id = $1 AND task_id = $2 ORDER BY id`, [projectId, id],
+       FROM task_events WHERE project_id = $1 AND task_id = $2 ORDER BY task_events.id`, [projectId, id],
     );
     return rows;
   }

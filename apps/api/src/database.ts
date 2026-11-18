@@ -99,6 +99,24 @@ const migrations = [
     FOREIGN KEY (project_id, task_id) REFERENCES tasks(project_id, id)
   );
   CREATE INDEX task_events_task ON task_events (project_id, task_id, id);`,
+  `CREATE TABLE workers (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name varchar(100) NOT NULL,
+    created_by uuid NOT NULL REFERENCES users(id),
+    credential_hash text NOT NULL UNIQUE,
+    credential_expires_at timestamptz NOT NULL,
+    disabled boolean NOT NULL DEFAULT false,
+    capabilities jsonb,
+    connection_id uuid,
+    last_heartbeat_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE TABLE worker_projects (
+    worker_id uuid NOT NULL REFERENCES workers(id),
+    project_id uuid NOT NULL REFERENCES projects(id),
+    PRIMARY KEY (worker_id, project_id)
+  );
+  CREATE INDEX worker_projects_project_id ON worker_projects (project_id, worker_id);`,
 ];
 
 @Injectable()

@@ -35,6 +35,7 @@ jobs:
       - run: docker compose up --build --wait --wait-timeout 240
       - run: docker compose exec -T api env API_BASE_URL=http://api:3101 npm run dev -w @ado/worker
       - run: node scripts/verify-projects.mjs
+      - run: docker compose exec -T api node scripts/verify-workers.mjs
       - if: failure()
         run: docker compose logs --no-color --tail 80
       - if: always()

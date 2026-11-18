@@ -7,6 +7,8 @@ import { Database } from './database';
 import { GitHubApp, RepositoriesController } from './github';
 import { ProjectsController, ProjectsService } from './projects';
 import { TasksController, TasksService } from './tasks';
+import { WorkerGateway } from './worker-gateway';
+import { WorkersController, WorkersService } from './workers';
 
 @Controller()
 class HealthController {
@@ -17,13 +19,14 @@ class HealthController {
 }
 
 @Module({
-  controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController],
-  providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService],
+  controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController, WorkersController],
+  providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService, WorkersService, WorkerGateway],
 })
 class AppModule {}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.get(WorkerGateway).attach(app.getHttpServer());
   app.enableShutdownHooks();
   await app.listen(Number(process.env.PORT ?? 3101), '0.0.0.0');
 }

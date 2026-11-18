@@ -1,0 +1,136 @@
+import { HttpException, Inject, Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import type { IncomingMessage, Server } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { WebSocket, WebSocketServer } from 'ws';
+import { decodeWorkerMessage, workerOfflineMs, workerProtocolVersion,
+  type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
+import { parseCapabilities, parseWorkerCredentials, WorkersService, type WorkerIdentity } from './workers';
+
+@Injectable()
+export class WorkerGateway implements OnModuleDestroy {
+  private readonly log = new Logger(WorkerGateway.name);
+  private readonly gateway = new WebSocketServer({ noServer: true, maxPayload: 8192 });
+  private server?: Server;
+
+  constructor(@Inject(WorkersService) private readonly workers: WorkersService) {}
+
+  attach(server: Server) {
+    this.server = server;
+    server.on('upgrade', this.upgrade);
+  }
+
+  private readonly upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    void this.authenticate(request, socket, head).catch(() => {
+      this.log.error('Worker authentication unavailable');
+      if (!socket.destroyed) socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+    });
+  };
+
+  private async authenticate(request: IncomingMessage, socket: Duplex, head: Buffer) {
+    const onSocketError = () => socket.destroy();
+    socket.on('error', onSocketError);
+    if (request.url !== '/workers/ws') {
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    const identity = parseWorkerCredentials(request.headers.authorization);
+    if (!identity || !(await this.workers.valid(identity))) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (socket.destroyed) return;
+    this.gateway.handleUpgrade(request, socket, head, (ws) => {
+      socket.off('error', onSocketError);
+      this.bind(ws, identity);
+    });
+  }
+
+  private bind(socket: WebSocket, identity: WorkerIdentity) {
+    const connectionId = randomUUID();
+    let registered = false;
+    let busy = false;
+    const onIdle = () => socket.terminate();
+    let idle = setTimeout(onIdle, 10_000).unref();
+    const disconnect = () => this.workers.disconnect(identity.workerId, connectionId).catch(() => {
+      this.log.warn('Worker disconnect could not be persisted');
+    });
+    socket.on('error', () => socket.terminate());
+    socket.on('close', () => {
+      clearTimeout(idle);
+      if (registered) void disconnect();
+    });
+
+    const handle = async (message: WorkerEnvelope) => {
+      if (!registered) {
+        if (message.message_type !== 'WORKER_REGISTER') {
+          socket.close(1008, 'Register first');
+          return;
+        }
+        const capabilities = parseCapabilities(message.payload);
+        registered = await this.workers.register(identity, connectionId, capabilities);
+        if (!registered) {
+          socket.close(4001, 'Worker authorization ended');
+          return;
+        }
+        if (socket.readyState !== WebSocket.OPEN) {
+          await disconnect();
+          return;
+        }
+        this.ack(socket, identity, message, 'REGISTER_ACK');
+        clearTimeout(idle);
+        idle = setTimeout(onIdle, workerOfflineMs).unref();
+        return;
+      }
+
+      if (message.message_type !== 'WORKER_HEARTBEAT' || message.payload !== null) {
+        socket.close(1008, 'Invalid heartbeat');
+        return;
+      }
+      if (!await this.workers.heartbeat(identity, connectionId)) {
+        socket.close(4001, 'Worker authorization ended');
+        return;
+      }
+      if (socket.readyState === WebSocket.OPEN) {
+        idle.refresh();
+        this.ack(socket, identity, message, 'HEARTBEAT_ACK');
+      }
+    };
+
+    socket.on('message', (data, binary) => {
+      const message = binary ? null : decodeWorkerMessage(data.toString());
+      if (busy || !message || message.worker_id !== identity.workerId || message.correlation_id !== null) {
+        socket.close(1008, 'Invalid worker message');
+        return;
+      }
+      busy = true;
+      void handle(message).catch((error: unknown) => {
+        if (error instanceof HttpException) {
+          socket.close(1008, 'Invalid worker payload');
+          return;
+        }
+        this.log.error('Worker message could not be processed');
+        socket.close(1011, 'Worker gateway unavailable');
+      }).finally(() => { busy = false; });
+    });
+  }
+
+  private ack(socket: WebSocket, { workerId }: WorkerIdentity, request: WorkerEnvelope, messageType: WorkerMessageType) {
+    const response: WorkerEnvelope = {
+      message_id: randomUUID(),
+      worker_id: workerId,
+      timestamp: new Date().toISOString(),
+      message_type: messageType,
+      correlation_id: request.message_id,
+      payload: null,
+      protocol_version: workerProtocolVersion,
+    };
+    socket.send(JSON.stringify(response));
+  }
+
+  onModuleDestroy() {
+    this.server?.off('upgrade', this.upgrade);
+    for (const socket of this.gateway.clients) socket.terminate();
+    this.gateway.close();
+  }
+}

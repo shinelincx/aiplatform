@@ -83,11 +83,15 @@ await transition(blockedPath, 'READY', 409);
 await transition(blockedPath, 'PLANNING');
 await transition(blockedPath, 'WAITING_APPROVAL');
 await transition(blockedPath, 'READY', 409);
+for (let index = 0; index < 10; index++) {
+  await request(prerequisitePath, { token: admin, method: 'PATCH', body: { title: `Prerequisite ${index}` } });
+}
 await transition(prerequisitePath, 'PLANNING');
 await transition(prerequisitePath, 'WAITING_APPROVAL');
 assert.equal((await transition(prerequisitePath, 'READY')).status, 'READY');
 const events = await request(`${prerequisitePath}/events`, { token: viewer });
-assert.deepEqual(events.map(({ payload }) => payload.to ?? payload.status),
+assert(events.every((event, index) => index === 0 || BigInt(event.id) > BigInt(events[index - 1].id)));
+assert.deepEqual(events.filter(({ eventType }) => eventType !== 'task.updated').map(({ payload }) => payload.to ?? payload.status),
   ['CREATED', 'PLANNING', 'WAITING_APPROVAL', 'READY']);
 
 const home = await globalThis.fetch(web, { signal: globalThis.AbortSignal.timeout(30000) });

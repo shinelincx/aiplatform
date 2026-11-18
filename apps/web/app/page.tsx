@@ -4,6 +4,7 @@ import { read } from './api-client';
 import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
 import { Repositories } from './repositories';
 import { Tasks } from './tasks';
+import { Workers } from './workers';
 
 export const dynamic = 'force-dynamic';
 
@@ -64,6 +65,7 @@ export default async function Home({ searchParams }: {
               {selected && <Repositories project={selected} installation={query.installation}
                 manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {selected && <Tasks project={selected} selectedId={query.task} />}
+              {selected && <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {admin && <CreateAccount users={users ?? []} />}
             </div>
           </div>
