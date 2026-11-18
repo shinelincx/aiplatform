@@ -1,5 +1,5 @@
 import type { ExecutionEvent, ExecutionRun, Project, Task } from '@ado/shared';
-import { publishExecution, reviewExecution, startExecution, stopExecution } from './actions';
+import { publishExecution, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
 
@@ -31,6 +31,8 @@ function label(event: ExecutionEvent) {
 const checkLabels = { passed: '通过', failed: '失败', timed_out: '超时', unavailable: '无法运行' } as const;
 const deliveryLabels = { queued: '等待发布', publishing: '正在发布分支', published: '草稿 PR 已关联', failed: '发布失败' };
 const pullLabels = { open: '开放', closed: '已关闭', merged: '已合并', changed: 'PR 与审核版本不匹配' };
+const qaLabels = { queued: '等待 QA', running: 'QA 审查中', failed: 'QA 审查失败', completed: 'QA 已提交意见', cancelled: 'QA 已取消' };
+const qaRecommendations = { ready: '建议进入评审', changes_requested: '建议修改', insufficient_evidence: '证据不足' };
 const deliveryErrors: Record<string, string> = {
   base_changed: '测试基准已不属于发布目标分支，请重新执行。',
   patch_rejected: '补丁无法应用到原始基准。',
@@ -47,6 +49,8 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
   const active = latest?.status === 'queued' || latest?.status === 'running';
   const publishing = latest?.delivery?.state === 'queued' || latest?.delivery?.state === 'publishing';
   const owner = project.role === 'owner';
+  const checkingQa = latest?.qa?.state === 'queued' || latest?.qa?.state === 'running';
+  const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
     && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || (awaitingChecks && hasChecks));
@@ -57,7 +61,7 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
 
   return <section aria-labelledby="execution-heading" className="repository-form">
     <h4 id="execution-heading">Codex 执行</h4>
-    {(active || publishing) && <RefreshExecution />}
+    {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
     {canStart && <form action={startExecution}>{identity}<button>{latest ? '重试执行' : '派发任务'}</button></form>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
@@ -77,6 +81,23 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
       </div>}
       {latest.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${latest.id}`}>下载受测补丁</a>
         {' '}<small>{Math.ceil(latest.artifact.size / 1024)} KB</small></p>}
+      {latest.qa && <div>
+        <h5>QA Agent · v{latest.qa.version} · {latest.qa.model}</h5>
+        <p role="status">{qaLabels[latest.qa.state]}</p>
+        {latest.qa.partialPatch && <p>QA 审查了补丁开头的 64 KiB。</p>}
+        {latest.qa.assessment && <>
+          <p><strong>{qaRecommendations[latest.qa.assessment.recommendation]}</strong></p>
+          <ul>{latest.qa.assessment.findings.map((text, index) => <li key={index}>{text}</li>)}</ul>
+          <h5>建议验证用例</h5>
+          <ul>{latest.qa.assessment.testCases.map((text, index) => <li key={index}>{text}</li>)}</ul>
+        </>}
+        {canManageQa && latest.qa.state === 'failed' && <form action={retryExecutionQa}>
+          {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">重试 QA</button>
+        </form>}
+        {canManageQa && (checkingQa || latest.qa.state === 'failed') && <form action={stopExecution}>
+          {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">取消任务</button>
+        </form>}
+      </div>}
       {latest.review ? <div>
         <p>人工审核 · {latest.review.decision === 'approved' ? '已批准' : '已驳回'} · {latest.review.reviewer}</p>
         {latest.review.comment && <p className="description">{latest.review.comment}</p>}
@@ -109,6 +130,10 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
               {event.kind === 'result' && Array.isArray(event.payload.files) &&
                 <ul>{event.payload.files.filter((name): name is string => typeof name === 'string')
                   .map((name, i) => <li key={i}>{name}</li>)}</ul>}
+              {event.kind === 'result' && event.payload.usage !== null && typeof event.payload.usage === 'object' &&
+                'inputTokens' in event.payload.usage && 'outputTokens' in event.payload.usage &&
+                typeof event.payload.usage.inputTokens === 'number' && typeof event.payload.usage.outputTokens === 'number' &&
+                <small>截至本轮 · 输入 {event.payload.usage.inputTokens.toLocaleString('zh-CN')} tokens · 输出 {event.payload.usage.outputTokens.toLocaleString('zh-CN')} tokens</small>}
             </div>
             <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>
           </li>

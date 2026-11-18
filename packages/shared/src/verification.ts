@@ -27,6 +27,21 @@ export interface ExecutionReview {
   reviewedAt: string;
 }
 
+export interface QaAssessment {
+  recommendation: 'ready' | 'changes_requested' | 'insufficient_evidence';
+  testCases: string[];
+  findings: string[];
+}
+
+export interface ExecutionQa {
+  state: 'queued' | 'running' | 'failed' | 'completed' | 'cancelled';
+  version: number;
+  model: string;
+  patchHash: string;
+  partialPatch: boolean;
+  assessment: QaAssessment | null;
+}
+
 export const maxVerificationAttempts = 3;
 
 export function canRepair(report: VerificationReport) {

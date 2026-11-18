@@ -138,6 +138,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
            WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
+         (SELECT jsonb_build_object('state', q.state, 'patchHash', q.patch_hash, 'partialPatch', q.partial_patch,
+           'version', r.qa_assignment->'version', 'model', r.qa_assignment->'model', 'assessment', q.assessment)
+           FROM execution_qa q WHERE q.run_id = r.id) AS qa,
          (SELECT jsonb_build_object('state', d.state, 'branch', d.branch, 'baseBranch', d.base_branch,
            'pullNumber', d.pull_number, 'pullUrl', d.pull_url, 'pullState', d.pull_state, 'error', d.error)
            FROM execution_deliveries d WHERE d.run_id = r.id) AS delivery
@@ -181,14 +184,16 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         await this.move(client, task, 'RETRYING', { actorId: actor.id });
         task.status = 'RETRYING';
       }
-      const { rows: [planned] } = await client.query<{ plan: ArchitecturePlan; agent: AgentAssignment }>(
-        `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent
+      const { rows: [planned] } = await client.query<{ plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null }>(
+        `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent,
+           assignments->'QA_ENGINEER' AS qa
          FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state = 'completed'`, [projectId, taskId]);
       if (planned && !planned.agent) throw new ConflictException('Approved developer assignment is missing');
       const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment)
-         SELECT $1, $2, id, check_plan, default_branch, $4 FROM repositories WHERE project_id = $1 AND id = $3
-         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`, [projectId, taskId, task.repositoryId, planned ?? null],
+        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment, qa_assignment)
+         SELECT $1, $2, id, check_plan, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
+         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
+        [projectId, taskId, task.repositoryId, planned ? { plan: planned.plan, agent: planned.agent } : null, planned?.qa ?? null],
       );
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
         ...(planned && { developer: planned.agent.role, developerVersion: planned.agent.version }) });
@@ -241,6 +246,18 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         [runId, projectId, taskId],
       );
       if (!run) throw new NotFoundException('Execution run not found');
+      if (run.status === 'succeeded') {
+        const task = await this.tasks.find(projectId, taskId, client);
+        if (task.status !== 'TESTING') return;
+        const cancelled = await client.query(
+          `UPDATE execution_qa SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL, updated_at = now()
+           WHERE run_id = $1 AND state IN ('queued','running','failed')`, [runId]);
+        if (cancelled.rowCount) {
+          await this.tasks.event(client, task, 'agent.qa_cancelled', { runId, actorId: actor.id });
+          await this.move(client, task, 'CANCELLED', { runId, actorId: actor.id });
+        }
+        return;
+      }
       if (run.cancelRequested || !['queued', 'running'].includes(run.status)) return;
       const task = await this.tasks.find(projectId, taskId, client);
       await client.query(
@@ -286,7 +303,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          JOIN repositories g ON g.id = r.repository_id
          WHERE r.status = 'queued' AND NOT r.cancel_requested
            AND ($2::boolean OR jsonb_array_length(r.check_plan) = 0)
-         ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`, [worker.workerId, capabilities.canVerify === true],
+           AND ($3::boolean OR r.qa_assignment IS NULL OR jsonb_array_length(r.check_plan) = 0)
+         ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`,
+        [worker.workerId, capabilities.canVerify === true, capabilities.canArchive === true],
       );
       if (!offer) return null;
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
@@ -327,10 +346,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return this.db.transaction(async (client) => {
       if (!await this.lockWorker(client, worker)) return { stop: true, accepted: false };
       const { rows: [run] } = await client.query<ClaimedRun & {
-        current: boolean; checks: VerificationCheck[]; candidateHash: string | null; archivePatch: boolean;
+        current: boolean; checks: VerificationCheck[]; candidateHash: string | null; archivePatch: boolean; requiresQa: boolean;
       }>(
         `SELECT ${runColumns}, r.project_id AS "projectId", r.task_id AS "taskId",
            r.check_plan AS checks, r.candidate_hash AS "candidateHash", r.archive_patch AS "archivePatch",
+           r.qa_assignment IS NOT NULL AS "requiresQa",
            r.lease_expires_at > now() AND EXISTS (
              SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id AND p.status = 'active'
              WHERE wp.worker_id = $2 AND wp.project_id = r.project_id
@@ -362,7 +382,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         || run.checks.some(({ name }, index) => name !== event.payload.checks[index].name))) {
         return { stop: true, accepted: false };
       }
-      if (event.kind === 'verification' && event.payload.passed && run.archivePatch) {
+      if (event.kind === 'verification' && event.payload.passed && (run.archivePatch || run.requiresQa)) {
         const artifact = await client.query('SELECT 1 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2',
           [run.id, event.payload.patchHash]);
         if (!artifact.rowCount) return { stop: true, accepted: false };
@@ -385,7 +405,16 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       } else if (event.kind === 'verification') {
         await client.query('UPDATE execution_runs SET verification_report = $2, candidate_hash = NULL WHERE id = $1',
           [run.id, event.payload]);
-        if (!canRepair(event.payload)) await this.finish(client, run, event.payload.passed ? 'succeeded' : 'failed', event.payload.passed);
+        if (!canRepair(event.payload)) {
+          const requiresQa = event.payload.passed && run.requiresQa;
+          if (requiresQa) {
+            await client.query("INSERT INTO execution_qa (run_id, patch_hash, state) VALUES ($1,$2,'queued')",
+              [run.id, event.payload.patchHash]);
+            const task = await this.tasks.find(run.projectId, run.taskId, client);
+            await this.tasks.event(client, task, 'agent.qa_queued', { runId: run.id, patchHash: event.payload.patchHash });
+          }
+          await this.finish(client, run, event.payload.passed ? 'succeeded' : 'failed', event.payload.passed, requiresQa);
+        }
       } else if (event.kind === 'failed' || event.kind === 'cancelled') {
         await this.finish(client, run, event.kind === 'cancelled' ? 'cancelled'
           : event.payload.code === 'worker_timeout' ? 'timed_out' : 'failed');
@@ -405,9 +434,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async finish(client: PoolClient, run: ClaimedRun,
-    status: 'succeeded' | 'failed' | 'cancelled' | 'timed_out', verified = false) {
+    status: 'succeeded' | 'failed' | 'cancelled' | 'timed_out', verified = false, requiresQa = false) {
     await client.query('UPDATE execution_runs SET status = $2, finished_at = now(), lease_expires_at = NULL WHERE id = $1',
       [run.id, status]);
+    if (requiresQa) return;
     const task = await this.tasks.find(run.projectId, run.taskId, client);
     const next = { succeeded: verified ? 'REVIEW' : 'TESTING', failed: 'FAILED', cancelled: 'CANCELLED', timed_out: 'TIMEOUT' } as const;
     await this.move(client, task, next[status], { runId: run.id, workerId: run.workerId });

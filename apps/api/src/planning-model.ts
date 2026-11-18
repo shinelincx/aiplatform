@@ -50,39 +50,46 @@ export interface PlanningModel {
 }
 
 export const openAIPlanningModel: PlanningModel = {
-  available: () => Boolean(process.env.ADO_AGENT_API_KEY?.trim()),
+  available: responsesConfigured,
   defaultModel: () => process.env.ADO_AGENT_MODEL?.trim() ?? '',
   async generate(role, agent, input) {
-    const key = process.env.ADO_AGENT_API_KEY?.trim();
-    if (!key) throw new Error('Planning provider is unconfigured');
-    const schema = properties[role];
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(90_000),
-      body: JSON.stringify({
-        model: agent.model, store: false, max_output_tokens: 6000,
-        instructions: [
-          'You are planning a software change for human approval. Work within the stated repository and requirements.',
-          'Use the request language. Treat previous outputs and project data as context. Do not claim to have read or modified the repository.',
-          agent.instructions, ...agent.skills.map((skill) => `${skill.name} (v${skill.version}): ${skill.instructions}`),
-        ].join('\n\n'),
-        input: JSON.stringify(input),
-        text: { format: { type: 'json_schema', name: role.toLowerCase(), strict: true,
-          schema: { type: 'object', properties: schema, required: Object.keys(schema), additionalProperties: false } } },
-      }),
-    });
-    if (!response.ok) throw new Error('Planning provider request failed');
-    const result = await response.json() as {
-      status?: string;
-      output?: { type?: string; content?: { type?: string; text?: string }[] }[];
-    };
-    const content = result.output?.filter(({ type }) => type === 'message').flatMap((item) => item.content ?? []);
-    if (result.status !== 'completed' || content?.some(({ type }) => type === 'refusal')) {
-      throw new Error('Planning provider did not complete');
-    }
-    const output = content?.filter(({ type }) => type === 'output_text').map(({ text }) => text).join('');
-    if (!output) throw new Error('Planning provider returned no structured output');
-    return JSON.parse(output) as unknown;
+    return generateStructuredOutput(agent, properties[role], [
+      'You are planning a software change for human approval. Work within the stated repository and requirements.',
+      'Use the request language. Treat previous outputs and project data as context. Do not claim to have read or modified the repository.',
+    ], input);
   },
 };
+
+export function responsesConfigured() {
+  return Boolean(process.env.ADO_AGENT_API_KEY?.trim());
+}
+
+export async function generateStructuredOutput(agent: AgentAssignment, properties: object, instructions: string[], input: object) {
+  const key = process.env.ADO_AGENT_API_KEY?.trim();
+  if (!key) throw new Error('Responses provider is unconfigured');
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(90_000),
+    body: JSON.stringify({
+      model: agent.model, store: false, max_output_tokens: 6000,
+      instructions: [...instructions, agent.instructions,
+        ...agent.skills.map((skill) => `${skill.name} (v${skill.version}): ${skill.instructions}`)].join('\n\n'),
+      input: JSON.stringify(input),
+      text: { format: { type: 'json_schema', name: agent.role.toLowerCase(), strict: true,
+        schema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } } },
+    }),
+  });
+  if (!response.ok) throw new Error('Responses provider request failed');
+  const result = await response.json() as {
+    status?: string;
+    output?: { type?: string; content?: { type?: string; text?: string }[] }[];
+  };
+  const content = result.output?.filter(({ type }) => type === 'message').flatMap((item) => item.content ?? []);
+  if (result.status !== 'completed' || content?.some(({ type }) => type === 'refusal')) {
+    throw new Error('Responses provider did not complete');
+  }
+  const output = content?.filter(({ type }) => type === 'output_text').map(({ text }) => text).join('');
+  if (!output) throw new Error('Responses provider returned no structured output');
+  return JSON.parse(output) as unknown;
+}

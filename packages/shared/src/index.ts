@@ -11,7 +11,7 @@ export type { ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } fro
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
 export { canRepair, maxVerificationAttempts, parseCheckPlan } from './verification';
-export type { CheckResult, ExecutionReview, VerificationCheck, VerificationReport } from './verification';
+export type { CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
 
 export interface ApiHealth {
   service: 'ado-api';

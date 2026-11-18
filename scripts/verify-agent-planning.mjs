@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import { createHash, randomBytes } from 'node:crypto';
 import process from 'node:process';
 import { URL } from 'node:url';
 import { AgentPlanningService } from '../apps/api/src/agent-planning.ts';
 import { AgentRegistryService } from '../apps/api/src/agent-registry.ts';
+import { ArtifactStore } from '../apps/api/src/artifacts.ts';
 import { AuthService } from '../apps/api/src/auth.ts';
 import { Database } from '../apps/api/src/database.ts';
+import { ExecutionQaService } from '../apps/api/src/execution-qa.ts';
 import { ExecutionsService } from '../apps/api/src/executions.ts';
 import { GitHubApp } from '../apps/api/src/github.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
@@ -23,6 +26,15 @@ const tasks = new TasksService(db, projects);
 const registry = new AgentRegistryService(db, projects);
 const executions = new ExecutionsService(db, projects, tasks, new GitHubApp());
 const modelCalls = [];
+const qaCalls = [];
+const qa = new ExecutionQaService(db, projects, tasks, new ArtifactStore(), {
+  available: () => true,
+  async generate(agent, input) {
+    qaCalls.push({ agent, input });
+    if (qaCalls.length === 1) throw new Error('Fixture transient error');
+    return { recommendation: 'ready', testCases: ['Check the empty state'], findings: ['The settings route renders the saved value'] };
+  },
+});
 const outputs = {
   PROJECT_DIRECTOR: { objective: 'Create a settings page', constraints: ['Use the existing repository'] },
   PRODUCT_MANAGER: {
@@ -103,6 +115,9 @@ try {
   await request(`${registryPath}/agents/PRODUCT_MANAGER/versions`, {
     token, method: 'POST', status: 201, body: { model: 'fixture-pm', skills: [reference] },
   });
+  await request(`${registryPath}/agents/QA_ENGINEER/versions`, {
+    token, method: 'POST', status: 201, body: { model: 'fixture-qa', instructions: 'Verify empty states' },
+  });
 
   const { rows: [repo] } = await db.pool.query(
     `INSERT INTO repositories (project_id, github_repository_id, owner, repo_name, repository_url, default_branch, installation_id)
@@ -164,23 +179,76 @@ try {
   assert(html.includes('用 Agent 规划需求') && html.includes('批准方案') && html.includes('实施步骤') && html.includes('Agent 与 Skill'));
 
   await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
+  await request(`${prefix}/repositories/${repo.id}/checks`, {
+    token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }] },
+  });
   const run = await request(`${taskPath}/executions`, { token, method: 'POST', status: 201 });
   const credential = await request(`${prefix}/workers`, {
     token, method: 'POST', status: 201, body: { name: 'Planning handoff fixture' },
   });
   const { rows: [worker] } = await db.pool.query(
-    `UPDATE workers SET connection_id = gen_random_uuid(), capabilities = '{"codexVersion":"0.170.0"}'
+    `UPDATE workers SET connection_id = gen_random_uuid(), capabilities = '{"codexVersion":"0.170.0","verificationVersion":1}'
      WHERE id = $1 RETURNING id AS "workerId", credential_hash AS hash, connection_id AS "connectionId"`, [credential.workerId],
   );
+  assert.equal(await executions.claim(worker), null, 'Planned QA requires an archive-capable Worker');
+  await db.pool.query("UPDATE workers SET capabilities = capabilities || '{\"artifactVersion\":1}' WHERE id = $1", [worker.workerId]);
   const offer = await executions.claim(worker);
   assert.equal(offer?.id, run.id);
   assert.deepEqual(offer.development.plan, outputs.ARCHITECT);
   assert.equal(offer.development.agent.version, 2);
   assert.equal(offer.development.agent.model, config.model);
   assert.equal(offer.development.agent.skills[0].instructions, skillV2.instructions);
-  await request(`${taskPath}/executions/${run.id}/cancel`, { token, method: 'POST', status: 204 });
-  assert.deepEqual(await executions.record(worker, { runId: run.id, sequence: 1, kind: 'cancelled', payload: {} }),
-    { stop: false, accepted: true });
+  assert.equal(offer.archivePatch, true);
+  assert.equal(offer.development.qa, undefined);
+
+  const runPath = `${taskPath}/executions/${run.id}`;
+  const review = { token, method: 'POST', body: { decision: 'approved' } };
+  const send = (sequence, kind, payload) => executions.record(worker, { runId: run.id, sequence, kind, payload });
+  const patch = Buffer.from('diff --git a/settings.ts b/settings.ts\n--- a/settings.ts\n+++ b/settings.ts\n@@ -0,0 +1,3501 @@\n'
+    + '+// Fixture settings patch\n'.repeat(3500) + '+export const savedValue = true;\n');
+  const patchHash = createHash('sha256').update(patch).digest('hex');
+  const usage = { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 };
+  assert.equal((await send(1, 'thread', { threadId: 'fixture-qa-thread' })).accepted, true);
+  assert.equal((await send(2, 'result', { attempt: 1, baseCommit: 'a'.repeat(40), patchHash, files: ['settings.ts'], usage })).accepted, true);
+  const verification = { attempt: 1, patchHash, checks: [{ name: 'unit', status: 'passed', exitCode: 0, durationMs: 20 }] };
+  assert.equal((await send(3, 'verification', verification)).accepted, false, 'QA requires the archived patch');
+  const upload = await globalThis.fetch(new URL(`/worker-executions/${run.id}/artifact`, api), {
+    method: 'PUT', body: patch,
+    headers: { Authorization: `Bearer ${credential.workerId}.${credential.token}`, 'Content-Type': 'application/octet-stream' },
+    signal: globalThis.AbortSignal.timeout(10_000),
+  });
+  assert.equal(upload.status, 200);
+  assert.equal((await send(3, 'verification', verification)).accepted, true);
+  assert.equal((await send(3, 'verification', verification)).accepted, true);
+  assert.equal((await request(`${taskPath}/executions`, { token }))[0].qa.state, 'queued');
+  assert.equal((await request(taskPath, { token })).status, 'TESTING');
+  await request(`${runPath}/review`, { ...review, status: 409 });
+
+  assert.equal(await qa.runNext(), true);
+  assert.equal((await request(`${taskPath}/executions`, { token }))[0].qa.state, 'failed');
+  await request(`${runPath}/qa/retry`, { token: viewerToken, method: 'POST', status: 403 });
+  await request(`${runPath}/qa/retry`, { token, method: 'POST', status: 503 });
+  await qa.retry(account, first.id, queued.taskId, run.id);
+  assert.equal(await qa.runNext(), true);
+  assert.equal(await qa.runNext(), false);
+  assert.equal(qaCalls[1].agent.model, 'fixture-qa');
+  assert.equal(qaCalls[1].agent.version, 2);
+  assert.deepEqual(qaCalls[1].input.task.acceptanceCriteria, outputs.PRODUCT_MANAGER.acceptanceCriteria);
+  assert.equal(qaCalls[1].input.verification.patchHash, patchHash);
+  assert.equal(qaCalls[1].input.verification.checks[0].name, 'unit');
+  assert.equal(qaCalls[1].input.patch, patch.subarray(0, 64 * 1024).toString('utf8'));
+  const [qaRun] = await request(`${taskPath}/executions`, { token });
+  assert.equal(qaRun.qa.state, 'completed');
+  assert.equal(qaRun.qa.patchHash, patchHash);
+  assert.equal(qaRun.qa.partialPatch, true);
+  assert.equal(qaRun.qa.assessment.recommendation, 'insufficient_evidence');
+  assert.equal((await request(taskPath, { token })).status, 'REVIEW');
+  const reviewedPage = await globalThis.fetch(new URL(`/?project=${first.id}&task=${queued.taskId}`, web), {
+    headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  const reviewHtml = await reviewedPage.text();
+  assert(reviewHtml.includes('证据不足') && reviewHtml.includes('批准变更') && reviewHtml.includes('截至本轮'));
+  assert.equal((await request(`${runPath}/review`, review)).decision, 'approved');
 
   const cancelled = await planning.start(account, first.id, { ...input, request: 'Cancel during inference' });
   const inFlight = planning.runNext();
@@ -197,7 +265,7 @@ try {
   assert.deepEqual(plan.steps, []);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
-  process.stdout.write('Agent registry, planning recovery, approval and Worker handoff verified.\n');
+  process.stdout.write('Agent registry, planning recovery, approved Worker handoff and patch-bound QA verified.\n');
 } finally {
   await db.onModuleDestroy();
 }

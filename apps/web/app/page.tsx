@@ -28,6 +28,7 @@ const issues: Record<string, string> = {
   'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
   'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
   'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
+  'agent-qa': '无法重试 QA，请检查当前任务及检查报告。',
 };
 
 export default async function Home({ searchParams }: {

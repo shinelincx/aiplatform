@@ -1,4 +1,4 @@
-import type { ExecutionReview, VerificationCheck, VerificationReport } from './verification';
+import type { ExecutionQa, ExecutionReview, VerificationCheck, VerificationReport } from './verification';
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
 
@@ -37,6 +37,7 @@ export interface ExecutionRun {
   review: ExecutionReview | null;
   artifact: PatchArtifact | null;
   delivery: ExecutionDelivery | null;
+  qa?: ExecutionQa | null;
 }
 
 export interface ExecutionEvent {

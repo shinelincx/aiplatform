@@ -87,6 +87,10 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         if (assignment) assignments[role] = assignment;
       }
       if (!developerRoles.some((role) => assignments[role])) throw new ConflictException('No developer role is enabled');
+      const qa = this.registry.snapshot(registry, 'QA_ENGINEER', this.model.defaultModel());
+      if (!qa) throw new ConflictException('The QA role is disabled');
+      if (!qa.model) throw new ServiceUnavailableException('QA model is unconfigured');
+      assignments.QA_ENGINEER = qa;
 
       const taskId = randomUUID();
       const title = [...request.split(/\r?\n/, 1)[0]].slice(0, 120).join('');

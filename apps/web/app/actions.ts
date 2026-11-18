@@ -146,7 +146,8 @@ export async function startAgentPlan(form: FormData) {
   const response = await execute(`${endpoint}/agent-plans`, {
     method: 'POST', body: JSON.stringify({ request: form.get('request'), repositoryId: form.get('repositoryId') }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config' : issue(response, 'agent-plan')}`);
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config'
+    : response?.status === 409 ? 'agent-plan' : issue(response, 'agent-plan')}`);
   const plan = await response.json() as AgentPlan;
   redirect(`${query}&task=${plan.taskId}#task-detail`);
 }
@@ -156,6 +157,15 @@ export async function retryAgentPlan(form: FormData) {
   if (!id) redirect(query);
   const response = await execute(`${endpoint}/agent-plan/retry`, { method: 'POST' });
   if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config' : issue(response, 'agent-plan')}`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function retryExecutionQa(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/qa/retry`, { method: 'POST' });
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config' : issue(response, 'agent-qa')}`);
   redirect(`${query}#task-detail`);
 }
 

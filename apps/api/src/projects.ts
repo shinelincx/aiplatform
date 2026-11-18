@@ -98,6 +98,15 @@ export class ProjectsService {
          INSERT INTO task_events (project_id, task_id, event_type, payload)
          SELECT project_id, task_id, 'agent.plan_cancelled', jsonb_build_object('actorId', $2::uuid) FROM cancelled`,
         [projectId, actor.id]);
+      await client.query(
+        `WITH cancelled AS (
+          UPDATE execution_qa q SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL, updated_at = now()
+          FROM execution_runs r WHERE q.run_id = r.id AND r.project_id = $1 AND q.state IN ('queued','running','failed')
+          RETURNING r.project_id, r.task_id, r.id
+         )
+         INSERT INTO task_events (project_id, task_id, event_type, payload)
+         SELECT project_id, task_id, 'agent.qa_cancelled', jsonb_build_object('actorId', $2::uuid, 'runId', id) FROM cancelled`,
+        [projectId, actor.id]);
       await this.audit(client, actor.id, projectId, 'project.archived', projectId);
     });
   }

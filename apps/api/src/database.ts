@@ -240,6 +240,19 @@ const migrations = [
   );
   CREATE INDEX task_agent_plan_queue ON task_agent_plans (state, updated_at);
   ALTER TABLE execution_runs ADD COLUMN developer_assignment jsonb;`,
+  `ALTER TABLE execution_runs ADD COLUMN qa_assignment jsonb;
+  CREATE TABLE execution_qa (
+    run_id uuid PRIMARY KEY REFERENCES execution_runs(id),
+    patch_hash varchar(64) NOT NULL,
+    state text NOT NULL CHECK (state IN ('queued','running','failed','completed','cancelled')),
+    assessment jsonb,
+    partial_patch boolean NOT NULL DEFAULT false,
+    lease_id uuid,
+    lease_expires_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (run_id, patch_hash) REFERENCES execution_artifacts(run_id, sha256)
+  );
+  CREATE INDEX execution_qa_queue ON execution_qa (state, updated_at);`,
 ];
 
 @Injectable()
