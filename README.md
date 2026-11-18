@@ -91,7 +91,7 @@ Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时�
 
 执行记录显示每轮 Codex 的状态和耗时、命令退出码、文件变更数量及工具调用状态。Worker 和控制面只保留这些结构化字段，以便重连后重放并定位失败。[OpenAI Codex SDK 流式事件](https://learn.chatgpt.com/docs/codex-sdk)
 
-在已安装依赖的 Linux 或 WSL Worker 上，可以用本地 Responses 夹具验证原生 CLI、SDK 流式事件、同线程修复和 Git 工作区隔离。
+在已安装依赖的 Linux 或 WSL Worker 上，可以用本地 Responses 夹具验证原生 CLI、SDK 流式事件、同线程修复、Git 工作区隔离和取消正在运行的命令。
 
 ```sh
 npm run build:shared

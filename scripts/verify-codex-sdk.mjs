@@ -6,12 +6,14 @@ import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Codex } from '@openai/codex-sdk';
 import { WebSocketServer } from 'ws';
 import { configureExecution, isolatedProfile, summarizeItem } from '../apps/worker/dist/codex-execution.js';
 
 const fixtureKey = 'ado-local-sdk-fixture';
 const revisions = ['implemented by SDK fixture', 'repaired by SDK fixture'];
+const commandSeconds = 6;
 const usage = { input_tokens: 12, input_tokens_details: { cached_tokens: 0 },
   output_tokens: 5, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 17 };
 const quote = (path) => "'" + path.replaceAll("'", "'\\''") + "'";
@@ -45,6 +47,7 @@ async function verify() {
     let shellTool;
     let pending;
     let fixtureError;
+    let cancelling = false;
 
     function nextItem(body) {
       shellTool = body.tools?.find(({ name }) => name === 'exec_command' || name === 'shell_command')?.name ?? shellTool;
@@ -59,9 +62,13 @@ async function verify() {
         return { id: 'msg_' + revision, type: 'message', role: 'assistant', status: 'completed',
           content: [{ type: 'output_text', text: 'Updated the local fixture.', annotations: [] }] };
       }
-      assert(revision < revisions.length);
+      assert(cancelling || revision < revisions.length);
       assert(shellTool, 'Codex did not advertise a shell tool');
-      const command = [
+      const command = (cancelling ? [
+        'printf "started\n" > cancellation-started',
+        '/bin/sleep ' + commandSeconds,
+        'printf "late write\n" > cancellation-late-write',
+      ] : [
         '(test ! -r ' + quote(outside) + ' || exit 21)',
         '(test -z "$OPENAI_API_KEY" && test -z "$CODEX_API_KEY" || exit 22)',
         '( (printf no > ' + quote(outside + '.new') + ') 2>/dev/null || :)',
@@ -70,7 +77,7 @@ async function verify() {
           + ' 2>/dev/null; then exit 24; fi)',
         'printf "%s\\n" ' + quote(revisions[revision]) + ' > fixture.txt',
         'printf "local-fixture-written\\n"',
-      ].join(' && ');
+      ]).join(' && ');
       pending = 'call_' + revision;
       const args = shellTool === 'exec_command' ? { cmd: command } : { command };
       return { id: 'fc_' + revision, type: 'function_call', name: shellTool, call_id: pending,
@@ -135,7 +142,31 @@ async function verify() {
     }
     assert.equal(revision, revisions.length);
     assert.equal(await readFile(outside, 'utf8'), 'outside fixture');
-    console.log('Codex SDK and native CLI streamed two turns on one thread, changed the Git worktree, and enforced sandbox isolation.');
+
+    cancelling = true;
+    const stop = new globalThis.AbortController();
+    const signal = globalThis.AbortSignal.any([stop.signal, globalThis.AbortSignal.timeout(15000)]);
+    const { events } = await thread.runStreamed('Start the long-running fixture command.', { signal });
+    const stream = (async () => {
+      for await (const event of events) assert.notEqual(event.type, 'turn.completed', 'Expected the turn to be cancelled');
+    })();
+    const ended = stream.then(() => null, (error) => error);
+    try {
+      const marker = join(checkout, 'cancellation-started');
+      while (await readFile(marker).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+        return null;
+      }) === null) await delay(50, undefined, { signal });
+      stop.abort();
+      const stopped = await ended;
+      assert.equal(stopped?.name, 'AbortError', 'Expected the SDK stream to stop when the command was running');
+      await delay(commandSeconds * 1000 + 500);
+      await assert.rejects(readFile(join(checkout, 'cancellation-late-write')), { code: 'ENOENT' });
+    } finally {
+      stop.abort();
+      await ended;
+    }
+    console.log('Native Codex SDK streaming, same-thread repair, sandbox isolation, and cancellation passed.');
   } finally {
     for (const socket of gateway.clients) socket.terminate();
     gateway.close();
