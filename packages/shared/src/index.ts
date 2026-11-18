@@ -10,8 +10,8 @@ export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerMessag
 export type { ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
-export { canRepair, maxVerificationAttempts, parseCheckPlan } from './verification';
-export type { CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
+export { canRepair, checkFailureStatuses, maxVerificationAttempts, parseCheckPlan } from './verification';
+export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
 export type { ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
 
 export interface ApiHealth {

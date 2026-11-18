@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  canRepair, canTransitionTask, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account, type CheckResult,
+  canRepair, canTransitionTask, checkFailureStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
+  type CheckFailureReason, type CheckResult,
   type AgentAssignment, type ArchitecturePlan, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
   type VerificationCheck, type VerificationReport, type WorkerRecovery,
 } from '@ado/shared';
@@ -20,7 +21,7 @@ import type { WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
-  finished_at AS "finishedAt", verification_report AS report`;
+  finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId"`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
@@ -33,8 +34,15 @@ function attemptInput(value: unknown) {
   return value;
 }
 
+function requestedWorker(body: unknown) {
+  const { workerId } = objectInput(body ?? {});
+  if (workerId === undefined || workerId === null) return null;
+  if (!isWorkerId(workerId)) throw new BadRequestException('Invalid Worker ID');
+  return workerId;
+}
+
 function checkResult(value: unknown): CheckResult {
-  const { name, status, exitCode, durationMs } = objectInput(value);
+  const { name, status, exitCode, durationMs, reason } = objectInput(value);
   if (status !== 'passed' && status !== 'failed' && status !== 'timed_out' && status !== 'unavailable') {
     throw new BadRequestException('Invalid check status');
   }
@@ -44,7 +52,12 @@ function checkResult(value: unknown): CheckResult {
     || (status === 'failed') !== (typeof exitCode === 'number' && exitCode > 0)) {
     throw new BadRequestException('Invalid check result');
   }
-  return { name: textInput(name, 'check name', 48), status, exitCode, durationMs };
+  if (reason !== undefined && (typeof reason !== 'string' || !Object.hasOwn(checkFailureStatuses, reason)
+    || checkFailureStatuses[reason as CheckFailureReason] !== status)) {
+    throw new BadRequestException('Invalid check failure reason');
+  }
+  return { name: textInput(name, 'check name', 48), status, exitCode, durationMs,
+    ...(reason && { reason: reason as CheckFailureReason }) };
 }
 
 function executionEvent(body: unknown) {
@@ -163,7 +176,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return rows;
   }
 
-  async queue(actor: Account, projectId: string, taskId: string) {
+  async queue(actor: Account, projectId: string, taskId: string, body?: unknown) {
+    const workerId = requestedWorker(body);
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const task = await this.tasks.find(projectId, taskId, client);
@@ -198,9 +212,48 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
         [projectId, taskId, task.repositoryId, planned ? { plan: planned.plan, agent: planned.agent } : null, planned?.qa ?? null],
       );
+      if (workerId) {
+        await this.assignWorker(client, projectId, run.id, workerId);
+        run.requestedWorkerId = workerId;
+      }
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
+        ...(workerId && { requestedWorkerId: workerId }),
         ...(planned && { developer: planned.agent.role, developerVersion: planned.agent.version }) });
       return run;
+    });
+  }
+
+  private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null) {
+    if (workerId) {
+      const eligible = await client.query(
+        `SELECT 1 FROM workers w
+         JOIN worker_projects wp ON wp.worker_id = w.id AND wp.project_id = $1
+         JOIN execution_runs r ON r.project_id = wp.project_id AND r.id = $2
+         JOIN repositories g ON g.id = r.repository_id
+         WHERE w.id = $3 AND NOT w.disabled AND w.credential_expires_at > now() AND w.capabilities ? 'codexVersion'
+           AND (jsonb_array_length(r.check_plan) = 0 OR (
+             w.capabilities->'verificationVersion' = '1'::jsonb
+             AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
+           ))`, [projectId, runId, workerId]);
+      if (!eligible.rowCount) throw new ConflictException('Worker is not eligible for this execution');
+    }
+    await client.query('UPDATE execution_runs SET requested_worker_id = $2 WHERE id = $1', [runId, workerId]);
+  }
+
+  async reassign(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
+    const workerId = requestedWorker(body);
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const task = await this.tasks.find(projectId, taskId, client);
+      const { rows: [run] } = await client.query<Pick<ExecutionRun, 'status' | 'requestedWorkerId'>>(
+        `SELECT status, requested_worker_id AS "requestedWorkerId" FROM execution_runs
+         WHERE id = $1 AND project_id = $2 AND task_id = $3 FOR UPDATE`, [runId, projectId, taskId]);
+      if (!run) throw new NotFoundException('Execution run not found');
+      if (task.status !== 'QUEUED' || run.status !== 'queued') throw new ConflictException('Only a queued execution can be reassigned');
+      if (run.requestedWorkerId === workerId) return;
+      await this.assignWorker(client, projectId, runId, workerId);
+      await this.tasks.event(client, task, 'task.worker_reassigned', { runId, actorId: actor.id, requestedWorkerId: workerId });
+      await this.projects.audit(client, actor.id, projectId, 'execution.worker_reassigned', runId);
     });
   }
 
@@ -306,8 +359,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          JOIN tasks t ON t.id = r.task_id AND t.status = 'QUEUED'
          JOIN repositories g ON g.id = r.repository_id
          WHERE r.status = 'queued' AND NOT r.cancel_requested
+           AND (r.requested_worker_id IS NULL OR r.requested_worker_id = $1)
            AND ($2::boolean OR jsonb_array_length(r.check_plan) = 0)
-           AND ($3::boolean OR r.qa_assignment IS NULL OR jsonb_array_length(r.check_plan) = 0)
+           AND ($3::boolean OR (r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR jsonb_array_length(r.check_plan) = 0)
          ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`,
         [worker.workerId, capabilities.canVerify === true, capabilities.canArchive === true],
       );
@@ -493,8 +547,15 @@ export class ExecutionsController {
 
   @Post()
   queue(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
-    @Param('taskId', ParseUUIDPipe) taskId: string) {
-    return this.executions.queue(actor, projectId, taskId);
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Body() body: unknown) {
+    return this.executions.queue(actor, projectId, taskId, body);
+  }
+
+  @Post(':runId/worker')
+  @HttpCode(204)
+  reassign(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string, @Body() body: unknown) {
+    return this.executions.reassign(actor, projectId, taskId, runId, body);
   }
 
   @Get(':runId/events')

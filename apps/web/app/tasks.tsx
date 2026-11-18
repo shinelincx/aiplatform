@@ -138,7 +138,8 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
             <form action={archiveTask} className="repository-form">{taskIdentity}<button className="secondary">归档任务</button></form>}
         </>}
         <Executions project={project} task={task}
-          hasChecks={Boolean(boundRepository?.checks.length)} autoDraftPr={boundRepository?.autoDraftPr === true} />
+          hasChecks={Boolean(boundRepository?.checks.length)} autoDraftPr={boundRepository?.autoDraftPr === true}
+          planned={plan?.state === 'completed'} />
         <details>
           <summary>任务记录</summary>
           <ol className="members">

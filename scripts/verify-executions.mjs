@@ -5,7 +5,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { URL } from 'node:url';
@@ -19,6 +19,7 @@ import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
 import { WorkerJobs } from '../apps/worker/src/jobs.ts';
+import { runVerification } from '../apps/worker/src/verification.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
 const web = process.env.ADO_VERIFY_WEB_URL ?? 'http://web:3000';
@@ -101,9 +102,12 @@ try {
     token, method: 'POST', body: { name: 'Execution fixture' }, status: 201,
   });
   const approved = await credentials(first.id);
+  const alternateCredential = await credentials(first.id);
   const foreignCredential = await credentials(second.id);
   const outsider = await open(foreignCredential);
   const observer = await open(await credentials(first.id), false);
+  const alternate = await open(alternateCredential);
+  let worker = await open(approved);
 
   // Database fixtures establish a repository binding without contacting GitHub in local CI.
   const { rows: [repository] } = await db.query(
@@ -125,6 +129,8 @@ try {
     return { id: created.id, path: base, runs: `${base}/executions` };
   };
   const task = await newTask('WEB-EXECUTION');
+  await request(task.runs, { token, method: 'POST', body: { workerId: foreignCredential.workerId }, status: 409 });
+  assert.deepEqual(await request(task.runs, { token }), []);
   const home = await globalThis.fetch(web);
   const loginAction = (await home.text()).match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
   assert(loginAction, 'Expected login form');
@@ -142,21 +148,32 @@ try {
   const formHtml = (await rendered.text()).match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*派发任务<\/button><\/form>/)?.[0];
   const action = formHtml?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
   assert(action, 'Expected approved task dispatch form');
+  assert(formHtml.includes(approved.workerId), 'Expected a project Worker in the dispatch form');
   const dispatch = new globalThis.FormData();
   dispatch.set(action, '');
   dispatch.set('projectId', first.id);
   dispatch.set('taskId', task.id);
+  dispatch.set('workerId', approved.workerId);
   assert.equal((await postForm(selected, dispatch, cookie)).status, 303);
   const [initial] = await request(task.runs, { token });
   assert.equal(initial.status, 'queued');
+  assert.equal(initial.requestedWorkerId, approved.workerId);
   await request(task.runs, { token, method: 'POST', status: 409 });
   assert.equal(await outsider.send('WORKER_CLAIM'), null);
   assert.equal(await observer.send('WORKER_CLAIM'), null);
+  assert.equal(await alternate.send('WORKER_CLAIM'), null);
+  const assignmentPath = `${task.runs}/${initial.id}/worker`;
+  const assign = (workerId, status = 204) => request(assignmentPath, { token, method: 'POST', body: { workerId }, status });
+  await assign(foreignCredential.workerId, 409);
+  await assign(alternateCredential.workerId);
+  assert.equal(await worker.send('WORKER_CLAIM'), null);
+  await assign(null);
+  assert.equal((await request(task.runs, { token }))[0].requestedWorkerId, null);
 
-  let worker = await open(approved);
   const offer = await worker.send('WORKER_CLAIM');
   assert.equal(offer.id, initial.id);
   assert.equal(offer.taskId, task.id);
+  await assign(alternateCredential.workerId, 409);
   assert.equal(offer.repository, 'test/execution-fixture');
   assert.equal(await worker.send('WORKER_CLAIM'), null);
   const thread = { runId: offer.id, sequence: 1, kind: 'thread', payload: { threadId: 'fixture-thread' } };
@@ -289,13 +306,33 @@ try {
   assert.equal((await sendEvent(1, 'thread', { threadId: 'review-fixture' })).accepted, true);
   fixtureRepo = mkdtempSync(join(tmpdir(), 'ado-release-fixture-'));
   const git = (...args) => execFileSync('git', args, { cwd: fixtureRepo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const shim = join(workerJournal, 'check-sandbox-fixture');
+  writeFileSync(shim, '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = -- ]; then shift; exec "$@"; fi\n  shift\ndone\nexit 126\n',
+    { mode: 0o700 });
+  const verifyFixture = (name, argv, directory = '.') => ({ name, kind: 'unit', argv, directory, timeoutSeconds: 1 });
+  const [failedCheck, timeoutCheck, directoryCheck, toolCheck, passingCheck] = await runVerification({
+    binary: shim, worktree: fixtureRepo, profile: [], env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+  }, [
+    verifyFixture('failed', ['node', '-e', 'process.stderr.write("older".repeat(1800)+"\u001b[0m expected assertion\\n");process.exitCode=1']),
+    verifyFixture('deadline', ['node', '-e', 'setTimeout(() => {}, 5000)']),
+    verifyFixture('directory', ['node', '-e', ''], 'missing'),
+    verifyFixture('tool', ['ado-this-tool-does-not-exist']),
+    verifyFixture('passing', ['node', '-e', 'process.stdout.write("success")']),
+  ], globalThis.AbortSignal.timeout(8000));
+  assert.deepEqual([failedCheck, timeoutCheck, directoryCheck, toolCheck, passingCheck].map(({ result: value }) => value.reason),
+    ['nonzero_exit', 'timeout', 'directory_unavailable', 'executable_unavailable', undefined]);
+  assert(failedCheck.diagnostic.endsWith('expected assertion'));
+  assert(Buffer.byteLength(failedCheck.diagnostic) <= 4096);
+  assert.equal(failedCheck.diagnostic.includes('\u001b'), false);
+  assert.equal(passingCheck.diagnostic, undefined);
   git('init', '-q', '-b', 'main');
   writeFileSync(join(fixtureRepo, 'index.ts'), 'old\n');
   git('add', 'index.ts');
   git('-c', 'user.name=Release Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'base');
   const baseline = git('rev-parse', 'HEAD').trim();
   const candidate = (attempt, patchHash) => ({ ...result.payload, baseCommit: baseline, attempt, patchHash });
-  const check = (passed) => [{ name: 'unit', durationMs: 20, status: passed ? 'passed' : 'failed', exitCode: passed ? 0 : 1 }];
+  const check = (passed) => [{ name: 'unit', durationMs: 20, status: passed ? 'passed' : 'failed', exitCode: passed ? 0 : 1,
+    ...(!passed && { reason: 'nonzero_exit', diagnostic: 'private fixture text' }) }];
   const initialHash = 'c'.repeat(64);
   const patchBytes = Buffer.from('diff --git a/index.ts b/index.ts\n--- a/index.ts\n+++ b/index.ts\n@@ -1 +1 @@\n-old\n+new\n');
   const repairedHash = createHash('sha256').update(patchBytes).digest('hex');
@@ -354,6 +391,8 @@ try {
   const reportPage = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
   const reportHtml = (await reportPage.text()).replace(/<!--[\s\S]*?-->/g, '');
   assert(reportHtml.includes('第 2 次检查报告') && reportHtml.includes('已批准'));
+  assert(reportHtml.includes('第 1 次检查报告') && reportHtml.includes('检查命令返回非零退出码'));
+  assert(!reportHtml.includes('private fixture text'));
   assert(reportHtml.includes('发布分支并创建草稿 PR'));
   if (!process.env.GITHUB_APP_ID) await request(deliveryPath, { token, method: 'POST', status: 503 });
 
@@ -501,6 +540,7 @@ try {
   assert.equal((await request(rejected.runs, { token }))[0].delivery, null);
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');
+  console.log('Worker assignment isolation, reassignment and structured check diagnostics passed');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');
   console.log('Patch archive integrity, download and publication gates passed');
 } finally {

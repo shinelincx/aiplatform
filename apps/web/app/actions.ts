@@ -242,8 +242,21 @@ export async function archiveTask(form: FormData) {
 export async function startExecution(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
-  const response = await execute(`${endpoint}/executions`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  const workerId = form.get('workerId') || null;
+  if (workerId && !isWorkerId(workerId)) redirect(`${query}&issue=worker-assignment#task-detail`);
+  const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId }) });
+  if (!response?.ok) redirect(`${query}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function changeExecutionWorker(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  const workerId = form.get('workerId') || null;
+  if (!id || !isWorkerId(runId)) redirect(query);
+  if (workerId && !isWorkerId(workerId)) redirect(`${query}&issue=worker-assignment#task-detail`);
+  const response = await execute(`${endpoint}/executions/${runId}/worker`, { method: 'POST', body: JSON.stringify({ workerId }) });
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'worker-assignment' : issue(response, 'worker-assignment')}#task-detail`);
   redirect(`${query}#task-detail`);
 }
 

@@ -1,5 +1,5 @@
-import type { ExecutionEvent, ExecutionRun, Project, Task } from '@ado/shared';
-import { publishExecution, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
+import type { CheckFailureReason, CheckResult, ExecutionEvent, ExecutionRun, Project, Task, WorkerReport } from '@ado/shared';
+import { changeExecutionWorker, publishExecution, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
 
@@ -30,6 +30,14 @@ function label(event: ExecutionEvent) {
 }
 
 const checkLabels = { passed: '通过', failed: '失败', timed_out: '超时', unavailable: '无法运行' } as const;
+const checkReasons: Record<CheckFailureReason, string> = {
+  directory_unavailable: '检查目录不存在或超出工作区',
+  executable_unavailable: 'Worker 缺少检查所需的可执行文件',
+  start_failed: '无法启动检查进程',
+  process_terminated: '检查进程意外退出',
+  timeout: '达到检查时间上限',
+  nonzero_exit: '检查命令返回非零退出码',
+};
 const deliveryLabels = { queued: '等待发布', publishing: '正在发布分支', published: '草稿 PR 已关联', failed: '发布失败' };
 const pullLabels = { open: '开放', closed: '已关闭', merged: '已合并', changed: 'PR 与审核版本不匹配' };
 const qaLabels = { queued: '等待 QA', running: 'QA 审查中', failed: 'QA 审查失败', completed: 'QA 已提交意见', cancelled: 'QA 已取消' };
@@ -42,13 +50,40 @@ const deliveryErrors: Record<string, string> = {
   github_failed: 'GitHub 发布或 PR 创建失败，请检查安装权限后重试。',
 };
 
-export async function Executions({ project, task, hasChecks, autoDraftPr }: {
-  project: Project; task: Task; hasChecks: boolean; autoDraftPr: boolean;
+function WorkerChoice({ workers, selected }: { workers: WorkerReport[]; selected?: string | null }) {
+  return <label>执行 Worker<select name="workerId" defaultValue={selected ?? ''}>
+    <option value="">自动分配</option>
+    {selected && !workers.some(({ id }) => id === selected) &&
+      <option value={selected}>当前指定 Worker 不可用</option>}
+    {workers.map(({ id, name, status }) => (
+      <option key={id} value={id}>{name} · {status === 'online' ? '在线' : '离线'}</option>
+    ))}
+  </select></label>;
+}
+
+function CheckResults({ checks }: { checks: CheckResult[] }) {
+  return <ul className="members">{checks.map((check) => <li key={check.name}>
+    <div>
+      <span>{check.name} · {checkLabels[check.status]}</span>
+      {check.reason && <div><small>{checkReasons[check.reason]}</small></div>}
+    </div>
+    <small>{(check.durationMs / 1000).toFixed(2)} 秒{check.exitCode !== null && ` · 退出码 ${check.exitCode}`}</small>
+  </li>)}</ul>;
+}
+
+export async function Executions({ project, task, hasChecks, autoDraftPr, planned }: {
+  project: Project; task: Task; hasChecks: boolean; autoDraftPr: boolean; planned: boolean;
 }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
-  const runs = await read<ExecutionRun[]>(url) ?? [];
+  const [runsResult, workersResult] = await Promise.all([
+    read<ExecutionRun[]>(url), read<WorkerReport[]>(`/projects/${project.id}/workers`),
+  ]);
+  const runs = runsResult ?? [];
+  const workers = workersResult ?? [];
   const latest = runs[0];
   const events = latest ? await read<ExecutionEvent[]>(`${url}/${latest.id}/events`) : null;
+  const earlierChecks = events?.filter(({ kind, payload }) =>
+    kind === 'verification' && typeof payload.attempt === 'number' && payload.attempt < (latest?.report?.attempt ?? 0));
   const active = latest?.status === 'queued' || latest?.status === 'running';
   const waitingOnGithub = latest?.delivery?.state === 'queued' && !latest.delivery.configured;
   const publishing = (latest?.delivery?.state === 'queued' && !waitingOnGithub) || latest?.delivery?.state === 'publishing';
@@ -58,6 +93,11 @@ export async function Executions({ project, task, hasChecks, autoDraftPr }: {
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
     && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || (awaitingChecks && hasChecks));
+  const candidates = workers.filter(({ status, capabilities }) =>
+    status !== 'disabled' && Boolean(capabilities?.codexVersion)
+    && (!hasChecks || capabilities?.verificationVersion === 1)
+    && (!hasChecks || (!autoDraftPr && !planned) || capabilities?.artifactVersion === 1));
+  const workerName = (id: string) => workers.find((worker) => worker.id === id)?.name ?? id.slice(0, 8);
   const identity = <>
     <input type="hidden" name="projectId" value={project.id} />
     <input type="hidden" name="taskId" value={task.id} />
@@ -66,22 +106,33 @@ export async function Executions({ project, task, hasChecks, autoDraftPr }: {
   return <section aria-labelledby="execution-heading" className="repository-form">
     <h4 id="execution-heading">Codex 执行</h4>
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
-    {canStart && <form action={startExecution}>{identity}<button>{latest ? '重试执行' : '派发任务'}</button></form>}
+    {canStart && <form action={startExecution} className="fields">
+      {identity}<WorkerChoice workers={candidates} /><button>{latest ? '重试执行' : '派发任务'}</button>
+    </form>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
       <p role="status">{latest.cancelRequested && active ? '正在取消'
         : latest.status === 'succeeded' && latest.report?.passed ? '检查已通过' : stateLabels[latest.status]}</p>
       {owner && awaitingChecks && !hasChecks && <p className="muted">配置仓库检查计划后可重新派发。</p>}
+      {latest.requestedWorkerId && <p>指定 Worker · {workerName(latest.requestedWorkerId)}</p>}
+      {latest.workerId && <p>领取 Worker · {workerName(latest.workerId)}</p>}
+      {owner && project.status === 'active' && latest.status === 'queued' && <form action={changeExecutionWorker} className="fields">
+        {identity}<input type="hidden" name="runId" value={latest.id} />
+        <WorkerChoice key={latest.requestedWorkerId} workers={candidates} selected={latest.requestedWorkerId} />
+        <button className="secondary">更新分配</button>
+      </form>}
       {latest.threadId && <p className="description">线程 ID {latest.threadId}</p>}
       {owner && active && !latest.cancelRequested && <form action={stopExecution}>
         {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">取消执行</button>
       </form>}
       {latest.report && <div>
         <h5>第 {latest.report.attempt} 次检查报告</h5>
-        <ul className="members">{latest.report.checks.map((check) => <li key={check.name}>
-          <span>{check.name} · {checkLabels[check.status]}</span>
-          <small>{(check.durationMs / 1000).toFixed(2)} 秒{check.exitCode !== null && ` · 退出码 ${check.exitCode}`}</small>
-        </li>)}</ul>
+        <CheckResults checks={latest.report.checks} />
+        {earlierChecks?.map(({ sequence, payload }) => Array.isArray(payload.checks) &&
+          <details key={sequence}>
+            <summary>第 {String(payload.attempt)} 次检查报告</summary>
+            <CheckResults checks={payload.checks as CheckResult[]} />
+          </details>)}
       </div>}
       {latest.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${latest.id}`}>下载受测补丁</a>
         {' '}<small>{Math.ceil(latest.artifact.size / 1024)} KB</small></p>}

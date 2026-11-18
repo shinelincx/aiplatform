@@ -11,7 +11,18 @@ export interface CheckResult {
   status: 'passed' | 'failed' | 'timed_out' | 'unavailable';
   durationMs: number;
   exitCode: number | null;
+  reason?: CheckFailureReason;
 }
+
+export const checkFailureStatuses = {
+  directory_unavailable: 'unavailable',
+  executable_unavailable: 'unavailable',
+  start_failed: 'unavailable',
+  process_terminated: 'unavailable',
+  timeout: 'timed_out',
+  nonzero_exit: 'failed',
+} as const;
+export type CheckFailureReason = keyof typeof checkFailureStatuses;
 
 export interface VerificationReport {
   attempt: number;

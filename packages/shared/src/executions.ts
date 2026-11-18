@@ -28,6 +28,7 @@ export interface ExecutionRun {
   id: string;
   status: ExecutionState;
   workerId: string | null;
+  requestedWorkerId?: string | null;
   threadId: string | null;
   lastSequence: number;
   cancelRequested: boolean;

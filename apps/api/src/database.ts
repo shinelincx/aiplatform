@@ -254,6 +254,7 @@ const migrations = [
   );
   CREATE INDEX execution_qa_queue ON execution_qa (state, updated_at);`,
   `ALTER TABLE repositories ADD COLUMN auto_draft_pr boolean NOT NULL DEFAULT false;`,
+  `ALTER TABLE execution_runs ADD COLUMN requested_worker_id uuid REFERENCES workers(id);`,
 ];
 
 @Injectable()

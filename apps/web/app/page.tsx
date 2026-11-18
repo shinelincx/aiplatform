@@ -27,6 +27,7 @@ const issues: Record<string, string> = {
   'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
+  'worker-assignment': '无法分配 Worker，请检查任务是否仍在排队，以及 Worker 的项目授权和执行能力。',
   'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
   'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
   'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
