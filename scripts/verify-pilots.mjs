@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import process from 'node:process';
 import { URL } from 'node:url';
+import { verifyWorkflow } from './pilot-workflow-evidence.mjs';
 
 const [fitbestCode, adoCode, ...extra] = process.argv.slice(2);
 const pilots = [
@@ -42,18 +43,24 @@ async function request(path, { method = 'GET', body, binary = false } = {}) {
   return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
 }
 
-async function verifyPull(repository, delivery) {
-  const url = `https://api.github.com/repos/${repository}/pulls/${delivery.pullNumber}`;
-  const response = await fetchOk(url, {
+async function readGitHub(path) {
+  const response = await fetchOk(`https://api.github.com${path}`, {
     headers: {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2026-03-10',
       ...(githubToken && { Authorization: `Bearer ${githubToken}` }),
     },
   });
-  const pull = await response.json();
-  return pull.merged === true && pull.head?.sha === delivery.commitSha && pull.head?.ref === delivery.branch
+  return response.json();
+}
+
+async function verifyPull(repository, delivery) {
+  const pull = await readGitHub(`/repos/${repository}/pulls/${delivery.pullNumber}`);
+  const matches = pull.number === delivery.pullNumber && pull.merged === true
+    && pull.head?.sha === delivery.commitSha && pull.head?.ref === delivery.branch
+    && pull.head?.repo?.full_name?.toLowerCase() === repository.toLowerCase()
     && pull.base?.ref === delivery.baseBranch && pull.base?.repo?.full_name?.toLowerCase() === repository.toLowerCase();
+  return matches ? pull : null;
 }
 
 async function verifyTask(pilot, path, taskCode, repositoryId) {
@@ -97,13 +104,20 @@ async function verifyTask(pilot, path, taskCode, repositoryId) {
   }
 
   const delivery = run.delivery;
-  if (check(delivery?.state === 'published' && delivery.pullState === 'merged' && Number.isSafeInteger(delivery.pullNumber)
+  if (check(delivery?.state === 'published' && delivery.pullState === 'merged' && delivery.branch === `ado/${run.id}`
+    && Number.isSafeInteger(delivery.pullNumber)
     && delivery.pullNumber > 0 && /^[a-f0-9]{40}$/.test(delivery.commitSha ?? ''), `${label} 缺少已合并的交付记录`)) {
     check(history.some(({ eventType, payload }) => eventType === 'task.status_changed' && payload.to === 'COMPLETED' && payload.runId === run.id),
       `${label} 缺少与交付执行对应的完成事件`);
-    const matches = await verifyPull(pilot.repository, delivery);
-    check(matches, `${label} GitHub PR 的合并状态、目标分支或提交与执行记录不一致`);
-    if (matches) process.stdout.write(`${label} · GitHub PR #${delivery.pullNumber} · ${delivery.commitSha}\n`);
+    try {
+      const pull = await verifyPull(pilot.repository, delivery);
+      if (check(pull, `${label} GitHub PR 的合并状态、来源、目标分支或提交与执行记录不一致`)) {
+        const workflow = await verifyWorkflow(readGitHub, pilot, delivery, pull);
+        process.stdout.write(`${label} · GitHub PR #${delivery.pullNumber} · ${delivery.commitSha} · Actions #${workflow}\n`);
+      }
+    } catch (error) {
+      issues.push(`${label} ${error.message}`);
+    }
   }
 }
 
@@ -156,7 +170,7 @@ try {
     for (const issue of issues) process.stderr.write(`待验收 · ${issue}\n`);
     process.exitCode = 1;
   } else {
-    process.stdout.write('两个试点任务的规划、审批、执行、受测补丁以及 GitHub 合并证据均已核对。\n');
+    process.stdout.write('两个试点任务的规划、审批、执行、受测补丁、GitHub Actions 和合并证据均已核对。\n');
   }
 } catch (error) {
   process.stderr.write(`${error.message}\n`);
