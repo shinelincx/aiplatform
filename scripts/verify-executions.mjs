@@ -19,6 +19,7 @@ import { DeliveriesService } from '../apps/api/src/deliveries.ts';
 import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
+import { summarizeItem } from '../apps/worker/src/codex-execution.ts';
 import { WorkerJobs } from '../apps/worker/src/jobs.ts';
 import { copyRepositoryCache } from '../apps/worker/src/repository-cache.ts';
 import { runVerification } from '../apps/worker/src/verification.ts';
@@ -338,7 +339,42 @@ try {
   assert.deepEqual((await request(serverTask.runs, { token }))[0].checkPlan, mavenPlan);
   const nodeTask = await newTask('NODE-ROUTING');
   const nodeRun = await request(nodeTask.runs, { token, method: 'POST', status: 201 });
-  assert.equal((await nodeWorker.send('WORKER_CLAIM')).id, nodeRun.id);
+  const nodeOffer = await nodeWorker.send('WORKER_CLAIM');
+  assert.equal(nodeOffer.id, nodeRun.id);
+  assert.equal(nodeOffer.detailedEvents, true);
+  const rawCommand = { type: 'item.completed', item: { id: 'item_1', type: 'command_execution',
+    status: 'failed', exit_code: 7, command: 'private fixture command', aggregated_output: 'private fixture output' } };
+  const commandSummary = { itemType: 'command_execution', phase: 'completed', status: 'failed', exitCode: 7 };
+  assert.deepEqual(summarizeItem(rawCommand, true), commandSummary);
+  assert.deepEqual(summarizeItem(rawCommand, false), { itemType: 'command_execution', phase: 'completed' });
+  const tool = { type: 'item.completed', item: { id: 'item_2', type: 'mcp_tool_call', status: 'completed',
+    server: 'local', tool: 'probe', arguments: { value: 'private fixture arguments' } } };
+  const toolSummary = summarizeItem(tool, true);
+  assert.deepEqual(toolSummary, { itemType: 'mcp_tool_call', phase: 'completed', status: 'completed' });
+  assert.equal(summarizeItem(tool, false), undefined);
+  const logs = [
+    { kind: 'thread', payload: { threadId: 'timeline-fixture' } },
+    { kind: 'turn', payload: { phase: 'started', attempt: 1 } },
+    { kind: 'item', payload: { ...commandSummary, command: rawCommand.item.command, output: rawCommand.item.aggregated_output } },
+    { kind: 'item', payload: toolSummary },
+    { kind: 'turn', payload: { phase: 'completed', attempt: 1, durationMs: 1200, error: 'private fixture error' } },
+  ];
+  for (const [index, event] of logs.entries()) {
+    const message = { runId: nodeRun.id, sequence: index + 1, ...event };
+    assert.equal((await nodeWorker.send('EXECUTION_EVENT', message)).accepted, true);
+    assert.equal((await nodeWorker.send('EXECUTION_EVENT', message)).accepted, true);
+  }
+  const timeline = await request(`${nodeTask.runs}/${nodeRun.id}/events`, { token });
+  assert.equal(timeline.length, logs.length);
+  assert.deepEqual(timeline[2].payload, commandSummary);
+  assert.deepEqual(timeline[4].payload, { phase: 'completed', attempt: 1, durationMs: 1200 });
+  assert(!JSON.stringify(timeline).includes('private fixture'));
+  const timelinePage = new URL(`/?project=${first.id}&task=${nodeTask.id}`, web);
+  const renderedTimeline = await (await globalThis.fetch(timelinePage, { headers: { Cookie: cookie } })).text();
+  assert(renderedTimeline.includes('命令执行 · 失败 · 退出码 7'));
+  assert(renderedTimeline.includes('第 1 轮 Codex · 完成 · 1.20 秒'));
+  assert(!renderedTimeline.includes('private fixture'));
+  console.log('Codex timeline replay, structured outcomes and sensitive field filtering passed');
 
   const mavenCredential = await credentials(first.id);
   const mavenWorker = await open(mavenCredential, true, true, true, true);
@@ -350,7 +386,7 @@ try {
   for (const [task, run, client] of [[nodeTask, nodeRun, nodeWorker], [serverTask, mavenRun, mavenWorker]]) {
     await request(`${task.runs}/${run.id}/cancel`, { token, method: 'POST', status: 204 });
     assert.equal((await client.send('EXECUTION_EVENT', {
-      runId: run.id, sequence: 1, kind: 'cancelled', payload: {},
+      runId: run.id, sequence: run.id === nodeRun.id ? logs.length + 1 : 1, kind: 'cancelled', payload: {},
     })).accepted, true);
     await client.close();
   }

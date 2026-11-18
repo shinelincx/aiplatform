@@ -47,6 +47,7 @@ function offerInput(value: unknown): ExecutionOffer {
     || typeof offer.defaultBranch !== 'string' || !/^[a-zA-Z0-9_][a-zA-Z0-9_./-]{0,254}$/.test(offer.defaultBranch)
     || typeof offer.title !== 'string' || typeof offer.description !== 'string'
     || (offer.archivePatch !== undefined && typeof offer.archivePatch !== 'boolean')
+    || (offer.detailedEvents !== undefined && offer.detailedEvents !== true)
     || !Array.isArray(offer.acceptanceCriteria) || !offer.acceptanceCriteria.every((item) => typeof item === 'string')
     || (offer.repositoryToken !== undefined && typeof offer.repositoryToken !== 'string')) {
     throw new Error('Invalid execution offer');

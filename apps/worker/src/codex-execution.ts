@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { canRepair, maxVerificationAttempts, type ExecutionOffer, type VerificationReport } from '@ado/shared';
+import type { ThreadEvent } from '@openai/codex-sdk' with { 'resolution-mode': 'import' };
 import { runVerification } from './verification';
 import { copyRepositoryCache } from './repository-cache';
 
@@ -178,6 +179,21 @@ async function checkout(runtime: Runtime, offer: ExecutionOffer, signal: AbortSi
   }
 }
 
+export function summarizeItem(event: ThreadEvent, detailed: boolean) {
+  if (event.type !== 'item.started' && event.type !== 'item.completed') return;
+  const { item } = event;
+  if (item.type !== 'agent_message' && item.type !== 'command_execution' && item.type !== 'file_change'
+    && !(detailed && item.type === 'mcp_tool_call')) return;
+  const summary = { itemType: item.type, phase: event.type === 'item.started' ? 'started' : 'completed' };
+  if (!detailed || summary.phase === 'started' || item.type === 'agent_message') return summary;
+  return {
+    ...summary,
+    ...((item.status === 'completed' || item.status === 'failed') && { status: item.status }),
+    ...(item.type === 'command_execution' && Number.isSafeInteger(item.exit_code) && { exitCode: item.exit_code }),
+    ...(item.type === 'file_change' && { fileCount: item.changes.length }),
+  };
+}
+
 export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, report: Report, cancellation: AbortSignal) {
   const timeout = AbortSignal.timeout(12 * 60_000);
   const signal = AbortSignal.any([cancellation, timeout]);
@@ -225,22 +241,31 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     for (let attempt = 1; attempt <= maxVerificationAttempts; attempt++) {
       signal.throwIfAborted();
       if (attempt > 1) await report('progress', { stage: 'repair' });
+      const startedAt = performance.now();
+      const turnFinished = async (phase: 'completed' | 'failed') => {
+        if (offer.detailedEvents) await report('turn', { attempt, phase, durationMs: Math.round(performance.now() - startedAt) });
+      };
       const { events } = await thread.runStreamed(prompt, { signal });
       let completed = false;
       for await (const event of events) {
         if (event.type === 'thread.started') await report('thread', { threadId: event.thread_id });
-        if ((event.type === 'item.started' || event.type === 'item.completed') && itemCount < 200
-          && ['agent_message', 'command_execution', 'file_change'].includes(event.item.type)) {
+        if (event.type === 'turn.started' && offer.detailedEvents) await report('turn', { attempt, phase: 'started' });
+        const item = itemCount < 200 ? summarizeItem(event, offer.detailedEvents === true) : undefined;
+        if (item) {
           itemCount++;
-          await report('item', { itemType: event.item.type, phase: event.type === 'item.started' ? 'started' : 'completed' });
+          await report('item', item);
         }
         if (event.type === 'turn.completed') {
           completed = true;
           usage.inputTokens += event.usage.input_tokens;
           usage.cachedInputTokens += event.usage.cached_input_tokens;
           usage.outputTokens += event.usage.output_tokens;
+          await turnFinished('completed');
         }
-        if (event.type === 'turn.failed') throw new ExecutionFailure('codex_failed');
+        if (event.type === 'turn.failed') {
+          await turnFinished('failed');
+          throw new ExecutionFailure('codex_failed');
+        }
       }
       if (!completed || !thread.id) throw new ExecutionFailure('codex_failed');
       signal.throwIfAborted();

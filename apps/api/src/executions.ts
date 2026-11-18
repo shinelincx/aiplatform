@@ -85,11 +85,30 @@ function executionEvent(body: unknown) {
     }
     return { runId, sequence, kind: 'progress' as const, payload: { stage } };
   }
+  if (kind === 'turn') {
+    const { phase, durationMs } = input;
+    if (phase !== 'started' && phase !== 'completed' && phase !== 'failed') throw new BadRequestException('Invalid Codex turn');
+    const attempt = attemptInput(input.attempt);
+    if (phase === 'started' ? durationMs !== undefined
+      : typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs < 0) {
+      throw new BadRequestException('Invalid Codex turn duration');
+    }
+    return { runId, sequence, kind: 'turn' as const, payload: { phase, attempt, ...(durationMs !== undefined && { durationMs }) } };
+  }
   if (kind === 'item') {
-    const { itemType, phase } = input;
-    if (typeof itemType !== 'string' || !['agent_message', 'command_execution', 'file_change'].includes(itemType)
+    const { itemType, phase, status, exitCode, fileCount } = input;
+    if (typeof itemType !== 'string' || !['agent_message', 'command_execution', 'file_change', 'mcp_tool_call'].includes(itemType)
       || (phase !== 'started' && phase !== 'completed')) throw new BadRequestException('Invalid Codex item');
-    return { runId, sequence, kind: 'item' as const, payload: { itemType, phase } };
+    if (status !== undefined && (phase !== 'completed' || itemType === 'agent_message'
+      || (status !== 'completed' && status !== 'failed'))) throw new BadRequestException('Invalid Codex item status');
+    if (exitCode !== undefined && (phase !== 'completed' || itemType !== 'command_execution'
+      || typeof exitCode !== 'number' || !Number.isSafeInteger(exitCode))) throw new BadRequestException('Invalid Codex command exit code');
+    if (fileCount !== undefined && (phase !== 'completed' || itemType !== 'file_change'
+      || typeof fileCount !== 'number' || !Number.isSafeInteger(fileCount) || fileCount < 0)) {
+      throw new BadRequestException('Invalid Codex file count');
+    }
+    return { runId, sequence, kind: 'item' as const, payload: { itemType, phase, ...(status && { status }),
+      ...(exitCode !== undefined && { exitCode }), ...(fileCount !== undefined && { fileCount }) } };
   }
   if (kind === 'failed') {
     if (typeof input.code !== 'string' || !failureCodes.includes(input.code)) throw new BadRequestException('Invalid error code');
@@ -370,6 +389,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       );
       if (!offer) return null;
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
+      offer.detailedEvents = true;
       await client.query(
         `UPDATE execution_runs SET status = 'running', worker_id = $2, lease_expires_at = now() + ($3 * interval '1 millisecond'),
           archive_patch = $4, source_branch = $5 WHERE id = $1`,

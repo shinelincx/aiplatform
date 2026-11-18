@@ -21,6 +21,7 @@ export interface ExecutionOffer {
   acceptanceCriteria: string[];
   checks?: VerificationCheck[];
   archivePatch?: boolean;
+  detailedEvents?: true;
   development?: DevelopmentHandoff | null;
 }
 

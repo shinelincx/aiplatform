@@ -18,15 +18,27 @@ const eventLabels: Record<string, string> = {
   maven_cache_unavailable: '无法准备仓库的 Maven 缓存',
   repair: '根据检查结果修复', checks_changed_candidate: '测试改动了待审核补丁',
   artifact_upload_failed: '补丁归档失败',
-  agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更',
+  agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更', mcp_tool_call: 'MCP 工具调用',
 };
 function label(event: ExecutionEvent) {
   if (event.kind === 'thread') return 'Codex 线程已创建';
   if (event.kind === 'result') return '变更结果已入库';
   if (event.kind === 'verification') return `第 ${event.payload.attempt} 次检查 · ${event.payload.passed ? '通过' : '未通过'}`;
   if (event.kind === 'cancelled') return 'Worker 已取消执行';
+  if (event.kind === 'turn' && typeof event.payload.attempt === 'number') {
+    const { attempt, phase, durationMs } = event.payload;
+    const state = phase === 'started' ? '开始' : phase === 'failed' ? '失败' : '完成';
+    const duration = typeof durationMs === 'number' ? ` · ${(durationMs / 1000).toFixed(2)} 秒` : '';
+    return `第 ${attempt} 轮 Codex · ${state}${duration}`;
+  }
   if (event.kind === 'item' && typeof event.payload.itemType === 'string' && Object.hasOwn(eventLabels, event.payload.itemType)) {
-    return `${eventLabels[event.payload.itemType]} · ${event.payload.phase === 'started' ? '开始' : '完成'}`;
+    const { itemType, phase, status, exitCode, fileCount } = event.payload;
+    const state = phase === 'started' ? '开始' : status === 'failed' ? '失败' : '完成';
+    const details = [
+      typeof exitCode === 'number' ? `退出码 ${exitCode}` : null,
+      typeof fileCount === 'number' ? `${fileCount} 个文件` : null,
+    ].filter(Boolean);
+    return [eventLabels[itemType], state, ...details].join(' · ');
   }
   const key = event.kind === 'progress' ? event.payload.stage : event.payload.code;
   return typeof key === 'string' && Object.hasOwn(eventLabels, key) ? eventLabels[key] : '执行记录';
