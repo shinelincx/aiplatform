@@ -1,0 +1,79 @@
+name: ado-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ado
+      POSTGRES_USER: ado
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ado-local-dev}
+    ports: ["127.0.0.1:${POSTGRES_PORT:-15432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ado", "-d", "ado"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:${REDIS_PORT:-16379}:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  storage:
+    image: chrislusf/seaweedfs:4.54
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-ado-local}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-ado-local-dev}
+      S3_BUCKET: ado-dev
+    ports: ["127.0.0.1:${S3_PORT:-19000}:8333"]
+    volumes: [s3data:/data]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8333/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    image: ado-platform-dev:local
+    environment:
+      PORT: 3101
+    volumes: [./apps/api/src:/app/apps/api/src:ro]
+    ports: ["127.0.0.1:${API_PORT:-3101}:3101"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      storage: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3101/health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+
+  web:
+    image: ado-platform-dev:local
+    pull_policy: never
+    command: npm run dev -w @ado/web
+    environment:
+      API_BASE_URL: http://api:3101
+    volumes: [./apps/web/app:/app/apps/web/app:ro]
+    ports: ["127.0.0.1:${WEB_PORT:-3100}:3000"]
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 10s
+      timeout: 8s
+      start_period: 30s
+      retries: 12
+
+volumes:
+  pgdata:
+  redisdata:
+  s3data:

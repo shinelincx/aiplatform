@@ -1,0 +1,14 @@
+{
+  "name": "@ado/worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@ado/shared": "0.1.0"
+  }
+}

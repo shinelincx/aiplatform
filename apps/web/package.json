@@ -1,0 +1,21 @@
+{
+  "name": "@ado/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 0.0.0.0",
+    "build": "next build",
+    "typecheck": "next typegen && tsc --noEmit",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@ado/shared": "0.1.0",
+    "next": "^16.4.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
+  }
+}
