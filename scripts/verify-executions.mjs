@@ -454,8 +454,16 @@ try {
     publisherDb = new Database();
     const projects = new ProjectsService(publisherDb, new AuthService(publisherDb));
     let pullCalls = 0;
+    let snapshot;
     const github = {
       configured: true,
+      async readPull(install, repo, repositoryName, number) {
+        assert.equal(install, 1);
+        assert.equal(repo, Number.parseInt(suffix, 16));
+        assert.equal(repositoryName, 'test/execution-fixture');
+        assert.equal(number, 2);
+        return snapshot;
+      },
       async deliveryToken(install, repo) {
         assert.equal(install, 1);
         assert.equal(repo, Number.parseInt(suffix, 16));
@@ -562,8 +570,35 @@ try {
     assert.equal(autoEvents[0].payload.automatic, true);
     assert.equal((await request(automatic.path, { token })).status, 'REVIEW');
     assert.equal(git('rev-parse', 'main').trim(), baseline);
+    const deliveryPage = new URL(`/?project=${first.id}&task=${automatic.id}`, web);
+    const hasSyncButton = async () => (await (await globalThis.fetch(deliveryPage, {
+      headers: { Cookie: cookie },
+    })).text()).includes('同步 GitHub PR 状态');
+    assert.equal(await hasSyncButton(), true);
+    const refreshPath = `${automatic.runs}/${autoRun.id}/delivery/refresh`;
+    await request(refreshPath, { method: 'POST', status: 401 });
+    if (!process.env.GITHUB_APP_ID) await request(refreshPath, { token, method: 'POST', status: 503 });
+    await assert.rejects(publisher.refreshPull(actor, second.id, automatic.id, autoRun.id), /not found/);
+    const refresh = () => publisher.refreshPull(actor, first.id, automatic.id, autoRun.id);
+    snapshot = { state: 'closed', merged: true, updated_at: '2025-12-31T00:00:00Z',
+      head: { sha: draft.commitSha, ref: draft.branch }, base: { ref: draft.baseBranch } };
+    await refresh();
+    assert.equal((await request(automatic.runs, { token }))[0].delivery.pullState, 'open');
+    snapshot = { ...snapshot, updated_at: '2026-01-02T00:00:00Z', head: { ...snapshot.head, sha: wrong } };
+    await refresh();
+    assert.equal((await request(automatic.runs, { token }))[0].delivery.pullState, 'changed');
+    assert.equal((await request(automatic.path, { token })).status, 'REVIEW');
+    snapshot = { ...snapshot, updated_at: '2026-01-02T00:00:01Z', head: { ...snapshot.head, sha: draft.commitSha } };
+    await Promise.all([refresh(), refresh()]);
+    assert.equal((await request(automatic.runs, { token }))[0].delivery.pullState, 'merged');
+    assert.equal((await request(automatic.path, { token })).status, 'COMPLETED');
+    const mergedEvents = (await request(`${automatic.path}/events`, { token }))
+      .filter(({ eventType, payload }) => eventType === 'task.github_pull_request' && payload.state === 'merged');
+    assert.equal(mergedEvents.length, 1);
+    assert.equal(await hasSyncButton(), false);
     console.log('Signed GitHub events, deduplication and verified-commit merge tracking passed');
     console.log('Human approval atomically queued an automatic draft PR with verified evidence');
+    console.log('On-demand PR synchronization completed the verified task without a webhook');
   }
 
   await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });

@@ -6,19 +6,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { isWorkerId } from '@ado/shared';
 import { Database } from './database';
-import { DeliveriesService } from './deliveries';
+import { DeliveriesService, publishedPullColumns, type PublishedPull } from './deliveries';
 import { TasksService } from './tasks';
-
-type Delivery = {
-  runId: string;
-  projectId: string;
-  taskId: string;
-  pullNumber: number;
-  commitSha: string;
-  baseBranch: string;
-  pullState: 'open' | 'closed' | 'merged' | 'changed';
-  updatedAt: Date | null;
-};
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -68,10 +57,8 @@ export class GitHubWebhookController {
         'INSERT INTO github_webhook_deliveries (id) VALUES ($1) ON CONFLICT DO NOTHING', [id],
       );
       if (!inserted.rowCount) return;
-      const { rows } = await client.query<Delivery>(
-        `SELECT d.run_id AS "runId", r.project_id AS "projectId", r.task_id AS "taskId",
-           d.pull_number AS "pullNumber", d.commit_sha AS "commitSha", d.base_branch AS "baseBranch", d.pull_state AS "pullState",
-           d.github_updated_at AS "updatedAt"
+      const { rows } = await client.query<PublishedPull>(
+        `SELECT ${publishedPullColumns}
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
          JOIN repositories g ON g.id = d.repository_id
          WHERE d.state = 'published' AND g.github_repository_id = $1 AND g.installation_id = $2
@@ -82,6 +69,10 @@ export class GitHubWebhookController {
       );
       for (const delivery of rows) {
         if (delivery.pullState === 'merged') continue;
+        if (event === 'pull_request') {
+          await this.deliveries.recordPull(client, delivery, { ...pull, head, base });
+          continue;
+        }
         const task = await this.tasks.find(delivery.projectId, delivery.taskId, client);
         if (event === 'check_run') {
           await this.tasks.event(client, task, 'task.github_check', {
@@ -91,28 +82,10 @@ export class GitHubWebhookController {
           });
           continue;
         }
-        if (event === 'push') {
-          if (delivery.commitSha !== sha && delivery.pullState !== 'changed') {
-            await client.query("UPDATE execution_deliveries SET pull_state = 'changed', updated_at = now() WHERE run_id = $1",
-              [delivery.runId]);
-            await this.tasks.event(client, task, 'task.github_branch_changed', { runId: delivery.runId, pullNumber: delivery.pullNumber });
-          }
-          continue;
-        }
-        if (typeof pull.updated_at !== 'string' || !Number.isFinite(Date.parse(pull.updated_at))
-          || (delivery.updatedAt && Date.parse(pull.updated_at) < delivery.updatedAt.getTime())) continue;
-        if (pull.state !== 'open' && pull.state !== 'closed') continue;
-        const next = delivery.commitSha !== sha || delivery.baseBranch !== base.ref ? 'changed'
-          : pull.state === 'closed' && pull.merged === true ? 'merged' : pull.state;
-        await client.query(
-          `UPDATE execution_deliveries SET pull_state = $2, github_updated_at = $3,
-             updated_at = now() WHERE run_id = $1`, [delivery.runId, next, pull.updated_at],
-        );
-        if (next !== delivery.pullState) await this.tasks.event(client, task, 'task.github_pull_request', {
-          runId: delivery.runId, number: delivery.pullNumber, state: next,
-        });
-        if (next === 'merged') {
-          await this.deliveries.markMerged(client, delivery.projectId, delivery.taskId, delivery.runId, delivery.pullNumber);
+        if (delivery.commitSha !== sha && delivery.pullState !== 'changed') {
+          await client.query("UPDATE execution_deliveries SET pull_state = 'changed', updated_at = now() WHERE run_id = $1",
+            [delivery.runId]);
+          await this.tasks.event(client, task, 'task.github_branch_changed', { runId: delivery.runId, pullNumber: delivery.pullNumber });
         }
       }
     });

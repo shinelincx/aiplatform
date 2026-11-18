@@ -11,7 +11,7 @@ export async function api(path: string, options: RequestInit = {}, authenticated
     ...options,
     headers,
     cache: 'no-store',
-    signal: AbortSignal.timeout(8000),
+    signal: options.signal ?? AbortSignal.timeout(8000),
   });
 }
 

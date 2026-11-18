@@ -119,6 +119,8 @@ Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时�
 
 GitHub App 可把 Pull requests、Push 和 Check runs 事件发送到控制面的 HTTPS `/github/webhook`。在同一 GitHub App 设置与 `GITHUB_WEBHOOK_SECRET` 一致的密钥。控制面验证签名并忽略重复交付。合并的 PR 必须指向受测提交，任务才会进入“已完成”。
 
+在本地试点或 Webhook 延迟时，项目所有者可以在执行记录中点击“同步 GitHub PR 状态”。控制面使用该仓库的只读安装凭证查询 PR，并核对来源分支、目标分支和受测提交后记录合并结果。[GitHub PR 查询权限](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)
+
 ## 备份与恢复
 
 在 Bash 或 WSL 中运行 `scripts/compose-backup.sh`。备份会短暂停止控制面和对象存储，生成 PostgreSQL 逻辑备份、SeaweedFS 数据卷归档和 SHA-256 清单，随后恢复原本运行的服务。请把备份存到仓库之外，为备份目录保留项目数据所需的访问权限。

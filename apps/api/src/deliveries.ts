@@ -1,9 +1,9 @@
 import {
-  ConflictException, Controller, HttpCode, Inject, Injectable, Logger, Param, ParseUUIDPipe,
+  ConflictException, Controller, HttpCode, Inject, Injectable, Logger, NotFoundException, Param, ParseUUIDPipe,
   Post, ServiceUnavailableException, UseGuards, type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Account, ExecutionDelivery, Task, VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -17,6 +17,30 @@ export const GIT_PUBLISH = Symbol('GIT_PUBLISH');
 
 const deliveryColumns = `state, branch, base_branch AS "baseBranch", pull_number AS "pullNumber",
   pull_url AS "pullUrl", pull_state AS "pullState", error`;
+
+export const publishedPullColumns = `d.run_id AS "runId", r.project_id AS "projectId", r.task_id AS "taskId",
+  d.pull_number AS "pullNumber", d.commit_sha AS "commitSha", d.branch, d.base_branch AS "baseBranch",
+  d.pull_state AS "pullState", d.github_updated_at AS "updatedAt"`;
+
+export type PublishedPull = {
+  runId: string;
+  projectId: string;
+  taskId: string;
+  pullNumber: number;
+  commitSha: string;
+  branch: string;
+  baseBranch: string;
+  pullState: ExecutionDelivery['pullState'];
+  updatedAt: Date | null;
+};
+
+type PullSnapshot = {
+  state?: unknown;
+  merged?: unknown;
+  updated_at?: unknown;
+  head?: { ref?: unknown; sha?: unknown };
+  base?: { ref?: unknown };
+};
 
 type Publication = {
   runId: string;
@@ -91,6 +115,55 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
       if (task.status !== 'REVIEW') throw new ConflictException('Only an approved candidate in review can be published');
       return this.enqueueApproved(client, actor.id, task, runId, false);
     });
+  }
+
+  async refreshPull(actor: Account, projectId: string, taskId: string, runId: string) {
+    const access = { owner: true, active: true };
+    await this.projects.access(actor.id, projectId, access);
+    const published = await this.findPublished(this.db.pool, projectId, taskId, runId);
+    if (published.pullState === 'merged') return;
+    const snapshot = await this.github.readPull(Number(published.installationId), Number(published.externalId),
+      published.repository, published.pullNumber);
+    await this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, access, client);
+      const current = await this.findPublished(client, projectId, taskId, runId);
+      await this.recordPull(client, current, snapshot);
+    });
+  }
+
+  private async findPublished(client: Pool | PoolClient, projectId: string, taskId: string, runId: string) {
+    const { rows: [published] } = await client.query<PublishedPull & { repository: string; installationId: string; externalId: string }>(
+      `SELECT ${publishedPullColumns}, g.owner || '/' || g.repo_name AS repository,
+         g.installation_id AS "installationId", g.github_repository_id AS "externalId"
+       FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
+       JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
+       WHERE r.id = $1 AND r.project_id = $2 AND r.task_id = $3 AND d.state = 'published' AND d.pull_number IS NOT NULL
+       ${client === this.db.pool ? '' : 'FOR UPDATE OF d'}`,
+      [runId, projectId, taskId],
+    );
+    if (!published) throw new NotFoundException('Published pull request not found');
+    return published;
+  }
+
+  async recordPull(client: PoolClient, delivery: PublishedPull, pull: PullSnapshot) {
+    if (delivery.pullState === 'merged' || typeof pull.updated_at !== 'string') return;
+    const updatedAt = Date.parse(pull.updated_at);
+    if (!Number.isFinite(updatedAt) || (delivery.updatedAt && updatedAt < delivery.updatedAt.getTime())) return;
+    if (pull.state !== 'open' && pull.state !== 'closed') return;
+    if (typeof pull.head?.sha !== 'string' || !/^[0-9a-f]{40}$/.test(pull.head.sha)
+      || typeof pull.head.ref !== 'string' || typeof pull.base?.ref !== 'string') return;
+    const next = delivery.commitSha !== pull.head.sha || delivery.branch !== pull.head.ref || delivery.baseBranch !== pull.base.ref
+      ? 'changed' : pull.state === 'closed' && pull.merged === true ? 'merged' : pull.state;
+    await client.query(
+      `UPDATE execution_deliveries SET pull_state = $2, github_updated_at = $3,
+         updated_at = now() WHERE run_id = $1`, [delivery.runId, next, pull.updated_at],
+    );
+    const { projectId, taskId, runId, pullNumber } = delivery;
+    if (next !== delivery.pullState) {
+      const task = await this.tasks.find(projectId, taskId, client);
+      await this.tasks.event(client, task, 'task.github_pull_request', { runId, number: pullNumber, state: next });
+      if (next === 'merged') await this.markMerged(client, task, runId, pullNumber);
+    }
   }
 
   async enqueueApproved(client: PoolClient, actorId: string, task: Task, runId: string, automatic: boolean) {
@@ -185,7 +258,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
         if (!result.rowCount) return;
         const task = await this.tasks.find(work.projectId, work.taskId, client);
         await this.tasks.event(client, task, 'task.pull_request_created', { runId: work.runId, number: pr.number, url: pr.url });
-        if (pr.state === 'merged') await this.markMerged(client, work.projectId, work.taskId, work.runId, pr.number);
+        if (pr.state === 'merged') await this.markMerged(client, task, work.runId, pr.number);
       });
     } catch (error) {
       const code = error instanceof DeliveryError ? error.code : 'github_failed';
@@ -199,8 +272,8 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async markMerged(client: PoolClient, projectId: string, taskId: string, runId: string, pullNumber: number) {
-    const task = await this.tasks.find(projectId, taskId, client);
+  private async markMerged(client: PoolClient, task: Task, runId: string, pullNumber: number) {
+    const { projectId, id: taskId } = task;
     const changed = await client.query(
       `UPDATE tasks SET status = 'MERGED', updated_at = now() WHERE project_id = $1 AND id = $2 AND status = 'REVIEW'`,
       [projectId, taskId],
@@ -223,5 +296,12 @@ export class DeliveriesController {
   enqueue(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string) {
     return this.deliveries.enqueue(actor, projectId, taskId, runId);
+  }
+
+  @Post('refresh')
+  @HttpCode(204)
+  refresh(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string) {
+    return this.deliveries.refreshPull(actor, projectId, taskId, runId);
   }
 }

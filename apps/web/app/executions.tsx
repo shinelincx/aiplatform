@@ -1,6 +1,6 @@
 import { workerDiskPressure, type CheckFailureReason, type CheckResult, type ExecutionEvent, type ExecutionRun,
   type Project, type Task, type WorkerReport } from '@ado/shared';
-import { changeExecutionWorker, publishExecution, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
+import { changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
 
@@ -174,6 +174,11 @@ export async function Executions({ project, task, hasChecks, autoDraftPr, planne
           {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
         <p className="description">{latest.delivery.branch} → {latest.delivery.baseBranch}</p>
         {latest.delivery.pullUrl && <p><a href={latest.delivery.pullUrl}>查看 GitHub PR #{latest.delivery.pullNumber}</a></p>}
+        {owner && project.status === 'active' && latest.delivery.state === 'published' && latest.delivery.pullState !== 'merged'
+          && <form action={refreshDelivery} className="fields">
+            {identity}<input type="hidden" name="runId" value={latest.id} />
+            <button>同步 GitHub PR 状态</button>
+          </form>}
         {latest.delivery.error && <p className="feedback">{deliveryErrors[latest.delivery.error] ?? '发布失败，请重试。'}</p>}
       </div>}
       {owner && project.status === 'active' && task.status === 'REVIEW' && latest.review?.decision === 'approved'

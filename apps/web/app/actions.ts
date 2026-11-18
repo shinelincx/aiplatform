@@ -324,6 +324,17 @@ export async function publishExecution(form: FormData) {
   redirect(`${query}#task-detail`);
 }
 
+export async function refreshDelivery(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/delivery/refresh`, {
+    method: 'POST', signal: AbortSignal.timeout(18000),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'delivery-refresh')}#task-detail`);
+  redirect(`${query}#task-detail`);
+}
+
 export interface WorkerAccessState {
   error?: string;
   notice?: string;

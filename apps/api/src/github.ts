@@ -29,10 +29,11 @@ interface PullResponse {
   number: number;
   html_url: string;
   state: 'open' | 'closed';
+  merged?: boolean;
   merged_at?: string | null;
   updated_at: string;
   head: { ref: string; sha: string };
-  base: { ref: string };
+  base: { ref: string; repo?: { id: number } };
 }
 
 function externalId(value: unknown) {
@@ -119,6 +120,16 @@ export class GitHubApp {
       { repository_ids: [repositoryId], permissions: { contents: 'write', pull_requests: 'write' } },
     );
     return data.token;
+  }
+
+  async readPull(installationId: number, repositoryId: number, repository: string, number: number) {
+    const token = await this.installationToken(installationId, repositoryId);
+    const repositoryPath = repository.split('/').map(encodeURIComponent).join('/');
+    const { data } = await this.request<PullResponse>(`/repos/${repositoryPath}/pulls/${number}`, token);
+    if (data?.number !== number || data.base?.repo?.id !== repositoryId || typeof data.merged !== 'boolean') {
+      throw new BadGatewayException('GitHub pull request does not match the published repository and number');
+    }
+    return data;
   }
 
   async draftPull(token: string, repository: string, branch: string, baseBranch: string,
