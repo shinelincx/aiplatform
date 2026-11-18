@@ -1,5 +1,5 @@
 import type { ExecutionEvent, ExecutionRun, Project, Task } from '@ado/shared';
-import { reviewExecution, startExecution, stopExecution } from './actions';
+import { publishExecution, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
 
@@ -13,6 +13,7 @@ const eventLabels: Record<string, string> = {
   codex_failed: 'Codex 执行失败', no_changes: 'Codex 未生成代码变更',
   worker_timeout: 'Worker 执行超时', worker_error: 'Worker 处理失败',
   repair: '根据检查结果修复', checks_changed_candidate: '测试改动了待审核补丁',
+  artifact_upload_failed: '补丁归档失败',
   agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更',
 };
 function label(event: ExecutionEvent) {
@@ -28,6 +29,15 @@ function label(event: ExecutionEvent) {
 }
 
 const checkLabels = { passed: '通过', failed: '失败', timed_out: '超时', unavailable: '无法运行' } as const;
+const deliveryLabels = { queued: '等待发布', publishing: '正在发布分支', published: '草稿 PR 已关联', failed: '发布失败' };
+const pullLabels = { open: '开放', closed: '已关闭', merged: '已合并', changed: 'PR 与审核版本不匹配' };
+const deliveryErrors: Record<string, string> = {
+  base_changed: '测试基准已不属于发布目标分支，请重新执行。',
+  patch_rejected: '补丁无法应用到原始基准。',
+  branch_conflict: '执行分支已关联其他提交。',
+  git_failed: 'Git 无法发布分支，请检查目标仓库和权限。',
+  github_failed: 'GitHub 发布或 PR 创建失败，请检查安装权限后重试。',
+};
 
 export async function Executions({ project, task, hasChecks }: { project: Project; task: Task; hasChecks: boolean }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
@@ -35,6 +45,7 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
   const latest = runs[0];
   const events = latest ? await read<ExecutionEvent[]>(`${url}/${latest.id}/events`) : null;
   const active = latest?.status === 'queued' || latest?.status === 'running';
+  const publishing = latest?.delivery?.state === 'queued' || latest?.delivery?.state === 'publishing';
   const owner = project.role === 'owner';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
@@ -46,7 +57,7 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
 
   return <section aria-labelledby="execution-heading" className="repository-form">
     <h4 id="execution-heading">Codex 执行</h4>
-    {active && <RefreshExecution />}
+    {(active || publishing) && <RefreshExecution />}
     {canStart && <form action={startExecution}>{identity}<button>{latest ? '重试执行' : '派发任务'}</button></form>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
@@ -64,6 +75,8 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
           <small>{(check.durationMs / 1000).toFixed(2)} 秒{check.exitCode !== null && ` · 退出码 ${check.exitCode}`}</small>
         </li>)}</ul>
       </div>}
+      {latest.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${latest.id}`}>下载受测补丁</a>
+        {' '}<small>{Math.ceil(latest.artifact.size / 1024)} KB</small></p>}
       {latest.review ? <div>
         <p>人工审核 · {latest.review.decision === 'approved' ? '已批准' : '已驳回'} · {latest.review.reviewer}</p>
         {latest.review.comment && <p className="description">{latest.review.comment}</p>}
@@ -75,6 +88,19 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
             <button name="decision" value="approved">批准变更</button>
             <button name="decision" value="rejected" className="secondary">驳回变更</button>
           </div>
+        </form>}
+      {latest.delivery && <div>
+        <p role="status">{deliveryLabels[latest.delivery.state]}
+          {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
+        <p className="description">{latest.delivery.branch} → {latest.delivery.baseBranch}</p>
+        {latest.delivery.pullUrl && <p><a href={latest.delivery.pullUrl}>查看 GitHub PR #{latest.delivery.pullNumber}</a></p>}
+        {latest.delivery.error && <p className="feedback">{deliveryErrors[latest.delivery.error] ?? '发布失败，请重试。'}</p>}
+      </div>}
+      {owner && project.status === 'active' && task.status === 'REVIEW' && latest.review?.decision === 'approved'
+        && latest.report?.passed && latest.artifact && (!latest.delivery || latest.delivery.state === 'failed')
+        && <form action={publishExecution} className="fields">
+          {identity}<input type="hidden" name="runId" value={latest.id} />
+          <button>{latest.delivery ? '重试发布' : '发布分支并创建草稿 PR'}</button>
         </form>}
       {events?.length ? <ol className="members">
         {events.map((event) => (

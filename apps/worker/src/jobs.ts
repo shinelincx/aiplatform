@@ -1,6 +1,6 @@
-import { appendFile } from 'node:fs/promises';
+import { appendFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isWorkerId, parseCheckPlan, type ExecutionOffer } from '@ado/shared';
+import { isWorkerId, maxPatchBytes, parseCheckPlan, type ExecutionOffer } from '@ado/shared';
 import { configureExecution, executeCodex } from './codex-execution';
 
 type Runtime = NonNullable<Awaited<ReturnType<typeof configureExecution>>>;
@@ -13,6 +13,7 @@ function offerInput(value: unknown): ExecutionOffer {
     || offer.repository.endsWith('/.') || offer.repository.endsWith('/..')
     || typeof offer.defaultBranch !== 'string' || !/^[a-zA-Z0-9_][a-zA-Z0-9_./-]{0,254}$/.test(offer.defaultBranch)
     || typeof offer.title !== 'string' || typeof offer.description !== 'string'
+    || (offer.archivePatch !== undefined && typeof offer.archivePatch !== 'boolean')
     || !Array.isArray(offer.acceptanceCriteria) || !offer.acceptanceCriteria.every((item) => typeof item === 'string')
     || (offer.repositoryToken !== undefined && typeof offer.repositoryToken !== 'string')) {
     throw new Error('Invalid execution offer');
@@ -28,9 +29,11 @@ export class WorkerJobs {
     pending: Pending[];
     sequence: number;
     completed: boolean;
+    archivePatch: boolean;
   };
 
-  constructor(private readonly runtime: Runtime) {}
+  constructor(private readonly runtime: Runtime,
+    private readonly upload: (runId: string, bytes: Uint8Array<ArrayBuffer>, signal: AbortSignal) => Promise<boolean>) {}
 
   get runId() { return this.active?.id ?? null; }
 
@@ -40,7 +43,7 @@ export class WorkerJobs {
     const signal = new AbortController();
     const job = {
       id: offer.id, signal, lease: setTimeout(() => this.cancel(), 32_000),
-      pending: [] as Pending[], sequence: 1, completed: false,
+      pending: [] as Pending[], sequence: 1, completed: false, archivePatch: offer.archivePatch === true,
     };
     this.active = job;
     const report = async (kind: string, payload: object) => {
@@ -78,7 +81,21 @@ export class WorkerJobs {
     const job = this.active;
     if (!job) return;
     if (job.signal.signal.aborted && !job.completed) return;
-    const event = job.pending[0];
+    let event = job.pending[0];
+    if (job.archivePatch && event?.kind === 'verification' && 'passed' in event.payload && event.payload.passed === true) {
+      const attempt = 'attempt' in event.payload ? event.payload.attempt : undefined;
+      let bytes: Buffer | null = null;
+      if (typeof attempt === 'number' && Number.isInteger(attempt) && attempt > 0) {
+        bytes = await readFile(join(this.runtime.root, job.id, `attempt-${attempt}.patch`)).catch(() => null);
+      }
+      if (job.signal.signal.aborted) return;
+      const stored = bytes && bytes.length <= maxPatchBytes && await this.upload(job.id, new Uint8Array(bytes), job.signal.signal);
+      if (job.signal.signal.aborted) return;
+      if (!stored) {
+        event = { kind: 'failed', payload: { code: 'artifact_upload_failed' } };
+        job.pending[0] = event;
+      }
+    }
     if (event) {
       const reply = await send({ runId: job.id, sequence: job.sequence, ...event });
       if (!reply || typeof reply !== 'object' || !('accepted' in reply) || !('stop' in reply)) {

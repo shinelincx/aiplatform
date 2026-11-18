@@ -1,11 +1,23 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
+import { execFileSync } from 'node:child_process';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { URL } from 'node:url';
 import pg from 'pg';
 import { WebSocket } from 'ws';
+import { ArtifactStore } from '../apps/api/src/artifacts.ts';
+import { AuthService } from '../apps/api/src/auth.ts';
+import { Database } from '../apps/api/src/database.ts';
+import { DeliveriesService } from '../apps/api/src/deliveries.ts';
+import { pushCandidate } from '../apps/api/src/git-delivery.ts';
+import { ProjectsService } from '../apps/api/src/projects.ts';
+import { TasksService } from '../apps/api/src/tasks.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
 const web = process.env.ADO_VERIFY_WEB_URL ?? 'http://web:3000';
@@ -14,6 +26,9 @@ const password = process.env.ADO_BOOTSTRAP_PASSWORD;
 assert(email && password, 'Configure a bootstrap account for the integration check');
 const db = new pg.Pool();
 const sockets = new Set();
+let fixtureRepo;
+let publisher;
+let publisherDb;
 
 async function request(path, { method = 'GET', token, body, status = 200 } = {}) {
   const response = await globalThis.fetch(new URL(path, api), {
@@ -37,7 +52,7 @@ async function postForm(url, form, cookie) {
   });
 }
 
-async function open(credential, execute = true, verify = false) {
+async function open(credential, execute = true, verify = false, archive = false) {
   const endpoint = new URL('/workers/ws', api);
   endpoint.protocol = 'ws:';
   const ws = new WebSocket(endpoint, {
@@ -61,6 +76,7 @@ async function open(credential, execute = true, verify = false) {
     memoryBytes: 1_000_000, diskFreeBytes: 1_000_000, gitVersion: 'git version 2', dockerVersion: null,
     ...(execute && { codexVersion: '0.170.0' }),
     ...(verify && { verificationVersion: 1 }),
+    ...(archive && { artifactVersion: 1 }),
   });
   const close = async () => {
     if (ws.readyState === WebSocket.CLOSED) return;
@@ -83,7 +99,8 @@ try {
     token, method: 'POST', body: { name: 'Execution fixture' }, status: 201,
   });
   const approved = await credentials(first.id);
-  const outsider = await open(await credentials(second.id));
+  const foreignCredential = await credentials(second.id);
+  const outsider = await open(foreignCredential);
   const observer = await open(await credentials(first.id), false);
 
   // Database fixtures establish a repository binding without contacting GitHub in local CI.
@@ -205,16 +222,25 @@ try {
   worker = await open(approved);
   assert.equal(await worker.send('WORKER_CLAIM'), null);
   await worker.close();
-  worker = await open(approved, true, true);
+  worker = await open(approved, true, true, true);
   const testOffer = await worker.send('WORKER_CLAIM');
   assert.equal(testOffer.id, active.id);
   assert.deepEqual(testOffer.checks, plan);
+  assert.equal(testOffer.archivePatch, true);
   const sendEvent = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: active.id, sequence, kind, payload });
   assert.equal((await sendEvent(1, 'thread', { threadId: 'review-fixture' })).accepted, true);
-  const candidate = (attempt, patchHash) => ({ ...result.payload, attempt, patchHash });
+  fixtureRepo = mkdtempSync(join(tmpdir(), 'ado-release-fixture-'));
+  const git = (...args) => execFileSync('git', args, { cwd: fixtureRepo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main');
+  writeFileSync(join(fixtureRepo, 'index.ts'), 'old\n');
+  git('add', 'index.ts');
+  git('-c', 'user.name=Release Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'base');
+  const baseline = git('rev-parse', 'HEAD').trim();
+  const candidate = (attempt, patchHash) => ({ ...result.payload, baseCommit: baseline, attempt, patchHash });
   const check = (passed) => [{ name: 'unit', durationMs: 20, status: passed ? 'passed' : 'failed', exitCode: passed ? 0 : 1 }];
   const initialHash = 'c'.repeat(64);
-  const repairedHash = 'd'.repeat(64);
+  const patchBytes = Buffer.from('diff --git a/index.ts b/index.ts\n--- a/index.ts\n+++ b/index.ts\n@@ -1 +1 @@\n-old\n+new\n');
+  const repairedHash = createHash('sha256').update(patchBytes).digest('hex');
   assert.equal((await sendEvent(2, 'result', candidate(1, initialHash))).accepted, true);
   assert.equal((await request(verified.path, { token })).status, 'TESTING');
   assert.equal((await sendEvent(3, 'verification', { attempt: 1, patchHash: repairedHash, checks: check(true) })).accepted, false);
@@ -223,10 +249,32 @@ try {
   await request(reviewPath, { ...approve, status: 409 });
   assert.equal((await sendEvent(4, 'result', candidate(2, repairedHash))).accepted, true);
   const passing = { attempt: 2, patchHash: repairedHash, checks: check(true) };
+  assert.equal((await sendEvent(5, 'verification', passing)).accepted, false);
+  const upload = async (runId, credential, bytes, expected) => {
+    const response = await globalThis.fetch(new URL(`/worker-executions/${runId}/artifact`, api), {
+      method: 'PUT', body: bytes,
+      headers: { Authorization: `Bearer ${credential.workerId}.${credential.token}`, 'Content-Type': 'application/octet-stream' },
+      signal: globalThis.AbortSignal.timeout(12000),
+    });
+    assert.equal(response.status, expected);
+    if (response.ok) assert.deepEqual(await response.json(), { sha256: repairedHash, size: bytes.length });
+  };
+  await upload(active.id, foreignCredential, patchBytes, 404);
+  await upload(active.id, approved, Buffer.from('mismatched bytes'), 409);
+  await upload(active.id, approved, patchBytes, 200);
+  await upload(active.id, approved, patchBytes, 200);
   assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
   assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
   assert.equal((await request(verified.path, { token })).status, 'REVIEW');
   const reviewPage = new URL(`/?project=${first.id}&task=${verified.id}`, web);
+  const deliveryPath = `${verified.runs}/${active.id}/delivery`;
+  await request(deliveryPath, { token, method: 'POST', status: 409 });
+  await request(`/projects/${second.id}/tasks/${verified.id}/executions/${active.id}/artifact`, { token, status: 404 });
+  const downloaded = await globalThis.fetch(new URL(`/artifacts/${first.id}/${verified.id}/${active.id}`, web),
+    { headers: { Cookie: cookie } });
+  assert.equal(downloaded.status, 200);
+  assert.match(downloaded.headers.get('content-disposition'), /attachment/);
+  assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), patchBytes);
   const pendingReview = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
   const approvalForm = (await pendingReview.text()).match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*批准变更<\/button>(?:(?!<\/form>)[\s\S])*<\/form>/)?.[0];
   const approvalAction = approvalForm?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
@@ -244,9 +292,92 @@ try {
   const [reviewed] = await request(verified.runs, { token });
   assert.equal(reviewed.report.patchHash, repairedHash);
   assert.equal(reviewed.review.decision, 'approved');
+  assert.deepEqual(reviewed.artifact, { sha256: repairedHash, size: patchBytes.length });
   const reportPage = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
   const reportHtml = (await reportPage.text()).replace(/<!--[\s\S]*?-->/g, '');
   assert(reportHtml.includes('第 2 次检查报告') && reportHtml.includes('已批准'));
+  assert(reportHtml.includes('发布分支并创建草稿 PR'));
+  if (!process.env.GITHUB_APP_ID) await request(deliveryPath, { token, method: 'POST', status: 503 });
+
+  const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+  if (webhookSecret) {
+    const branch = `ado/${active.id}`;
+    publisherDb = new Database();
+    const projects = new ProjectsService(publisherDb, new AuthService(publisherDb));
+    let pullCalls = 0;
+    const github = {
+      configured: true,
+      async deliveryToken(install, repo) {
+        assert.equal(install, 1);
+        assert.equal(repo, Number.parseInt(suffix, 16));
+        return 'release-fixture-token';
+      },
+      async draftPull(credential, repositoryName, head, base, commit) {
+        assert.equal(credential, 'release-fixture-token');
+        assert.equal(repositoryName, 'test/execution-fixture');
+        assert.equal(head, branch);
+        assert.equal(base, 'main');
+        assert.equal(git('rev-parse', branch).trim(), commit);
+        assert.equal(git('show', `${commit}:index.ts`), 'new\n');
+        pullCalls++;
+        return { number: 1, url: 'https://github.com/test/execution-fixture/pull/1',
+          updatedAt: '2026-01-01T00:00:00Z', state: 'open' };
+      },
+    };
+    publisher = new DeliveriesService(publisherDb, new TasksService(publisherDb, projects), projects,
+      github, new ArtifactStore(), (input, signal) => {
+        assert.equal(input.remote, 'https://github.com/test/execution-fixture.git');
+        assert.equal(input.baseCommit, baseline);
+        return pushCandidate({ ...input, remote: fixtureRepo, token: undefined }, signal);
+      });
+    const actor = await request('/auth/session', { token });
+    assert.equal((await publisher.enqueue(actor, first.id, verified.id, active.id)).state, 'queued');
+    assert.equal((await publisher.enqueue(actor, first.id, verified.id, active.id)).state, 'queued');
+    publisher.onModuleInit();
+    let publication;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      publication = (await request(verified.runs, { token }))[0].delivery;
+      if (publication.state === 'published' || publication.state === 'failed') break;
+      await delay(250);
+    }
+    assert.equal(publication.state, 'published', publication.error ?? 'Publication did not finish');
+    assert.equal(pullCalls, 1);
+    const sha = git('rev-parse', branch).trim();
+    assert.equal(git('rev-parse', 'main').trim(), baseline);
+    const webhook = async (kind, event, id = randomUUID(), valid = true) => {
+      const body = JSON.stringify({
+        repository: { id: Number.parseInt(suffix, 16) }, installation: { id: 1 }, ...event,
+      });
+      const digest = createHmac('sha256', webhookSecret).update(body).digest('hex');
+      const response = await globalThis.fetch(new URL('/github/webhook', api), {
+        method: 'POST', body,
+        headers: { 'Content-Type': 'application/json', 'X-GitHub-Delivery': id, 'X-GitHub-Event': kind,
+          'X-Hub-Signature-256': `sha256=${valid ? digest : '0'.repeat(64)}` },
+        signal: globalThis.AbortSignal.timeout(10000),
+      });
+      assert.equal(response.status, valid ? 204 : 401);
+    };
+    const runnerEvent = { check_run: { head_sha: sha, status: 'completed', conclusion: 'success' } };
+    const deliveryId = randomUUID();
+    await webhook('check_run', runnerEvent, deliveryId, false);
+    await webhook('check_run', runnerEvent, deliveryId);
+    await webhook('check_run', runnerEvent, deliveryId);
+    const history = await request(`${verified.path}/events`, { token });
+    assert.equal(history.filter(({ eventType }) => eventType === 'task.github_check').length, 1);
+    const wrong = 'f'.repeat(40);
+    await webhook('push', { ref: `refs/heads/${branch}`, after: wrong });
+    const pull = (head, updated_at, base = 'main') => ({ pull_request: { number: 1, state: 'closed', merged: true,
+      updated_at, head: { sha: head, ref: branch }, base: { ref: base } } });
+    await webhook('pull_request', pull(wrong, '2026-01-02T00:00:00Z'));
+    assert.equal((await request(verified.path, { token })).status, 'REVIEW');
+    assert.equal((await request(verified.runs, { token }))[0].delivery.pullState, 'changed');
+    await webhook('pull_request', pull(sha, '2026-01-02T00:00:01Z', 'staging'));
+    assert.equal((await request(verified.path, { token })).status, 'REVIEW');
+    await webhook('pull_request', pull(sha, '2026-01-02T00:00:02Z'));
+    assert.equal((await request(verified.path, { token })).status, 'COMPLETED');
+    assert.equal((await request(verified.runs, { token }))[0].delivery.pullState, 'merged');
+    console.log('Signed GitHub events, deduplication and verified-commit merge tracking passed');
+  }
 
   await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
   const exhausted = await newTask('VERIFICATION-EXHAUSTED');
@@ -264,16 +395,23 @@ try {
   const rejectedRun = await request(rejected.runs, { token, method: 'POST', status: 201 });
   assert.equal((await worker.send('WORKER_CLAIM')).id, rejectedRun.id);
   for (const [sequence, kind, payload] of [[1, 'thread', { threadId: 'rejected-fixture' }],
-    [2, 'result', candidate(1, initialHash)], [3, 'verification', { attempt: 1, patchHash: initialHash, checks: check(true) }]]) {
+    [2, 'result', candidate(1, repairedHash)]]) {
     assert.equal((await worker.send('EXECUTION_EVENT', { runId: rejectedRun.id, sequence, kind, payload })).accepted, true);
   }
+  await upload(rejectedRun.id, approved, patchBytes, 200);
+  assert.equal((await worker.send('EXECUTION_EVENT', { runId: rejectedRun.id, sequence: 3, kind: 'verification',
+    payload: { attempt: 1, patchHash: repairedHash, checks: check(true) } })).accepted, true);
   const rejectionPath = `${rejected.runs}/${rejectedRun.id}/review`;
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected' }, status: 400 });
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Needs product review' } });
   assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');
+  console.log('Patch archive integrity, download and publication gates passed');
 } finally {
   for (const socket of sockets) socket.terminate();
+  publisher?.onModuleDestroy();
+  await publisherDb?.pool.end();
+  if (fixtureRepo) rmSync(fixtureRepo, { recursive: true, force: true });
   await db.end();
 }

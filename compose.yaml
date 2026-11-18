@@ -53,6 +53,11 @@ services:
       ADO_BOOTSTRAP_PASSWORD: ${ADO_BOOTSTRAP_PASSWORD-}
       GITHUB_APP_ID: ${GITHUB_APP_ID-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET-}
+      ADO_S3_ENDPOINT: http://storage:8333
+      ADO_S3_BUCKET: ado-dev
+      ADO_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-ado-local}
+      ADO_S3_SECRET_KEY: ${S3_SECRET_KEY:-ado-local-dev}
     volumes: [./apps/api/src:/app/apps/api/src:ro]
     ports: ["127.0.0.1:${API_PORT:-3101}:3101"]
     depends_on:

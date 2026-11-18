@@ -25,6 +25,16 @@ interface RepositoryResponse {
   disabled: boolean;
 }
 
+interface PullResponse {
+  number: number;
+  html_url: string;
+  state: 'open' | 'closed';
+  merged_at?: string | null;
+  updated_at: string;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+}
+
 function externalId(value: unknown) {
   const id = typeof value === 'string' ? Number(value) : value;
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
@@ -101,6 +111,41 @@ export class GitHubApp {
         : { permissions: { metadata: 'read' } },
     );
     return data.token;
+  }
+
+  async deliveryToken(installationId: number, repositoryId: number) {
+    const { data } = await this.request<{ token: string }>(
+      `/app/installations/${installationId}/access_tokens`, this.appJwt(),
+      { repository_ids: [repositoryId], permissions: { contents: 'write', pull_requests: 'write' } },
+    );
+    return data.token;
+  }
+
+  async draftPull(token: string, repository: string, branch: string, baseBranch: string,
+    commit: string, title: string, body: string) {
+    const [owner, name] = repository.split('/');
+    const endpoint = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls`;
+    const query = new URLSearchParams({ head: `${owner}:${branch}`, base: baseBranch, state: 'all', per_page: '100' });
+    const find = async () => (await this.request<PullResponse[]>(`${endpoint}?${query}`, token)).data
+      .find((pr) => pr.head.ref === branch && pr.base.ref === baseBranch);
+    let pull = await find();
+    if (!pull) {
+      try {
+        pull = (await this.request<PullResponse>(endpoint, token, { title, body, head: branch, base: baseBranch, draft: true })).data;
+      } catch (error) {
+        pull = await find();
+        if (!pull) throw error;
+      }
+    }
+    if (!Number.isSafeInteger(pull.number) || pull.number < 1 || pull.head.ref !== branch
+      || pull.head.sha !== commit || pull.base.ref !== baseBranch
+      || !pull.html_url.startsWith(`https://github.com/${repository}/pull/`)) {
+      throw new ConflictException('Existing pull request differs from the tested commit');
+    }
+    return {
+      number: pull.number, url: pull.html_url, updatedAt: pull.updated_at,
+      state: pull.merged_at ? 'merged' as const : pull.state,
+    };
   }
 
   async repositories(installationId: number): Promise<GitHubRepository[]> {

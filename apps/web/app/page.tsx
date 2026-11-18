@@ -20,6 +20,8 @@ const issues: Record<string, string> = {
   repository: '无法绑定仓库，请确认 GitHub App 的仓库权限和分支名。',
   verification: '检查配置保存失败。请核对 JSON、检查名称、工作目录和命令参数。',
   review: '审核提交失败。选择驳回时请填写原因。',
+  delivery: '发布请求失败。请确认当前补丁已归档并通过检查和审核。',
+  'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
 };

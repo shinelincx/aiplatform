@@ -203,6 +203,15 @@ export async function reviewExecution(form: FormData) {
   redirect(`${query}#task-detail`);
 }
 
+export async function publishExecution(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/delivery`, { method: 'POST' });
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'github-delivery-config' : issue(response, 'delivery')}#task-detail`);
+  redirect(`${query}#task-detail`);
+}
+
 export interface WorkerAccessState {
   error?: string;
   notice?: string;

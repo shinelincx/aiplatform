@@ -41,3 +41,29 @@ it('lists authorized repositories and narrows the branch token to one repository
   expect(mock.mock.calls[3][0]).toBe('https://api.github.com/repos/org/project/branches/release%2Fv1');
   expect(new Headers(mock.mock.calls[3][1]?.headers).get('Authorization')).toBe('Bearer repo-only');
 });
+
+it('requests delivery-only permissions and recovers a draft creation after a lost response', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  vi.stubEnv('GITHUB_APP_ID', '1234');
+  vi.stubEnv('GITHUB_APP_PRIVATE_KEY', privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
+  const branch = 'ado/2cc800da-1fc0-4c48-8499-d0022c36d136';
+  const sha = '5'.repeat(40);
+  const pull = { number: 13, html_url: 'https://github.com/org/project/pull/13', state: 'open',
+    head: { ref: branch, sha }, base: { ref: 'main' }, updated_at: '2026-01-02T00:00:00Z' };
+  const mock = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ token: 'scoped-write' }))
+    .mockResolvedValueOnce(Response.json([]))
+    .mockRejectedValueOnce(new Error('response lost'))
+    .mockResolvedValueOnce(Response.json([pull]));
+  vi.stubGlobal('fetch', mock);
+  const github = new GitHubApp();
+  const token = await github.deliveryToken(7, 42);
+  expect(await github.draftPull(token, 'org/project', branch, 'main', sha, 'Candidate', 'Verified')).toEqual({
+    number: 13, url: pull.html_url, state: 'open', updatedAt: pull.updated_at,
+  });
+  expect(JSON.parse(String(mock.mock.calls[0][1]?.body))).toEqual({
+    repository_ids: [42], permissions: { contents: 'write', pull_requests: 'write' },
+  });
+  expect(JSON.parse(String(mock.mock.calls[2][1]?.body))).toMatchObject({ head: branch, base: 'main', draft: true });
+  expect(mock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(2);
+});

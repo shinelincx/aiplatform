@@ -23,7 +23,7 @@ const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId"
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
-  'worker_error', 'checks_changed_candidate'];
+  'worker_error', 'checks_changed_candidate', 'artifact_upload_failed'];
 
 function attemptInput(value: unknown) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxVerificationAttempts) {
@@ -135,7 +135,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     await this.tasks.get(actor, projectId, taskId);
     const { rows } = await this.db.pool.query<ExecutionRun>(
       `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
-         'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review
+         'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
+         (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
+           WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
+         (SELECT jsonb_build_object('state', d.state, 'branch', d.branch, 'baseBranch', d.base_branch,
+           'pullNumber', d.pull_number, 'pullUrl', d.pull_url, 'pullState', d.pull_state, 'error', d.error)
+           FROM execution_deliveries d WHERE d.run_id = r.id) AS delivery
        FROM execution_runs r WHERE project_id = $1 AND task_id = $2
        ORDER BY created_at DESC, id DESC LIMIT 20`, [projectId, taskId],
     );
@@ -177,9 +182,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         task.status = 'RETRYING';
       }
       const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan)
-         SELECT $1, $2, id, check_plan FROM repositories WHERE project_id = $1 AND id = $3
-         RETURNING ${runColumns}, NULL AS review`, [projectId, taskId, task.repositoryId],
+        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch)
+         SELECT $1, $2, id, check_plan, default_branch FROM repositories WHERE project_id = $1 AND id = $3
+         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`, [projectId, taskId, task.repositoryId],
       );
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id });
       return run;
@@ -245,8 +250,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async lockWorker(client: PoolClient, worker: WorkerLease) {
-    const result = await client.query<{ canExecute: boolean; canVerify: boolean }>(
-      `SELECT capabilities ? 'codexVersion' AS "canExecute", capabilities->'verificationVersion' = '1'::jsonb AS "canVerify"
+    const result = await client.query<{ canExecute: boolean; canVerify: boolean; canArchive: boolean }>(
+      `SELECT capabilities ? 'codexVersion' AS "canExecute", capabilities->'verificationVersion' = '1'::jsonb AS "canVerify",
+         capabilities->'artifactVersion' = '1'::jsonb AS "canArchive"
        FROM workers
        WHERE id = $1 AND credential_hash = $2 AND connection_id = $3
          AND credential_expires_at > now() AND NOT disabled FOR UPDATE`,
@@ -266,7 +272,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const { rows: [offer] } = await client.query<ExecutionOffer & { installationId: string; githubId: string }>(
         `SELECT r.id, r.task_id AS "taskId", r.project_id AS "projectId", t.title, t.description,
            t.acceptance_criteria AS "acceptanceCriteria", g.owner || '/' || g.repo_name AS repository,
-           g.default_branch AS "defaultBranch", g.installation_id::text AS "installationId",
+           COALESCE(r.source_branch, g.default_branch) AS "defaultBranch", g.installation_id::text AS "installationId",
            g.github_repository_id::text AS "githubId", r.check_plan AS checks
          FROM execution_runs r
          JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = $1
@@ -278,9 +284,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`, [worker.workerId, capabilities.canVerify === true],
       );
       if (!offer) return null;
+      offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
       await client.query(
-        `UPDATE execution_runs SET status = 'running', worker_id = $2, lease_expires_at = now() + ($3 * interval '1 millisecond')
-         WHERE id = $1`, [offer.id, worker.workerId, workerOfflineMs],
+        `UPDATE execution_runs SET status = 'running', worker_id = $2, lease_expires_at = now() + ($3 * interval '1 millisecond'),
+          archive_patch = $4, source_branch = $5 WHERE id = $1`,
+        [offer.id, worker.workerId, workerOfflineMs, offer.archivePatch, offer.defaultBranch],
       );
       const task = await this.tasks.find(offer.projectId, offer.taskId, client);
       await this.move(client, task, 'RUNNING', { runId: offer.id, workerId: worker.workerId });
@@ -314,10 +322,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return this.db.transaction(async (client) => {
       if (!await this.lockWorker(client, worker)) return { stop: true, accepted: false };
       const { rows: [run] } = await client.query<ClaimedRun & {
-        current: boolean; checks: VerificationCheck[]; candidateHash: string | null;
+        current: boolean; checks: VerificationCheck[]; candidateHash: string | null; archivePatch: boolean;
       }>(
         `SELECT ${runColumns}, r.project_id AS "projectId", r.task_id AS "taskId",
-           r.check_plan AS checks, r.candidate_hash AS "candidateHash",
+           r.check_plan AS checks, r.candidate_hash AS "candidateHash", r.archive_patch AS "archivePatch",
            r.lease_expires_at > now() AND EXISTS (
              SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id AND p.status = 'active'
              WHERE wp.worker_id = $2 AND wp.project_id = r.project_id
@@ -348,6 +356,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         || run.checks.length !== event.payload.checks.length
         || run.checks.some(({ name }, index) => name !== event.payload.checks[index].name))) {
         return { stop: true, accepted: false };
+      }
+      if (event.kind === 'verification' && event.payload.passed && run.archivePatch) {
+        const artifact = await client.query('SELECT 1 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2',
+          [run.id, event.payload.patchHash]);
+        if (!artifact.rowCount) return { stop: true, accepted: false };
       }
       await client.query(
         'INSERT INTO execution_events (run_id, sequence, kind, payload) VALUES ($1,$2,$3,$4)',

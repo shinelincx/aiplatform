@@ -155,10 +155,22 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   const runtime = await configureExecution();
   if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
   if (runtime) await verifyCodexLogin(runtime);
-  const jobs = runtime ? new WorkerJobs(runtime) : undefined;
+  const jobs = runtime ? new WorkerJobs(runtime, async (runId, bytes, cancellation) => {
+    const url = new URL(`/worker-executions/${runId}/artifact`, endpoint);
+    url.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:';
+    const response = await fetch(url, {
+      method: 'PUT', body: bytes,
+      headers: { Authorization: `Bearer ${workerId}.${token}`, 'Content-Type': 'application/octet-stream' },
+      redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(12_000), cancellation]),
+    });
+    await response.body?.cancel();
+    if (response.status >= 500) throw new Error('Artifact storage unavailable');
+    return response.ok;
+  }) : undefined;
   if (jobs) {
     capabilities.codexVersion = codexVersion;
     capabilities.verificationVersion = 1;
+    capabilities.artifactVersion = 1;
   }
   let retryMs = 500;
   try {

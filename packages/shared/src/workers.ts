@@ -50,6 +50,7 @@ export interface WorkerCapabilities {
   dockerVersion: string | null;
   codexVersion?: string;
   verificationVersion?: 1;
+  artifactVersion?: 1;
 }
 
 export interface WorkerReport {

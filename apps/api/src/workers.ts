@@ -52,6 +52,7 @@ export function parseCapabilities(payload: unknown): WorkerCapabilities {
     dockerVersion: version('dockerVersion'),
     ...(input.codexVersion !== undefined && { codexVersion: textInput(input.codexVersion, 'codexVersion', 40) }),
     ...(input.verificationVersion === 1 && { verificationVersion: 1 as const }),
+    ...(input.artifactVersion === 1 && { artifactVersion: 1 as const }),
   };
 }
 

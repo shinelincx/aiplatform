@@ -155,6 +155,42 @@ const migrations = [
     comment text NOT NULL,
     reviewed_at timestamptz NOT NULL DEFAULT now()
   );`,
+  `ALTER TABLE execution_runs ADD COLUMN source_branch text, ADD COLUMN archive_patch boolean NOT NULL DEFAULT false;
+  CREATE TABLE execution_artifacts (
+    run_id uuid NOT NULL REFERENCES execution_runs(id),
+    sha256 varchar(64) NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    size integer NOT NULL CHECK (size > 0 AND size <= 16777216),
+    object_key text NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, sha256)
+  );
+  CREATE TABLE execution_deliveries (
+    run_id uuid PRIMARY KEY REFERENCES execution_runs(id),
+    repository_id uuid NOT NULL REFERENCES repositories(id),
+    requested_by uuid NOT NULL REFERENCES users(id),
+    patch_hash varchar(64) NOT NULL,
+    base_commit varchar(40) NOT NULL,
+    base_branch text NOT NULL,
+    branch text NOT NULL,
+    state text NOT NULL CHECK (state IN ('queued', 'publishing', 'published', 'failed')),
+    pull_number integer,
+    pull_url text,
+    pull_state text CHECK (pull_state IN ('open', 'closed', 'merged', 'changed')),
+    commit_sha varchar(40),
+    error text,
+    lease_id uuid,
+    lease_expires_at timestamptz,
+    github_updated_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (run_id, patch_hash) REFERENCES execution_artifacts(run_id, sha256),
+    UNIQUE (repository_id, branch),
+    UNIQUE (repository_id, pull_number)
+  );
+  CREATE INDEX execution_delivery_queue ON execution_deliveries (state, updated_at);
+  CREATE TABLE github_webhook_deliveries (
+    id uuid PRIMARY KEY,
+    received_at timestamptz NOT NULL DEFAULT now()
+  );`,
 ];
 
 @Injectable()

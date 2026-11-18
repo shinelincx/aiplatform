@@ -81,6 +81,14 @@ Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实�
 
 全部检查通过后，项目所有者可批准或驳回该候选补丁，驳回需填写原因。检查计划为空的任务停在“待测试”。配置计划后可重新派发，检查通过后即可审核。
 
+## 发布到 GitHub
+
+支持归档的 Worker 会在提交通过报告前将补丁存入 S3 兼容对象存储。工作台的“下载受测补丁”会校验长度和 SHA-256。通过审核后，项目所有者可点击“发布分支并创建草稿 PR”。
+
+发布需要目标仓库的 GitHub App 安装具备 `Contents: Write` 和 `Pull requests: Write`。控制面只为选定仓库签发短期发布凭证。发布从受测基准提交重建代码，创建 `ado/<runId>` 分支，并将草稿 PR 关联到执行记录。重试会检查已有分支和 PR，分支包含不同提交时将显示冲突。
+
+GitHub App 可把 Pull requests、Push 和 Check runs 事件发送到控制面的 HTTPS `/github/webhook`。在同一 GitHub App 设置与 `GITHUB_WEBHOOK_SECRET` 一致的密钥。控制面验证签名并忽略重复交付。合并的 PR 必须指向受测提交，任务才会进入“已完成”。
+
 ## Monorepo 与 CI
 
 使用 Node.js 24 和 npm workspaces，在仓库根目录安装并验证所有包。
@@ -97,4 +105,4 @@ npm run check
 | `@ado/worker` | `apps/worker` | Node.js Worker 注册、心跳、重连和连通检查 |
 | `@ado/shared` | `packages/shared` | Web、API、Worker 共用的数据类型和协议 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Worker 注册及重连，以及派发、事件重放、取消、超时和重试。执行协议测试使用本地 Worker 消息夹具，不需要连接 GitHub 或模型服务。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Worker 注册、派发、事件重放、检查与审核、补丁归档和签名 Webhook。Git 交付测试使用本地仓库，GitHub API 和 Worker 协议测试使用夹具。

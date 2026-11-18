@@ -1,4 +1,5 @@
 import type { ExecutionReview, VerificationCheck, VerificationReport } from './verification';
+import type { ExecutionDelivery, PatchArtifact } from './delivery';
 
 export interface ExecutionOffer {
   id: string;
@@ -11,6 +12,7 @@ export interface ExecutionOffer {
   description: string;
   acceptanceCriteria: string[];
   checks?: VerificationCheck[];
+  archivePatch?: boolean;
 }
 
 export type ExecutionState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
@@ -26,6 +28,8 @@ export interface ExecutionRun {
   finishedAt: string | null;
   report: VerificationReport | null;
   review: ExecutionReview | null;
+  artifact: PatchArtifact | null;
+  delivery: ExecutionDelivery | null;
 }
 
 export interface ExecutionEvent {
