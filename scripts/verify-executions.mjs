@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer';
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
@@ -20,6 +20,7 @@ import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
 import { WorkerJobs } from '../apps/worker/src/jobs.ts';
+import { copyRepositoryNpmCache } from '../apps/worker/src/npm-cache.ts';
 import { runVerification } from '../apps/worker/src/verification.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
@@ -342,7 +343,7 @@ try {
   fixtureRepo = mkdtempSync(join(tmpdir(), 'ado-release-fixture-'));
   const git = (...args) => execFileSync('git', args, { cwd: fixtureRepo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const shim = join(workerJournal, 'check-sandbox-fixture');
-  writeFileSync(shim, '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = -- ]; then shift; exec "$@"; fi\n  shift\ndone\nexit 126\n',
+  writeFileSync(shim, '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = -- ]; then shift; exec /usr/bin/env -u PATH "$@"; fi\n  shift\ndone\nexit 126\n',
     { mode: 0o700 });
   const verifyFixture = (name, argv, directory = '.') => ({ name, kind: 'unit', argv, directory, timeoutSeconds: 1 });
   const [failedCheck, timeoutCheck, directoryCheck, toolCheck, passingCheck] = await runVerification({
@@ -360,6 +361,22 @@ try {
   assert(Buffer.byteLength(failedCheck.diagnostic) <= 4096);
   assert.equal(failedCheck.diagnostic.includes('\u001b'), false);
   assert.equal(passingCheck.diagnostic, undefined);
+  const cacheRoot = join(workerJournal, 'repository-caches');
+  const source = join(cacheRoot, 'test', 'execution-fixture', '_cacache');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, 'cached-entry'), 'repository-cache');
+  const cacheSignal = globalThis.AbortSignal.timeout(5000);
+  assert.equal(await copyRepositoryNpmCache(cacheRoot, 'test/other-project', workerJournal, cacheSignal), undefined);
+  symlinkSync(join(cacheRoot, 'test', 'execution-fixture'), join(cacheRoot, 'test', 'aliased-project'));
+  await assert.rejects(copyRepositoryNpmCache(cacheRoot, 'test/aliased-project', workerJournal, cacheSignal), /symbolic path/);
+  const npmCache = await copyRepositoryNpmCache(cacheRoot, 'TEST/Execution-Fixture', workerJournal, cacheSignal);
+  const [cacheCheck] = await runVerification({
+    binary: shim, worktree: fixtureRepo, profile: [], env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` }, npmCache,
+  }, [verifyFixture('offline-cache', ['node', '-e',
+    'const fs=require("node:fs"), env=process.env, p=env.npm_config_cache+"/_cacache/cached-entry"; if(!env.PATH||env.HOME!==env.npm_config_cache||env.npm_config_offline!=="true"||fs.readFileSync(p,"utf8")!=="repository-cache") process.exit(1); fs.writeFileSync(p,"job-local");',
+  ])], cacheSignal);
+  assert.equal(cacheCheck.result.status, 'passed');
+  assert.equal(readFileSync(join(source, 'cached-entry'), 'utf8'), 'repository-cache');
   git('init', '-q', '-b', 'main');
   writeFileSync(join(fixtureRepo, 'index.ts'), 'old\n');
   git('add', 'index.ts');

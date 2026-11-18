@@ -9,6 +9,7 @@ export interface VerificationSandbox {
   env: Record<string, string>;
   worktree: string;
   profile: string[];
+  npmCache?: string;
 }
 
 interface CheckExecution {
@@ -59,8 +60,9 @@ async function runCheck(sandbox: VerificationSandbox, check: VerificationCheck, 
 
   return new Promise<CheckExecution>((resolve, reject) => {
     const child = spawn(sandbox.binary, ['sandbox', ...sandbox.profile.flatMap((part) => ['-c', part]),
-      '-P', 'ado-job', '--', '/usr/bin/env', `HOME=${sandbox.worktree}`,
-      'npm_config_cache=/tmp/ado-npm-cache', 'CI=true', executable, ...arguments_], {
+      '-P', 'ado-job', '--', '/usr/bin/env', `PATH=${sandbox.env.PATH}`, `HOME=${sandbox.npmCache ?? sandbox.worktree}`,
+      `npm_config_cache=${sandbox.npmCache ?? '/tmp/ado-npm-cache'}`,
+      ...(sandbox.npmCache ? ['npm_config_offline=true'] : []), 'CI=true', executable, ...arguments_], {
       cwd: directory, env: sandbox.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let tail = Buffer.alloc(0);

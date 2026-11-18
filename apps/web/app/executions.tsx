@@ -14,6 +14,7 @@ const eventLabels: Record<string, string> = {
   codex_failed: 'Codex 执行失败', no_changes: 'Codex 未生成代码变更',
   worker_timeout: 'Worker 执行超时', worker_error: 'Worker 处理失败',
   worker_restarted: 'Worker 重启时执行尚未完成',
+  npm_cache_unavailable: '无法准备仓库的 npm 缓存',
   repair: '根据检查结果修复', checks_changed_candidate: '测试改动了待审核补丁',
   artifact_upload_failed: '补丁归档失败',
   agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更',

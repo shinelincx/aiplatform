@@ -74,6 +74,7 @@ Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研�
 | `ADO_CODEX_STATE_DIR` | 独立 Codex 状态目录的绝对路径，需预先创建，且位于工作目录之外 |
 | `ADO_CODEX_API_KEY` | 可选，设定后用于模型认证。也可通过 Codex CLI 在独立状态目录中登录 |
 | `ADO_MIN_FREE_DISK_MIB` | 执行目录的最低可用磁盘空间，默认 256 MiB |
+| `ADO_NPM_CACHE_ROOT` | 可选，存放各仓库 npm 缓存的绝对路径 |
 
 Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实际 Git worktree 中验证隔离。状态目录使用默认配置。测试代码、密钥和其他项目文件应放在工作目录之外。生产部署可在独立 Worker 服务上设置 CPU、内存和磁盘配额。
 
@@ -97,6 +98,10 @@ Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时�
 ```
 
 派发时会保存该任务的检查计划快照。Worker 在同一无网络沙箱中执行检查，并确认检查前后的候选补丁一致。检查所需工具和依赖须已在隔离环境中可用。普通检查失败可在同一工作区和 Codex 线程内修复两次。每项失败检查最多提供 4 KiB 诊断尾部给修复轮次，控制面只记录状态、原因分类、退出码和耗时。超时、工具不可用或候选补丁被检查命令改动时结束运行。
+
+使用 npm 的项目可以在与 Worker 同平台的可信检出目录预热该仓库的专用缓存。例如在已检出的 Fitbest 目录中运行 `npm --prefix fit-best-trainer ci --ignore-scripts --no-audit --no-fund --cache /srv/ado-caches/shinelincx/fitbest`，并设置 Worker 的 `ADO_NPM_CACHE_ROOT=/srv/ado-caches`。为其他使用到的 npm 子包重复预热，使用同一个仓库缓存。
+
+将对应目录的 `["npm","ci","--offline","--ignore-scripts","--no-audit","--no-fund"]` 放在依赖它的检查前。Worker 仅将选中仓库的 `_cacache` 复制到当前任务的检查沙箱。缓存写入保留在该任务内，检查仍运行在无网络沙箱中。请在仓库中忽略安装生成的 `node_modules`。 [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci) · [npm 缓存](https://docs.npmjs.com/cli/v11/commands/npm-cache)
 
 全部检查通过后，项目所有者可批准或驳回该候选补丁，驳回需填写原因。检查计划为空的任务停在“待测试”，配置计划后可重新派发。
 
