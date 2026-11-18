@@ -22,6 +22,12 @@ import { workerDiskReady, type WorkerIdentity } from './workers';
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
   finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId"`;
+const workerCanVerify = `(jsonb_array_length(r.check_plan) = 0 OR (
+  w.capabilities->'verificationVersion' = '1'::jsonb
+  AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
+  AND (w.capabilities @> '{"mavenVerification":true}'::jsonb
+    OR NOT jsonb_path_exists(r.check_plan, '$[*].argv[0] ? (@ == "mvn")'))
+))`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
@@ -150,7 +156,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async list(actor: Account, projectId: string, taskId: string) {
     await this.tasks.get(actor, projectId, taskId);
     const { rows } = await this.db.pool.query<ExecutionRun>(
-      `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
+      `SELECT ${runColumns}, r.check_plan AS "checkPlan", (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
          'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
            WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
@@ -231,10 +237,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          JOIN execution_runs r ON r.project_id = wp.project_id AND r.id = $2
          JOIN repositories g ON g.id = r.repository_id
          WHERE w.id = $3 AND NOT w.disabled AND w.credential_expires_at > now() AND w.capabilities ? 'codexVersion'
-           AND (jsonb_array_length(r.check_plan) = 0 OR (
-             w.capabilities->'verificationVersion' = '1'::jsonb
-             AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
-           ))`, [projectId, runId, workerId]);
+           AND ${workerCanVerify}`, [projectId, runId, workerId]);
       if (!eligible.rowCount) throw new ConflictException('Worker is not eligible for this execution');
     }
     await client.query('UPDATE execution_runs SET requested_worker_id = $2 WHERE id = $1', [runId, workerId]);
@@ -329,8 +332,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async lockWorker(client: PoolClient, worker: WorkerLease) {
-    const result = await client.query<{ canExecute: boolean; canVerify: boolean; canArchive: boolean; diskReady: boolean }>(
-      `SELECT capabilities ? 'codexVersion' AS "canExecute", capabilities->'verificationVersion' = '1'::jsonb AS "canVerify",
+    const result = await client.query<{ canExecute: boolean; canArchive: boolean; diskReady: boolean }>(
+      `SELECT capabilities ? 'codexVersion' AS "canExecute",
          capabilities->'artifactVersion' = '1'::jsonb AS "canArchive", ${workerDiskReady} AS "diskReady"
        FROM workers w
        WHERE id = $1 AND credential_hash = $2 AND connection_id = $3
@@ -355,15 +358,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
            g.github_repository_id::text AS "githubId", r.check_plan AS checks, r.developer_assignment AS development
          FROM execution_runs r
          JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = $1
+         JOIN workers w ON w.id = wp.worker_id
          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'QUEUED'
          JOIN repositories g ON g.id = r.repository_id
          WHERE r.status = 'queued' AND NOT r.cancel_requested
            AND (r.requested_worker_id IS NULL OR r.requested_worker_id = $1)
-           AND ($2::boolean OR jsonb_array_length(r.check_plan) = 0)
-           AND ($3::boolean OR (r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR jsonb_array_length(r.check_plan) = 0)
+           AND ${workerCanVerify}
          ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`,
-        [worker.workerId, capabilities.canVerify === true, capabilities.canArchive === true],
+        [worker.workerId],
       );
       if (!offer) return null;
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);

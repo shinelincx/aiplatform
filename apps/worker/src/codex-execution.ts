@@ -25,6 +25,7 @@ interface Runtime {
   apiKey?: string;
   npmCacheRoot?: string;
   mavenCacheRoot?: string;
+  supportsMaven?: boolean;
 }
 
 export async function configureExecution(): Promise<Runtime | undefined> {
@@ -64,13 +65,20 @@ export async function configureExecution(): Promise<Runtime | undefined> {
   };
   const { stdout } = await exec(checkedBinary, ['--version'], { env, timeout: 5000 });
   if (stdout.trim() !== `codex-cli ${codexVersion}`) throw new Error(`Worker requires Codex CLI ${codexVersion}`);
-  const runtime = { root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot };
+  const runtime: Runtime = {
+    root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
+  };
   const probe = await mkdtemp(join(checkedRoot, '.sandbox-check-'));
   try {
     const checkout = join(probe, 'checkout');
     const gitDir = join(probe, 'source.git');
     await Promise.all([mkdir(checkout), mkdir(gitDir)]);
     await verifySandbox(runtime, probe, checkout, gitDir, AbortSignal.timeout(20_000));
+    const maven = await runVerification({
+      binary: checkedBinary, env, worktree: checkout, profile: isolatedProfile(checkout, gitDir, checkedBinary),
+    }, [{ name: 'maven', kind: 'static', argv: ['mvn', '--version'], directory: '.', timeoutSeconds: 5 }],
+    AbortSignal.timeout(6000)).catch(() => []);
+    runtime.supportsMaven = maven[0]?.result.status === 'passed';
   } finally {
     await rm(probe, { recursive: true, force: true });
   }

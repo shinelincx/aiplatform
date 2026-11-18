@@ -24,6 +24,7 @@ export async function Workers({ project, manage }: { project: Project; manage: b
                 {capabilities && <div><small>可用磁盘 {availableMiB(capabilities.diskFreeBytes)} MiB
                   {capabilities.memoryFreeBytes !== undefined && ` · 可用内存 ${availableMiB(capabilities.memoryFreeBytes)} MiB`}
                   {capabilities.codexVersion ? ' · 单任务执行' : ' · 仅注册和心跳'}
+                  {capabilities.mavenVerification && ' · Maven'}
                 </small></div>}
               </div>
               <small>{statusText[status]}

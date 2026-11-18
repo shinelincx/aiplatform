@@ -57,7 +57,7 @@ async function postForm(url, form, cookie) {
   });
 }
 
-async function open(credential, execute = true, verify = false, archive = false) {
+async function open(credential, execute = true, verify = false, archive = false, maven = false) {
   const endpoint = new URL('/workers/ws', api);
   endpoint.protocol = 'ws:';
   const ws = new WebSocket(endpoint, {
@@ -82,6 +82,7 @@ async function open(credential, execute = true, verify = false, archive = false)
     ...(execute && { codexVersion: '0.170.0' }),
     ...(verify && { verificationVersion: 1 }),
     ...(archive && { artifactVersion: 1 }),
+    ...(maven && { mavenVerification: true }),
   });
   const close = async () => {
     if (ws.readyState === WebSocket.CLOSED) return;
@@ -318,6 +319,42 @@ try {
 
   const checksPath = `/projects/${first.id}/repositories/${repository.id}/checks`;
   const plan = [{ name: 'unit', kind: 'unit', argv: ['node', '--test'], directory: '.', timeoutSeconds: 30 }];
+  const mavenPlan = [{ ...plan[0], name: 'server', argv: ['mvn', 'test'] }];
+  await request(checksPath, { token, method: 'PATCH', body: { checks: mavenPlan } });
+  const nodeCredential = await credentials(first.id);
+  const nodeWorker = await open(nodeCredential, true, true, true);
+  const serverTask = await newTask('MAVEN-ROUTING');
+  await request(serverTask.runs, { token, method: 'POST', body: { workerId: nodeCredential.workerId }, status: 409 });
+  const mavenRun = await request(serverTask.runs, { token, method: 'POST', status: 201 });
+  const mavenAssign = `${serverTask.runs}/${mavenRun.id}/worker`;
+  await request(mavenAssign, { token, method: 'POST', body: { workerId: nodeCredential.workerId }, status: 409 });
+  assert.equal(await nodeWorker.send('WORKER_CLAIM'), null);
+
+  const nodePlan = [{ ...plan[0], argv: ['node', '--test', 'mvn'] }];
+  await request(checksPath, { token, method: 'PATCH', body: { checks: nodePlan } });
+  const serverPage = new URL(`/?project=${first.id}&task=${serverTask.id}`, web);
+  const waitingPage = await globalThis.fetch(serverPage, { headers: { Cookie: cookie } });
+  assert((await waitingPage.text()).includes('当前分配范围内没有可领取任务的 Maven Worker'));
+  assert.deepEqual((await request(serverTask.runs, { token }))[0].checkPlan, mavenPlan);
+  const nodeTask = await newTask('NODE-ROUTING');
+  const nodeRun = await request(nodeTask.runs, { token, method: 'POST', status: 201 });
+  assert.equal((await nodeWorker.send('WORKER_CLAIM')).id, nodeRun.id);
+
+  const mavenCredential = await credentials(first.id);
+  const mavenWorker = await open(mavenCredential, true, true, true, true);
+  await request(mavenAssign, { token, method: 'POST', body: { workerId: mavenCredential.workerId }, status: 204 });
+  await request(mavenAssign, { token, method: 'POST', body: { workerId: null }, status: 204 });
+  const mavenOffer = await mavenWorker.send('WORKER_CLAIM');
+  assert.equal(mavenOffer.id, mavenRun.id);
+  assert.deepEqual(mavenOffer.checks, mavenPlan);
+  for (const [task, run, client] of [[nodeTask, nodeRun, nodeWorker], [serverTask, mavenRun, mavenWorker]]) {
+    await request(`${task.runs}/${run.id}/cancel`, { token, method: 'POST', status: 204 });
+    assert.equal((await client.send('EXECUTION_EVENT', {
+      runId: run.id, sequence: 1, kind: 'cancelled', payload: {},
+    })).accepted, true);
+    await client.close();
+  }
+  console.log('Maven-aware assignment and claiming honored the queued check plan with two Workers');
   await request(checksPath, { token, method: 'PATCH', body: { checks: [{ ...plan[0], directory: '../other' }] }, status: 400 });
   const configured = await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
   assert.deepEqual(configured.checks, plan);

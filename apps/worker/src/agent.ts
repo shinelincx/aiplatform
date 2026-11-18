@@ -199,11 +199,12 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
     if (response.status >= 500) throw new Error('Artifact storage unavailable');
     return response.ok;
   }) : undefined;
-  if (jobs) {
+  if (runtime && jobs) {
     await jobs.load();
     capabilities.codexVersion = codexVersion;
     capabilities.verificationVersion = 1;
     capabilities.artifactVersion = 1;
+    if (runtime.supportsMaven) capabilities.mavenVerification = true;
   }
   let retryMs = 500;
   try {

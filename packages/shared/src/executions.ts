@@ -37,6 +37,7 @@ export interface ExecutionRun {
   createdAt: string;
   finishedAt: string | null;
   report: VerificationReport | null;
+  checkPlan?: VerificationCheck[];
   review: ExecutionReview | null;
   artifact: PatchArtifact | null;
   delivery: ExecutionDelivery | null;

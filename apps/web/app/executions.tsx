@@ -1,5 +1,5 @@
 import { workerDiskPressure, type CheckFailureReason, type CheckResult, type ExecutionEvent, type ExecutionRun,
-  type Project, type Task, type WorkerReport } from '@ado/shared';
+  type Project, type Task, type VerificationCheck, type WorkerReport } from '@ado/shared';
 import { changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
@@ -75,8 +75,8 @@ function CheckResults({ checks }: { checks: CheckResult[] }) {
   </li>)}</ul>;
 }
 
-export async function Executions({ project, task, hasChecks, autoDraftPr, planned }: {
-  project: Project; task: Task; hasChecks: boolean; autoDraftPr: boolean; planned: boolean;
+export async function Executions({ project, task, checks, autoDraftPr, planned }: {
+  project: Project; task: Task; checks: VerificationCheck[]; autoDraftPr: boolean; planned: boolean;
 }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
   const [runsResult, workersResult] = await Promise.all([
@@ -85,6 +85,9 @@ export async function Executions({ project, task, hasChecks, autoDraftPr, planne
   const runs = runsResult ?? [];
   const workers = workersResult ?? [];
   const latest = runs[0];
+  const scheduledChecks = latest?.status === 'queued' ? latest.checkPlan ?? checks : checks;
+  const hasChecks = scheduledChecks.length > 0;
+  const needsMaven = scheduledChecks.some(({ argv }) => argv[0] === 'mvn');
   const events = latest ? await read<ExecutionEvent[]>(`${url}/${latest.id}/events`) : null;
   const earlierChecks = events?.filter(({ kind, payload }) =>
     kind === 'verification' && typeof payload.attempt === 'number' && payload.attempt < (latest?.report?.attempt ?? 0));
@@ -100,7 +103,12 @@ export async function Executions({ project, task, hasChecks, autoDraftPr, planne
   const candidates = workers.filter(({ status, capabilities }) =>
     status !== 'disabled' && Boolean(capabilities?.codexVersion)
     && (!hasChecks || capabilities?.verificationVersion === 1)
+    && (!needsMaven || capabilities?.mavenVerification === true)
     && (!hasChecks || (!autoDraftPr && !planned) || capabilities?.artifactVersion === 1));
+  const waitingForMaven = latest?.status === 'queued' && needsMaven
+    && !candidates.some(({ id, status, capabilities }) =>
+      status === 'online' && capabilities && !workerDiskPressure(capabilities)
+      && (!latest.requestedWorkerId || latest.requestedWorkerId === id));
   const workerName = (id: string) => workers.find((worker) => worker.id === id)?.name ?? id.slice(0, 8);
   const identity = <>
     <input type="hidden" name="projectId" value={project.id} />
@@ -117,6 +125,7 @@ export async function Executions({ project, task, hasChecks, autoDraftPr, planne
     {latest && <>
       <p role="status">{latest.cancelRequested && active ? '正在取消'
         : latest.status === 'succeeded' && latest.report?.passed ? '检查已通过' : stateLabels[latest.status]}</p>
+      {waitingForMaven && <p className="feedback">当前分配范围内没有可领取任务的 Maven Worker。</p>}
       {owner && awaitingChecks && !hasChecks && <p className="muted">配置仓库检查计划后可重新派发。</p>}
       {latest.requestedWorkerId && <p>指定 Worker · {workerName(latest.requestedWorkerId)}</p>}
       {latest.workerId && <p>领取 Worker · {workerName(latest.workerId)}</p>}
