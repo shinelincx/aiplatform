@@ -7,7 +7,7 @@ import type { PoolClient } from 'pg';
 import {
   canRepair, canTransitionTask, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account, type CheckResult,
   type AgentAssignment, type ArchitecturePlan, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
-  type VerificationCheck, type VerificationReport,
+  type VerificationCheck, type VerificationReport, type WorkerRecovery,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
@@ -23,7 +23,7 @@ const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId"
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
-  'worker_error', 'checks_changed_candidate', 'artifact_upload_failed'];
+  'worker_error', 'checks_changed_candidate', 'artifact_upload_failed', 'worker_restarted'];
 
 function attemptInput(value: unknown) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxVerificationAttempts) {
@@ -338,6 +338,28 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          RETURNING r.cancel_requested AS "cancelRequested"`, [runId, worker.workerId, workerOfflineMs],
       );
       return run ? !run.cancelRequested : false;
+    });
+  }
+
+  async recover(worker: WorkerLease, runId: string): Promise<WorkerRecovery> {
+    return this.db.transaction(async (client) => {
+      const unavailable = { state: 'unavailable', lastSequence: 0 } as const;
+      if (!await this.lockWorker(client, worker)) return unavailable;
+      const { rows: [run] } = await client.query<{
+        status: ExecutionRun['status']; lastSequence: number; cancelled: boolean; live: boolean | null;
+      }>(
+        `SELECT r.status, r.last_sequence AS "lastSequence", r.cancel_requested AS cancelled,
+           r.lease_expires_at > now() AS live FROM execution_runs r
+         JOIN projects p ON p.id = r.project_id AND p.status = 'active'
+         JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = r.worker_id
+         WHERE r.id = $1 AND r.worker_id = $2 FOR UPDATE OF r`, [runId, worker.workerId]);
+      if (!run) return unavailable;
+      if (run.status !== 'running') return { state: 'finished', lastSequence: run.lastSequence };
+      if (!run.live) return unavailable;
+      await client.query(
+        "UPDATE execution_runs SET lease_expires_at = now() + ($2 * interval '1 millisecond') WHERE id = $1",
+        [runId, workerOfflineMs]);
+      return { state: run.cancelled ? 'cancelling' : 'running', lastSequence: run.lastSequence };
     });
   }
 

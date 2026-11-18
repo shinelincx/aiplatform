@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
-import { decodeWorkerMessage, isWorkerId, workerOfflineMs, workerProtocolVersion,
+import { decodeWorkerMessage, isWorkerId, workerMaxPayloadBytes, workerOfflineMs, workerProtocolVersion,
   type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
 import { parseCapabilities, parseWorkerCredentials, WorkersService, type WorkerIdentity } from './workers';
 import { ExecutionsService } from './executions';
@@ -11,7 +11,7 @@ import { ExecutionsService } from './executions';
 @Injectable()
 export class WorkerGateway implements OnModuleDestroy {
   private readonly log = new Logger(WorkerGateway.name);
-  private readonly gateway = new WebSocketServer({ noServer: true, maxPayload: 65536 });
+  private readonly gateway = new WebSocketServer({ noServer: true, maxPayload: workerMaxPayloadBytes });
   private server?: Server;
 
   constructor(
@@ -96,6 +96,11 @@ export class WorkerGateway implements OnModuleDestroy {
       if (message.message_type === 'EXECUTION_EVENT') {
         const result = await this.executions.record(lease, message.payload);
         this.ack(socket, identity, message, 'EXECUTION_ACK', result);
+        return;
+      }
+      if (message.message_type === 'WORKER_RECOVER' && isWorkerId(message.payload)) {
+        const checkpoint = await this.executions.recover(lease, message.payload);
+        this.ack(socket, identity, message, 'RECOVER_ACK', checkpoint);
         return;
       }
       if (message.message_type !== 'WORKER_HEARTBEAT' || (message.payload !== null && !isWorkerId(message.payload))) {

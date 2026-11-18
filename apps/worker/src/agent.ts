@@ -5,7 +5,7 @@ import { availableParallelism, totalmem } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { WebSocket } from 'ws';
-import { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerProtocolVersion,
+import { decodeWorkerMessage, isWorkerId, workerHeartbeatMs, workerMaxPayloadBytes, workerProtocolVersion,
   type WorkerCapabilities, type WorkerEnvelope, type WorkerMessageType } from '@ado/shared';
 import { codexVersion, configureExecution, verifyCodexLogin } from './codex-execution';
 import { WorkerJobs } from './jobs';
@@ -60,7 +60,7 @@ function connect(url: URL, workerId: string, token: string,
     const socket = new WebSocket(url, {
       headers: { Authorization: `Bearer ${workerId}.${token}` },
       handshakeTimeout: acknowledgementTimeoutMs,
-      maxPayload: 65536,
+      maxPayload: workerMaxPayloadBytes,
       perMessageDeflate: false,
     });
     const connection = new AbortController();
@@ -101,6 +101,7 @@ function connect(url: URL, workerId: string, token: string,
       if (result !== null) throw new Error('Unexpected registration payload');
       registered = true;
       console.log(JSON.stringify({ service: 'ado-worker', event: 'registered', workerId, os: capabilities.os }));
+      if (jobs?.runId) await jobs.reconcile(await send('WORKER_RECOVER', 'RECOVER_ACK', jobs.runId));
       let nextHeartbeat = Date.now() + workerHeartbeatMs;
       while (!connection.signal.aborted) {
         if (Date.now() >= nextHeartbeat) {
@@ -115,7 +116,7 @@ function connect(url: URL, workerId: string, token: string,
           await jobs.flush((event) => send('EXECUTION_EVENT', 'EXECUTION_ACK', event));
         } else if (jobs) {
           const offer = await send('WORKER_CLAIM', 'CLAIM_ACK', null);
-          if (offer !== null) jobs.start(offer);
+          if (offer !== null) await jobs.start(offer);
         }
         await delay(jobs?.runId ? 250 : jobs ? 2000 : Math.max(1, nextHeartbeat - Date.now()),
           undefined, { signal: connection.signal });
@@ -155,7 +156,7 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   const runtime = await configureExecution();
   if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
   if (runtime) await verifyCodexLogin(runtime);
-  const jobs = runtime ? new WorkerJobs(runtime, async (runId, bytes, cancellation) => {
+  const jobs = runtime ? new WorkerJobs(runtime, workerId, async (runId, bytes, cancellation) => {
     const url = new URL(`/worker-executions/${runId}/artifact`, endpoint);
     url.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:';
     const response = await fetch(url, {
@@ -168,6 +169,7 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
     return response.ok;
   }) : undefined;
   if (jobs) {
+    await jobs.load();
     capabilities.codexVersion = codexVersion;
     capabilities.verificationVersion = 1;
     capabilities.artifactVersion = 1;

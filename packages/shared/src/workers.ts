@@ -1,10 +1,12 @@
 export const workerProtocolVersion = 1;
 export const workerHeartbeatMs = 15_000;
 export const workerOfflineMs = 3 * workerHeartbeatMs;
+export const workerMaxPayloadBytes = 512 * 1024;
 
 export const workerMessageTypes = [
   'WORKER_REGISTER', 'REGISTER_ACK', 'WORKER_HEARTBEAT', 'HEARTBEAT_ACK',
   'WORKER_CLAIM', 'CLAIM_ACK', 'EXECUTION_EVENT', 'EXECUTION_ACK',
+  'WORKER_RECOVER', 'RECOVER_ACK',
 ] as const;
 export type WorkerMessageType = (typeof workerMessageTypes)[number];
 
@@ -65,4 +67,9 @@ export interface WorkerCredential {
   workerId: string;
   token: string;
   expiresAt: string;
+}
+
+export interface WorkerRecovery {
+  state: 'running' | 'cancelling' | 'finished' | 'unavailable';
+  lastSequence: number;
 }

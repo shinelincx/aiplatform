@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer';
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -18,6 +18,7 @@ import { DeliveriesService } from '../apps/api/src/deliveries.ts';
 import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
+import { WorkerJobs } from '../apps/worker/src/jobs.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
 const web = process.env.ADO_VERIFY_WEB_URL ?? 'http://web:3000';
@@ -27,6 +28,7 @@ assert(email && password, 'Configure a bootstrap account for the integration che
 const db = new pg.Pool();
 const sockets = new Set();
 let fixtureRepo;
+let workerJournal;
 let publisher;
 let publisherDb;
 
@@ -178,10 +180,66 @@ try {
   const overview = await globalThis.fetch(selected, { headers: { Cookie: cookie } });
   assert((await overview.text()).includes('变更已生成，待测试'));
 
+  workerJournal = mkdtempSync(join(tmpdir(), 'ado-worker-journal-'));
+  const proofRuntime = { root: workerJournal, binary: '', env: {} };
+  const recoverJob = async (code, complete) => {
+    const target = await newTask(code);
+    const run = await request(target.runs, { token, method: 'POST', status: 201 });
+    const jobOffer = await worker.send('WORKER_CLAIM');
+    assert.equal(jobOffer.id, run.id);
+    const saved = Promise.withResolvers();
+    const beforeRestart = new WorkerJobs(proofRuntime, approved.workerId, async () => true, async (_runtime, _offer, emit) => {
+      try {
+        await emit('thread', { threadId: 'restart-fixture' });
+        await emit('progress', { stage: 'collecting' });
+        if (complete) await emit('result', result.payload);
+        saved.resolve();
+      } catch (error) {
+        saved.reject(error);
+      }
+    });
+    await beforeRestart.start(jobOffer);
+    await saved.promise;
+    await assert.rejects(beforeRestart.flush(async (event) => {
+      assert.equal((await worker.send('EXECUTION_EVENT', event)).accepted, true);
+      throw new Error('Lost acknowledgement');
+    }), /Lost acknowledgement/);
+    const { state } = await outsider.send('WORKER_RECOVER', run.id);
+    assert.equal(state, 'unavailable');
+    beforeRestart.cancel();
+    await worker.close();
+    worker = await open(approved);
+    let restartedExecution = false;
+    const afterRestart = new WorkerJobs(proofRuntime, approved.workerId, async () => true, async () => {
+      restartedExecution = true;
+    });
+    await afterRestart.load();
+    assert.equal(afterRestart.runId, run.id);
+    const recovery = await worker.send('WORKER_RECOVER', run.id);
+    assert.deepEqual(recovery, { state: 'running', lastSequence: 1 });
+    await afterRestart.reconcile(recovery);
+    await afterRestart.flush((event) => worker.send('EXECUTION_EVENT', event));
+    await afterRestart.flush((event) => worker.send('EXECUTION_EVENT', event));
+    assert.equal(afterRestart.runId, null);
+    assert.equal(restartedExecution, false);
+    assert.equal((await request(target.path, { token })).status, complete ? 'TESTING' : 'FAILED');
+    assert.deepEqual(await worker.send('WORKER_RECOVER', run.id), { state: 'finished', lastSequence: 3 });
+    const restored = await request(`${target.runs}/${run.id}/events`, { token });
+    assert.deepEqual(restored.map(({ sequence, kind }) => [sequence, kind]),
+      [[1, 'thread'], [2, 'progress'], [3, complete ? 'result' : 'failed']]);
+    if (!complete) assert.equal(restored[2].payload.code, 'worker_restarted');
+    const savedEvents = JSON.parse(readFileSync(join(workerJournal, `${run.id}.events.json`), 'utf8'));
+    assert.equal(savedEvents.events.length, 3);
+    assert(!Object.hasOwn(savedEvents, 'repositoryToken'));
+  };
+  await recoverJob('RECOVER-COMPLETE', true);
+  await recoverJob('RECOVER-INTERRUPTED', false);
+
   const cancelled = await newTask('CANCEL-EXECUTION');
   const secondRun = await request(cancelled.runs, { token, method: 'POST', status: 201 });
   assert.equal((await worker.send('WORKER_CLAIM')).id, secondRun.id);
   await request(`${cancelled.runs}/${secondRun.id}/cancel`, { token, method: 'POST', status: 204 });
+  assert.deepEqual(await worker.send('WORKER_RECOVER', secondRun.id), { state: 'cancelling', lastSequence: 0 });
   assert.deepEqual(await worker.send('WORKER_HEARTBEAT', secondRun.id), { stop: true });
   assert.deepEqual(await worker.send('EXECUTION_EVENT', {
     runId: secondRun.id, sequence: 1, kind: 'cancelled', payload: {},
@@ -406,6 +464,7 @@ try {
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Needs product review' } });
   assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
+  console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');
   console.log('Patch archive integrity, download and publication gates passed');
 } finally {
@@ -413,5 +472,6 @@ try {
   publisher?.onModuleDestroy();
   await publisherDb?.pool.end();
   if (fixtureRepo) rmSync(fixtureRepo, { recursive: true, force: true });
+  if (workerJournal) rmSync(workerJournal, { recursive: true, force: true });
   await db.end();
 }
