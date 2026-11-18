@@ -1,3 +1,5 @@
+import type { ExecutionReview, VerificationCheck, VerificationReport } from './verification';
+
 export interface ExecutionOffer {
   id: string;
   taskId: string;
@@ -8,6 +10,7 @@ export interface ExecutionOffer {
   title: string;
   description: string;
   acceptanceCriteria: string[];
+  checks?: VerificationCheck[];
 }
 
 export type ExecutionState = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
@@ -21,6 +24,8 @@ export interface ExecutionRun {
   cancelRequested: boolean;
   createdAt: string;
   finishedAt: string | null;
+  report: VerificationReport | null;
+  review: ExecutionReview | null;
 }
 
 export interface ExecutionEvent {

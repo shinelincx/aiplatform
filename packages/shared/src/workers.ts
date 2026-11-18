@@ -49,6 +49,7 @@ export interface WorkerCapabilities {
   gitVersion: string | null;
   dockerVersion: string | null;
   codexVersion?: string;
+  verificationVersion?: 1;
 }
 
 export interface WorkerReport {

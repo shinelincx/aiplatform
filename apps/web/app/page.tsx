@@ -18,6 +18,8 @@ const issues: Record<string, string> = {
   user: '无法创建账号，请检查输入。',
   member: '无法更新成员，请刷新页面后重试。',
   repository: '无法绑定仓库，请确认 GitHub App 的仓库权限和分支名。',
+  verification: '检查配置保存失败。请核对 JSON、检查名称、工作目录和命令参数。',
+  review: '审核提交失败。选择驳回时请填写原因。',
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
 };
@@ -57,6 +59,7 @@ export default async function Home({ searchParams }: {
         </div>
         {query.issue && Object.hasOwn(issues, query.issue) && <p role="alert" className="feedback">{issues[query.issue]}</p>}
         {query.notice === 'user-created' && account && <p role="status">账号已创建。</p>}
+        {query.notice === 'checks-saved' && account && <p role="status">检查计划已保存。</p>}
         {account ? (
           <div className="workspace-grid">
             <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />

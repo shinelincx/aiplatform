@@ -1,5 +1,5 @@
 import type { GitHubInstallation, GitHubRepository, Project, RepositoryBinding } from '@ado/shared';
-import { bindRepository } from './actions';
+import { bindRepository, updateRepositoryChecks } from './actions';
 import { read } from './api-client';
 
 export async function Repositories({ project, manage, installation }: {
@@ -20,8 +20,24 @@ export async function Repositories({ project, manage, installation }: {
     <section className="panel" aria-labelledby="repository-heading">
       <h2 id="repository-heading">GitHub 仓库</h2>
       {bindings?.length ? <ul className="members">
-        {bindings.map(({ id, url, fullName, defaultBranch }) => (
-          <li key={id}><a href={url}>{fullName}</a><small>默认分支 · {defaultBranch}</small></li>
+        {bindings.map(({ id, url, fullName, defaultBranch, checks }) => (
+          <li key={id}>
+            <div>
+              <a href={url}>{fullName}</a>
+              <p><small>默认分支 · {defaultBranch} · {checks.length} 项检查</small></p>
+              {manage && <details>
+                <summary>检查计划</summary>
+                <form action={updateRepositoryChecks} className="fields">
+                  <input type="hidden" name="projectId" value={project.id} />
+                  <input type="hidden" name="repositoryId" value={id} />
+                  <label>检查计划 JSON<textarea name="checks" rows={8} cols={53} maxLength={24000}
+                    defaultValue={JSON.stringify(checks, null, 2)} required /></label>
+                  <p className="muted">每项包含 name、kind 和 argv。kind 支持 unit、api 和 static。可填写相对目录 directory 和超时秒数 timeoutSeconds。</p>
+                  <button>保存检查计划</button>
+                </form>
+              </details>}
+            </div>
+          </li>
         ))}
       </ul> : <p className="muted">尚未绑定仓库。</p>}
       {manage && !result && <p role="status">无法读取 GitHub App 授权，请检查配置。</p>}

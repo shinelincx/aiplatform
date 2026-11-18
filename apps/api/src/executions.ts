@@ -1,12 +1,13 @@
 import {
-  BadRequestException, ConflictException, Controller, Get, HttpCode, Inject, Injectable,
+  BadRequestException, Body, ConflictException, Controller, Get, HttpCode, Inject, Injectable,
   Logger, NotFoundException, Param, ParseUUIDPipe, Post, UseGuards,
   type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  canTransitionTask, isWorkerId, workerOfflineMs, type Account, type ExecutionEvent,
-  type ExecutionOffer, type ExecutionRun, type Task, type TaskStatus,
+  canRepair, canTransitionTask, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account, type CheckResult,
+  type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
+  type VerificationCheck, type VerificationReport,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
@@ -18,10 +19,32 @@ import type { WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
-  finished_at AS "finishedAt"`;
+  finished_at AS "finishedAt", verification_report AS report`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
-const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout', 'worker_error'];
+const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
+  'worker_error', 'checks_changed_candidate'];
+
+function attemptInput(value: unknown) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxVerificationAttempts) {
+    throw new BadRequestException('Invalid verification attempt');
+  }
+  return value;
+}
+
+function checkResult(value: unknown): CheckResult {
+  const { name, status, exitCode, durationMs } = objectInput(value);
+  if (status !== 'passed' && status !== 'failed' && status !== 'timed_out' && status !== 'unavailable') {
+    throw new BadRequestException('Invalid check status');
+  }
+  if (typeof durationMs !== 'number' || !Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > 320_000
+    || (exitCode !== null && (typeof exitCode !== 'number' || !Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255))
+    || (status === 'passed') !== (exitCode === 0)
+    || (status === 'failed') !== (typeof exitCode === 'number' && exitCode > 0)) {
+    throw new BadRequestException('Invalid check result');
+  }
+  return { name: textInput(name, 'check name', 48), status, exitCode, durationMs };
+}
 
 function executionEvent(body: unknown) {
   const data = objectInput(body);
@@ -33,26 +56,26 @@ function executionEvent(body: unknown) {
   if (kind === 'thread') {
     const threadId = textInput(input.threadId, 'thread ID', 128);
     if (!/^[a-zA-Z0-9_-]+$/.test(threadId)) throw new BadRequestException('Invalid thread ID');
-    return { runId, sequence, kind, payload: { threadId } };
+    return { runId, sequence, kind: 'thread' as const, payload: { threadId } };
   }
   if (kind === 'progress') {
     const stage = input.stage;
-    if (stage !== 'checkout' && stage !== 'inference' && stage !== 'collecting') {
+    if (stage !== 'checkout' && stage !== 'inference' && stage !== 'collecting' && stage !== 'repair') {
       throw new BadRequestException('Invalid execution stage');
     }
-    return { runId, sequence, kind, payload: { stage } };
+    return { runId, sequence, kind: 'progress' as const, payload: { stage } };
   }
   if (kind === 'item') {
     const { itemType, phase } = input;
     if (typeof itemType !== 'string' || !['agent_message', 'command_execution', 'file_change'].includes(itemType)
       || (phase !== 'started' && phase !== 'completed')) throw new BadRequestException('Invalid Codex item');
-    return { runId, sequence, kind, payload: { itemType, phase } };
+    return { runId, sequence, kind: 'item' as const, payload: { itemType, phase } };
   }
   if (kind === 'failed') {
     if (typeof input.code !== 'string' || !failureCodes.includes(input.code)) throw new BadRequestException('Invalid error code');
-    return { runId, sequence, kind, payload: { code: input.code } };
+    return { runId, sequence, kind: 'failed' as const, payload: { code: input.code } };
   }
-  if (kind === 'cancelled') return { runId, sequence, kind, payload: {} };
+  if (kind === 'cancelled') return { runId, sequence, kind: 'cancelled' as const, payload: {} };
   if (kind === 'result') {
     const baseCommit = textInput(input.baseCommit, 'base commit', 40);
     const patchHash = textInput(input.patchHash, 'patch hash', 64);
@@ -69,7 +92,19 @@ function executionEvent(body: unknown) {
       }
       return [key, value];
     }));
-    return { runId, sequence, kind, payload: { baseCommit, patchHash, files, usage } };
+    const attempt = input.attempt === undefined ? undefined : attemptInput(input.attempt);
+    return { runId, sequence, kind: 'result' as const, payload: { baseCommit, patchHash, files, usage,
+      ...(attempt !== undefined && { attempt }) } };
+  }
+  if (kind === 'verification') {
+    const attempt = attemptInput(input.attempt);
+    const patchHash = textInput(input.patchHash, 'patch hash', 64);
+    if (!/^[0-9a-f]{64}$/.test(patchHash) || !Array.isArray(input.checks) || !input.checks.length || input.checks.length > 8) {
+      throw new BadRequestException('Invalid verification report');
+    }
+    const checks = input.checks.map(checkResult);
+    const payload: VerificationReport = { attempt, patchHash, checks, passed: checks.every(({ status }) => status === 'passed') };
+    return { runId, sequence, kind: 'verification' as const, payload };
   }
   throw new BadRequestException('Unsupported execution event');
 }
@@ -99,7 +134,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async list(actor: Account, projectId: string, taskId: string) {
     await this.tasks.get(actor, projectId, taskId);
     const { rows } = await this.db.pool.query<ExecutionRun>(
-      `SELECT ${runColumns} FROM execution_runs WHERE project_id = $1 AND task_id = $2
+      `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
+         'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review
+       FROM execution_runs r WHERE project_id = $1 AND task_id = $2
        ORDER BY created_at DESC, id DESC LIMIT 20`, [projectId, taskId],
     );
     return rows;
@@ -119,20 +156,70 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const task = await this.tasks.find(projectId, taskId, client);
-      if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT'].includes(task.status)) {
+      if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT', 'TESTING'].includes(task.status)) {
         throw new ConflictException('An approved task and bound repository are required');
       }
       if (!task.acceptanceCriteria.length) throw new ConflictException('Acceptance criteria are required');
-      if (task.status !== 'READY') {
+      if (task.status === 'TESTING') {
+        const { rows: [previous] } = await client.query<{ status: string; hasReport: boolean; configured: boolean }>(
+          `SELECT r.status, r.verification_report IS NOT NULL AS "hasReport",
+             jsonb_array_length(g.check_plan) > 0 AS configured
+           FROM execution_runs r JOIN repositories g ON g.project_id = r.project_id AND g.id = $3
+           WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+          [projectId, taskId, task.repositoryId],
+        );
+        if (previous?.status !== 'succeeded' || previous.hasReport || !previous.configured) {
+          throw new ConflictException('Configure repository checks to rerun an unverified candidate');
+        }
+      }
+      if (task.status === 'FAILED' || task.status === 'TIMEOUT') {
         await this.move(client, task, 'RETRYING', { actorId: actor.id });
         task.status = 'RETRYING';
       }
       const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id) VALUES ($1, $2, $3)
-         RETURNING ${runColumns}`, [projectId, taskId, task.repositoryId],
+        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan)
+         SELECT $1, $2, id, check_plan FROM repositories WHERE project_id = $1 AND id = $3
+         RETURNING ${runColumns}, NULL AS review`, [projectId, taskId, task.repositoryId],
       );
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id });
       return run;
+    });
+  }
+
+  async review(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
+    const input = objectInput(body);
+    const { decision } = input;
+    if (decision !== 'approved' && decision !== 'rejected') throw new BadRequestException('Invalid review decision');
+    const comment = textInput(input.comment ?? '', 'review comment', 1500, true);
+    if (decision === 'rejected' && !comment) throw new BadRequestException('Rejection needs a reason');
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [run] } = await client.query<ExecutionRun>(
+        `SELECT ${runColumns} FROM execution_runs WHERE project_id = $1 AND task_id = $2
+         ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [projectId, taskId],
+      );
+      if (!run || run.id !== runId) throw new NotFoundException('Current execution run not found');
+      const { rows: [existing] } = await client.query<ExecutionReview>(
+        `SELECT decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"
+         FROM execution_reviews WHERE run_id = $1`, [runId],
+      );
+      if (existing) {
+        if (existing.decision === decision && existing.comment === comment) return existing;
+        throw new ConflictException('The execution has already been reviewed');
+      }
+      const task = await this.tasks.find(projectId, taskId, client);
+      if (task.status !== 'REVIEW' || run.status !== 'succeeded' || !run.report?.passed) {
+        throw new ConflictException('Only a tested candidate in review can be approved or rejected');
+      }
+      const { rows: [saved] } = await client.query<ExecutionReview>(
+        `INSERT INTO execution_reviews (run_id, reviewer_id, reviewer_name, decision, comment)
+         VALUES ($1,$2,$3,$4,$5) RETURNING decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"`,
+        [runId, actor.id, actor.name, decision, comment],
+      );
+      await this.tasks.event(client, task, 'task.execution_reviewed', { runId, actorId: actor.id, decision });
+      await this.projects.audit(client, actor.id, projectId, 'execution.reviewed', runId);
+      if (decision === 'rejected') await this.move(client, task, 'REJECTED', { runId, actorId: actor.id });
+      return saved;
     });
   }
 
@@ -158,8 +245,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async lockWorker(client: PoolClient, worker: WorkerLease) {
-    const result = await client.query<{ canExecute: boolean }>(
-      `SELECT capabilities ? 'codexVersion' AS "canExecute" FROM workers
+    const result = await client.query<{ canExecute: boolean; canVerify: boolean }>(
+      `SELECT capabilities ? 'codexVersion' AS "canExecute", capabilities->'verificationVersion' = '1'::jsonb AS "canVerify"
+       FROM workers
        WHERE id = $1 AND credential_hash = $2 AND connection_id = $3
          AND credential_expires_at > now() AND NOT disabled FOR UPDATE`,
       [worker.workerId, worker.hash, worker.connectionId],
@@ -169,7 +257,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   async claim(worker: WorkerLease): Promise<ExecutionOffer | null> {
     const claimed = await this.db.transaction(async (client) => {
-      if (!(await this.lockWorker(client, worker))?.canExecute) return null;
+      const capabilities = await this.lockWorker(client, worker);
+      if (!capabilities?.canExecute) return null;
       const assigned = await client.query(
         `SELECT id FROM execution_runs WHERE worker_id = $1 AND status = 'running'`, [worker.workerId],
       );
@@ -178,14 +267,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         `SELECT r.id, r.task_id AS "taskId", r.project_id AS "projectId", t.title, t.description,
            t.acceptance_criteria AS "acceptanceCriteria", g.owner || '/' || g.repo_name AS repository,
            g.default_branch AS "defaultBranch", g.installation_id::text AS "installationId",
-           g.github_repository_id::text AS "githubId"
+           g.github_repository_id::text AS "githubId", r.check_plan AS checks
          FROM execution_runs r
          JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = $1
          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'QUEUED'
          JOIN repositories g ON g.id = r.repository_id
          WHERE r.status = 'queued' AND NOT r.cancel_requested
-         ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`, [worker.workerId],
+           AND ($2::boolean OR jsonb_array_length(r.check_plan) = 0)
+         ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`, [worker.workerId, capabilities.canVerify === true],
       );
       if (!offer) return null;
       await client.query(
@@ -223,8 +313,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const event = executionEvent(body);
     return this.db.transaction(async (client) => {
       if (!await this.lockWorker(client, worker)) return { stop: true, accepted: false };
-      const { rows: [run] } = await client.query<ClaimedRun & { current: boolean }>(
+      const { rows: [run] } = await client.query<ClaimedRun & {
+        current: boolean; checks: VerificationCheck[]; candidateHash: string | null;
+      }>(
         `SELECT ${runColumns}, r.project_id AS "projectId", r.task_id AS "taskId",
+           r.check_plan AS checks, r.candidate_hash AS "candidateHash",
            r.lease_expires_at > now() AND EXISTS (
              SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id AND p.status = 'active'
              WHERE wp.worker_id = $2 AND wp.project_id = r.project_id
@@ -247,7 +340,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       if (event.kind === 'thread' && run.threadId && run.threadId !== event.payload.threadId) {
         return { stop: true, accepted: false };
       }
-      if (event.kind === 'result' && !run.threadId) return { stop: true, accepted: false };
+      if (event.kind === 'result' && (!run.threadId || run.candidateHash
+        || ((event.payload.attempt ?? 1) !== (run.report?.attempt ?? 0) + 1)
+        || (run.report && !canRepair(run.report)))) return { stop: true, accepted: false };
+      if (event.kind === 'verification' && (run.candidateHash !== event.payload.patchHash
+        || event.payload.attempt !== (run.report?.attempt ?? 0) + 1 || !run.checks.length
+        || run.checks.length !== event.payload.checks.length
+        || run.checks.some(({ name }, index) => name !== event.payload.checks[index].name))) {
+        return { stop: true, accepted: false };
+      }
       await client.query(
         'INSERT INTO execution_events (run_id, sequence, kind, payload) VALUES ($1,$2,$3,$4)',
         [event.runId, event.sequence, event.kind, event.payload],
@@ -256,9 +357,21 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         'UPDATE execution_runs SET last_sequence = $2, thread_id = coalesce($3, thread_id) WHERE id = $1',
         [event.runId, event.sequence, event.kind === 'thread' ? event.payload.threadId : null],
       );
-      const status = event.kind === 'result' ? 'succeeded' : event.kind === 'failed' ? 'failed'
-        : event.kind === 'cancelled' ? 'cancelled' : null;
-      if (status) await this.finish(client, run, status);
+      if (event.kind === 'result') {
+        if (!run.checks.length) await this.finish(client, run, 'succeeded');
+        else {
+          await client.query('UPDATE execution_runs SET candidate_hash = $2 WHERE id = $1', [run.id, event.payload.patchHash]);
+          const task = await this.tasks.find(run.projectId, run.taskId, client);
+          if (task.status === 'RUNNING') await this.move(client, task, 'TESTING', { runId: run.id });
+        }
+      } else if (event.kind === 'verification') {
+        await client.query('UPDATE execution_runs SET verification_report = $2, candidate_hash = NULL WHERE id = $1',
+          [run.id, event.payload]);
+        if (!canRepair(event.payload)) await this.finish(client, run, event.payload.passed ? 'succeeded' : 'failed', event.payload.passed);
+      } else if (event.kind === 'failed' || event.kind === 'cancelled') {
+        await this.finish(client, run, event.kind === 'cancelled' ? 'cancelled'
+          : event.payload.code === 'worker_timeout' ? 'timed_out' : 'failed');
+      }
       return { stop: false, accepted: true };
     });
   }
@@ -273,11 +386,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async finish(client: PoolClient, run: ClaimedRun, status: 'succeeded' | 'failed' | 'cancelled' | 'timed_out') {
+  private async finish(client: PoolClient, run: ClaimedRun,
+    status: 'succeeded' | 'failed' | 'cancelled' | 'timed_out', verified = false) {
     await client.query('UPDATE execution_runs SET status = $2, finished_at = now(), lease_expires_at = NULL WHERE id = $1',
       [run.id, status]);
     const task = await this.tasks.find(run.projectId, run.taskId, client);
-    const next = { succeeded: 'TESTING', failed: 'FAILED', cancelled: 'CANCELLED', timed_out: 'TIMEOUT' } as const;
+    const next = { succeeded: verified ? 'REVIEW' : 'TESTING', failed: 'FAILED', cancelled: 'CANCELLED', timed_out: 'TIMEOUT' } as const;
     await this.move(client, task, next[status], { runId: run.id, workerId: run.workerId });
   }
 
@@ -320,5 +434,12 @@ export class ExecutionsController {
   cancel(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string) {
     return this.executions.cancel(actor, projectId, taskId, runId);
+  }
+
+  @Post(':runId/review')
+  @HttpCode(200)
+  review(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string, @Body() body: unknown) {
+    return this.executions.review(actor, projectId, taskId, runId, body);
   }
 }

@@ -113,6 +113,23 @@ export async function bindRepository(form: FormData) {
   redirect(query);
 }
 
+export async function updateRepositoryChecks(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const repositoryId = form.get('repositoryId');
+  if (!isWorkerId(repositoryId)) redirect(query + '&issue=verification');
+  let checks: unknown;
+  try {
+    checks = JSON.parse(String(form.get('checks') ?? ''));
+  } catch {
+    redirect(query + '&issue=verification');
+  }
+  const response = await execute(`${endpoint}/repositories/${repositoryId}/checks`, {
+    method: 'PATCH', body: JSON.stringify({ checks }),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'verification')}`);
+  redirect(`${query}&notice=checks-saved`);
+}
+
 function taskPath(form: FormData) {
   const { query, endpoint } = projectPath(form);
   const id = String(form.get('taskId') ?? '');
@@ -172,6 +189,17 @@ export async function stopExecution(form: FormData) {
   if (!id || !isWorkerId(runId)) redirect(query);
   const response = await execute(`${endpoint}/executions/${runId}/cancel`, { method: 'POST' });
   if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function reviewExecution(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/review`, {
+    method: 'POST', body: JSON.stringify({ decision: form.get('decision'), comment: form.get('comment') }),
+  });
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'review')}#task-detail`);
   redirect(`${query}#task-detail`);
 }
 

@@ -1,3 +1,5 @@
+import type { VerificationCheck } from './verification';
+
 export interface Account {
   id: string;
   email: string;
@@ -45,4 +47,5 @@ export interface RepositoryBinding extends Omit<GitHubRepository, 'id'> {
   id: string;
   githubId: string;
   installationId: string;
+  checks: VerificationCheck[];
 }

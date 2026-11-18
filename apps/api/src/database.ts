@@ -144,6 +144,17 @@ const migrations = [
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, sequence)
   );`,
+  `ALTER TABLE repositories ADD COLUMN check_plan jsonb NOT NULL DEFAULT '[]';
+  ALTER TABLE execution_runs ADD COLUMN check_plan jsonb NOT NULL DEFAULT '[]',
+    ADD COLUMN candidate_hash text, ADD COLUMN verification_report jsonb;
+  CREATE TABLE execution_reviews (
+    run_id uuid PRIMARY KEY REFERENCES execution_runs(id),
+    reviewer_id uuid NOT NULL REFERENCES users(id),
+    reviewer_name text NOT NULL,
+    decision text NOT NULL CHECK (decision IN ('approved', 'rejected')),
+    comment text NOT NULL,
+    reviewed_at timestamptz NOT NULL DEFAULT now()
+  );`,
 ];
 
 @Injectable()

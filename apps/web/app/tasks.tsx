@@ -120,7 +120,8 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
           {project.role === 'owner' && ['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status) &&
             <form action={archiveTask} className="repository-form">{taskIdentity}<button className="secondary">归档任务</button></form>}
         </>}
-        <Executions project={project} task={task} />
+        <Executions project={project} task={task}
+          hasChecks={Boolean(repositories?.find(({ id }) => id === task.repositoryId)?.checks.length)} />
         <details>
           <summary>任务记录</summary>
           <ol className="members">

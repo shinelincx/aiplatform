@@ -37,7 +37,7 @@ async function postForm(url, form, cookie) {
   });
 }
 
-async function open(credential, execute = true) {
+async function open(credential, execute = true, verify = false) {
   const endpoint = new URL('/workers/ws', api);
   endpoint.protocol = 'ws:';
   const ws = new WebSocket(endpoint, {
@@ -60,6 +60,7 @@ async function open(credential, execute = true) {
     os: 'linux', arch: 'x64', nodeVersion: process.version, cpuCount: 2,
     memoryBytes: 1_000_000, diskFreeBytes: 1_000_000, gitVersion: 'git version 2', dockerVersion: null,
     ...(execute && { codexVersion: '0.170.0' }),
+    ...(verify && { verificationVersion: 1 }),
   });
   const close = async () => {
     if (ws.readyState === WebSocket.CLOSED) return;
@@ -185,7 +186,93 @@ try {
   const retry = await request(timed.runs, { token, method: 'POST', status: 201 });
   assert.notEqual(retry.id, timedRun.id);
   assert.equal(retry.status, 'queued');
+  await request(`${timed.runs}/${retry.id}/cancel`, { token, method: 'POST', status: 204 });
+
+  const checksPath = `/projects/${first.id}/repositories/${repository.id}/checks`;
+  const plan = [{ name: 'unit', kind: 'unit', argv: ['node', '--test'], directory: '.', timeoutSeconds: 30 }];
+  await request(checksPath, { token, method: 'PATCH', body: { checks: [{ ...plan[0], directory: '../other' }] }, status: 400 });
+  const configured = await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
+  assert.deepEqual(configured.checks, plan);
+  const rerun = await request(task.runs, { token, method: 'POST', status: 201 });
+  assert.equal(rerun.status, 'queued');
+  await request(`${task.runs}/${rerun.id}/cancel`, { token, method: 'POST', status: 204 });
+  const verified = await newTask('VERIFY-AND-REPAIR');
+  const active = await request(verified.runs, { token, method: 'POST', status: 201 });
+  const reviewPath = `${verified.runs}/${active.id}/review`;
+  const approve = { token, method: 'POST', body: { decision: 'approved' } };
+  await request(reviewPath, { ...approve, status: 409 });
+  await request(checksPath, { token, method: 'PATCH', body: { checks: [...plan, { ...plan[0], name: 'later' }] } });
+  worker = await open(approved);
+  assert.equal(await worker.send('WORKER_CLAIM'), null);
+  await worker.close();
+  worker = await open(approved, true, true);
+  const testOffer = await worker.send('WORKER_CLAIM');
+  assert.equal(testOffer.id, active.id);
+  assert.deepEqual(testOffer.checks, plan);
+  const sendEvent = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: active.id, sequence, kind, payload });
+  assert.equal((await sendEvent(1, 'thread', { threadId: 'review-fixture' })).accepted, true);
+  const candidate = (attempt, patchHash) => ({ ...result.payload, attempt, patchHash });
+  const check = (passed) => [{ name: 'unit', durationMs: 20, status: passed ? 'passed' : 'failed', exitCode: passed ? 0 : 1 }];
+  const initialHash = 'c'.repeat(64);
+  const repairedHash = 'd'.repeat(64);
+  assert.equal((await sendEvent(2, 'result', candidate(1, initialHash))).accepted, true);
+  assert.equal((await request(verified.path, { token })).status, 'TESTING');
+  assert.equal((await sendEvent(3, 'verification', { attempt: 1, patchHash: repairedHash, checks: check(true) })).accepted, false);
+  assert.equal((await sendEvent(3, 'verification', { attempt: 1, patchHash: initialHash, checks: check(false) })).accepted, true);
+  assert.equal((await request(verified.runs, { token }))[0].status, 'running');
+  await request(reviewPath, { ...approve, status: 409 });
+  assert.equal((await sendEvent(4, 'result', candidate(2, repairedHash))).accepted, true);
+  const passing = { attempt: 2, patchHash: repairedHash, checks: check(true) };
+  assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
+  assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
+  assert.equal((await request(verified.path, { token })).status, 'REVIEW');
+  const reviewPage = new URL(`/?project=${first.id}&task=${verified.id}`, web);
+  const pendingReview = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
+  const approvalForm = (await pendingReview.text()).match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*批准变更<\/button>(?:(?!<\/form>)[\s\S])*<\/form>/)?.[0];
+  const approvalAction = approvalForm?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
+  assert(approvalAction, 'Expected a human review form after checks passed');
+  const approveForm = new globalThis.FormData();
+  approveForm.set(approvalAction, '');
+  approveForm.set('projectId', first.id);
+  approveForm.set('taskId', verified.id);
+  approveForm.set('runId', active.id);
+  approveForm.set('decision', 'approved');
+  approveForm.set('comment', '');
+  assert.equal((await postForm(reviewPage, approveForm, cookie)).status, 303);
+  assert.equal((await request(reviewPath, approve)).decision, 'approved');
+  await request(reviewPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Changed my mind' }, status: 409 });
+  const [reviewed] = await request(verified.runs, { token });
+  assert.equal(reviewed.report.patchHash, repairedHash);
+  assert.equal(reviewed.review.decision, 'approved');
+  const reportPage = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
+  const reportHtml = (await reportPage.text()).replace(/<!--[\s\S]*?-->/g, '');
+  assert(reportHtml.includes('第 2 次检查报告') && reportHtml.includes('已批准'));
+
+  await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
+  const exhausted = await newTask('VERIFICATION-EXHAUSTED');
+  const lastRun = await request(exhausted.runs, { token, method: 'POST', status: 201 });
+  assert.equal((await worker.send('WORKER_CLAIM')).id, lastRun.id);
+  const sendLast = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: lastRun.id, sequence, kind, payload });
+  assert.equal((await sendLast(1, 'thread', { threadId: 'exhausted-fixture' })).accepted, true);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    assert.equal((await sendLast(attempt * 2, 'result', candidate(attempt, initialHash))).accepted, true);
+    assert.equal((await sendLast(attempt * 2 + 1, 'verification', { attempt, patchHash: initialHash, checks: check(false) })).accepted, true);
+  }
+  assert.equal((await request(exhausted.path, { token })).status, 'FAILED');
+  await request(`${exhausted.runs}/${lastRun.id}/review`, { ...approve, status: 409 });
+  const rejected = await newTask('REVIEW-REJECTED');
+  const rejectedRun = await request(rejected.runs, { token, method: 'POST', status: 201 });
+  assert.equal((await worker.send('WORKER_CLAIM')).id, rejectedRun.id);
+  for (const [sequence, kind, payload] of [[1, 'thread', { threadId: 'rejected-fixture' }],
+    [2, 'result', candidate(1, initialHash)], [3, 'verification', { attempt: 1, patchHash: initialHash, checks: check(true) }]]) {
+    assert.equal((await worker.send('EXECUTION_EVENT', { runId: rejectedRun.id, sequence, kind, payload })).accepted, true);
+  }
+  const rejectionPath = `${rejected.runs}/${rejectedRun.id}/review`;
+  await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected' }, status: 400 });
+  await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Needs product review' } });
+  assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
+  console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');
 } finally {
   for (const socket of sockets) socket.terminate();
   await db.end();

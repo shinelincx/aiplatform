@@ -1,9 +1,9 @@
 import {
   BadGatewayException, BadRequestException, Body, ConflictException, Controller, Get, Inject,
-  Injectable, NotFoundException, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
+  Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { sign } from 'node:crypto';
-import type { Account, GitHubInstallation, GitHubRepository, RepositoryBinding } from '@ado/shared';
+import { parseCheckPlan, type Account, type GitHubInstallation, type GitHubRepository, type RepositoryBinding } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
@@ -130,7 +130,7 @@ export class GitHubApp {
 }
 
 const columns = `id, github_repository_id::text AS "githubId", owner || '/' || repo_name AS "fullName",
-  repository_url AS url, default_branch AS "defaultBranch", installation_id::text AS "installationId"`;
+  repository_url AS url, default_branch AS "defaultBranch", installation_id::text AS "installationId", check_plan AS checks`;
 
 @Controller('projects/:id/repositories')
 @UseGuards(SessionGuard)
@@ -196,6 +196,26 @@ export class RepositoriesController {
       if (isUniqueViolation(error)) throw new ConflictException('Repository is already bound to another project');
       throw error;
     }
+  }
+
+  @Patch(':repositoryId/checks')
+  async checks(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string,
+    @Param('repositoryId', ParseUUIDPipe) repositoryId: string, @Body() body: unknown) {
+    const input = objectInput(body);
+    const checks = (() => {
+      try { return parseCheckPlan(input.checks); }
+      catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid check plan'); }
+    })();
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, id, { owner: true, active: true }, client);
+      const { rows: [binding] } = await client.query<RepositoryBinding>(
+        `UPDATE repositories SET check_plan = $3 WHERE project_id = $1 AND id = $2 RETURNING ${columns}`,
+        [id, repositoryId, JSON.stringify(checks)],
+      );
+      if (!binding) throw new NotFoundException('Repository binding not found');
+      await this.projects.audit(client, actor.id, id, 'repository.checks_updated', repositoryId);
+      return binding;
+    });
   }
 
   private async authorize(actor: Account, id: string) {

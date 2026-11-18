@@ -51,6 +51,7 @@ export function parseCapabilities(payload: unknown): WorkerCapabilities {
     gitVersion: version('gitVersion'),
     dockerVersion: version('dockerVersion'),
     ...(input.codexVersion !== undefined && { codexVersion: textInput(input.codexVersion, 'codexVersion', 40) }),
+    ...(input.verificationVersion === 1 && { verificationVersion: 1 as const }),
   };
 }
 

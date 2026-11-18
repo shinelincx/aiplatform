@@ -156,7 +156,10 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
   if (runtime) await verifyCodexLogin(runtime);
   const jobs = runtime ? new WorkerJobs(runtime) : undefined;
-  if (jobs) capabilities.codexVersion = codexVersion;
+  if (jobs) {
+    capabilities.codexVersion = codexVersion;
+    capabilities.verificationVersion = 1;
+  }
   let retryMs = 500;
   try {
     while (!signal.aborted) {

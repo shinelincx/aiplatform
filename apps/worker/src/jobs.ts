@@ -1,6 +1,6 @@
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { isWorkerId, type ExecutionOffer } from '@ado/shared';
+import { isWorkerId, parseCheckPlan, type ExecutionOffer } from '@ado/shared';
 import { configureExecution, executeCodex } from './codex-execution';
 
 type Runtime = NonNullable<Awaited<ReturnType<typeof configureExecution>>>;
@@ -17,7 +17,7 @@ function offerInput(value: unknown): ExecutionOffer {
     || (offer.repositoryToken !== undefined && typeof offer.repositoryToken !== 'string')) {
     throw new Error('Invalid execution offer');
   }
-  return offer as ExecutionOffer;
+  return { ...offer as ExecutionOffer, checks: parseCheckPlan(offer.checks ?? []) };
 }
 
 export class WorkerJobs {

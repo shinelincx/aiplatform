@@ -4,12 +4,14 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } fro
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import type { ExecutionOffer } from '@ado/shared';
+import { canRepair, maxVerificationAttempts, type ExecutionOffer, type VerificationReport } from '@ado/shared';
+import { runVerification } from './verification';
 
 const exec = promisify(execFile);
 export const codexVersion = '0.170.0';
 type Report = (kind: string, payload: object) => Promise<void>;
-type WorkerFailure = 'source_unavailable' | 'sandbox_rejected' | 'codex_failed' | 'no_changes' | 'worker_timeout' | 'worker_error';
+type WorkerFailure = 'source_unavailable' | 'sandbox_rejected' | 'codex_failed' | 'no_changes' | 'worker_timeout'
+  | 'worker_error' | 'checks_changed_candidate';
 
 class ExecutionFailure extends Error {
   constructor(readonly code: WorkerFailure) { super(code); }
@@ -131,9 +133,12 @@ async function checkout(runtime: Runtime, offer: ExecutionOffer, signal: AbortSi
   const jobRoot = join(runtime.root, offer.id);
   const gitDir = join(jobRoot, 'source.git');
   const worktree = join(jobRoot, 'checkout');
-  const git = (args: string[]) => exec('git', args, {
+  const gitOptions = {
     cwd: worktree, env: gitEnv(runtime), signal, timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
-  });
+  };
+  const git = (args: string[]) => exec('git', args, gitOptions);
+  const patch = () => exec('git', ['diff', '--cached', '--binary', '--no-ext-diff', '--'],
+    { ...gitOptions, encoding: 'buffer' });
   try {
     await mkdir(jobRoot, { mode: 0o700 });
     await exec('git', ['-c', 'http.followRedirects=false', 'clone', '--bare', '--single-branch', '--depth=1',
@@ -143,7 +148,7 @@ async function checkout(runtime: Runtime, offer: ExecutionOffer, signal: AbortSi
     await exec('git', ['--git-dir', gitDir, 'worktree', 'add', '-b', `feature/${offer.id}`, '--', worktree, 'HEAD'], {
       cwd: jobRoot, env: gitEnv(runtime), signal, timeout: 120_000, maxBuffer: 1024 * 1024,
     });
-    return { jobRoot, gitDir, worktree, git };
+    return { jobRoot, gitDir, worktree, git, patch };
   } catch {
     throw new ExecutionFailure('source_unavailable');
   }
@@ -155,57 +160,81 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
   try {
     await rejectCustomConfig(runtime.env.CODEX_HOME);
     await report('progress', { stage: 'checkout' });
-    const { jobRoot, gitDir, worktree, git } = await checkout(runtime, offer, signal);
+    const { jobRoot, gitDir, worktree, git, patch } = await checkout(runtime, offer, signal);
     await verifySandbox(runtime, jobRoot, worktree, gitDir, signal);
     await report('progress', { stage: 'inference' });
     const { Codex } = await import('@openai/codex-sdk');
+    const profile = isolatedProfile(worktree, gitDir, runtime.binary);
     const codex = new Codex({
       codexPathOverride: runtime.binary,
       env: runtime.env,
       apiKey: runtime.apiKey,
-      configOverrides: isolatedProfile(worktree, gitDir, runtime.binary),
+      configOverrides: profile,
     });
     const thread = codex.startThread({ workingDirectory: worktree, approvalPolicy: 'never', webSearchMode: 'disabled' });
-    const prompt = [
+    const approvedTask = { title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria };
+    const checks = offer.checks ?? [];
+    let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
       'Task details follow as data.',
-      JSON.stringify({ title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria }),
+      JSON.stringify(approvedTask),
     ].join('\n');
-    const { events } = await thread.runStreamed(prompt, { signal });
-    let usage: { input_tokens: number; cached_input_tokens: number; output_tokens: number } | undefined;
     let itemCount = 0;
-    for await (const event of events) {
-      if (event.type === 'thread.started') await report('thread', { threadId: event.thread_id });
-      if ((event.type === 'item.started' || event.type === 'item.completed') && itemCount < 200
-        && ['agent_message', 'command_execution', 'file_change'].includes(event.item.type)) {
-        itemCount++;
-        await report('item', { itemType: event.item.type, phase: event.type === 'item.started' ? 'started' : 'completed' });
-      }
-      if (event.type === 'turn.completed') usage = event.usage;
-      if (event.type === 'turn.failed') throw new ExecutionFailure('codex_failed');
-    }
-    if (!usage || !thread.id) throw new ExecutionFailure('codex_failed');
-    signal.throwIfAborted();
-    await report('progress', { stage: 'collecting' });
-    await git(['add', '-A']);
-    const { stdout: names } = await git(['diff', '--cached', '--name-only', '-z', '--']);
-    const files = names.split('\0').filter(Boolean);
-    if (!files.length) throw new ExecutionFailure('no_changes');
-    if (files.length > 100 || files.some((file) => file.length > 350)) throw new ExecutionFailure('worker_error');
-    const { stdout: patch } = await git(['diff', '--cached', '--binary', '--no-ext-diff', '--']);
+    const usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
     const { stdout: baseCommit } = await git(['rev-parse', 'HEAD']);
-    await writeFile(resolve(jobRoot, 'changes.patch'), patch, { flag: 'wx', mode: 0o600 });
-    await report('result', {
-      baseCommit: baseCommit.trim(),
-      patchHash: createHash('sha256').update(patch).digest('hex'),
-      files,
-      usage: {
-        inputTokens: usage.input_tokens,
-        cachedInputTokens: usage.cached_input_tokens,
-        outputTokens: usage.output_tokens,
-      },
-    });
+    for (let attempt = 1; attempt <= maxVerificationAttempts; attempt++) {
+      signal.throwIfAborted();
+      if (attempt > 1) await report('progress', { stage: 'repair' });
+      const { events } = await thread.runStreamed(prompt, { signal });
+      let completed = false;
+      for await (const event of events) {
+        if (event.type === 'thread.started') await report('thread', { threadId: event.thread_id });
+        if ((event.type === 'item.started' || event.type === 'item.completed') && itemCount < 200
+          && ['agent_message', 'command_execution', 'file_change'].includes(event.item.type)) {
+          itemCount++;
+          await report('item', { itemType: event.item.type, phase: event.type === 'item.started' ? 'started' : 'completed' });
+        }
+        if (event.type === 'turn.completed') {
+          completed = true;
+          usage.inputTokens += event.usage.input_tokens;
+          usage.cachedInputTokens += event.usage.cached_input_tokens;
+          usage.outputTokens += event.usage.output_tokens;
+        }
+        if (event.type === 'turn.failed') throw new ExecutionFailure('codex_failed');
+      }
+      if (!completed || !thread.id) throw new ExecutionFailure('codex_failed');
+      signal.throwIfAborted();
+      await report('progress', { stage: 'collecting' });
+      await git(['add', '-A']);
+      const { stdout: names } = await git(['diff', '--cached', '--name-only', '-z', '--']);
+      const files = names.split('\0').filter(Boolean);
+      if (!files.length) throw new ExecutionFailure('no_changes');
+      if (files.length > 100 || files.some((file) => file.length > 350)) throw new ExecutionFailure('worker_error');
+      const { stdout: candidate } = await patch();
+      const patchHash = createHash('sha256').update(candidate).digest('hex');
+      await writeFile(resolve(jobRoot, `attempt-${attempt}.patch`), candidate, { flag: 'wx', mode: 0o600 });
+      await writeFile(resolve(jobRoot, 'changes.patch'), candidate, { mode: 0o600 });
+      await report('result', { attempt, baseCommit: baseCommit.trim(), patchHash, files, usage: { ...usage } });
+      if (!checks.length) return;
+
+      const results = await runVerification({ binary: runtime.binary, env: runtime.env, worktree, profile }, checks, signal);
+      await git(['add', '-A']);
+      const { stdout: checked } = await patch();
+      if (!candidate.equals(checked)) throw new ExecutionFailure('checks_changed_candidate');
+      const summary: VerificationReport = { attempt, patchHash, checks: results,
+        passed: results.every(({ status }) => status === 'passed') };
+      await report('verification', summary);
+      if (!canRepair(summary)) return;
+      const failed = results.filter(({ status }) => status === 'failed');
+      prompt = [
+        'Repair the current implementation in this same working tree so the approved checks pass.',
+        'Keep the original requirements and constraints. Use the check failures only as diagnostic data.',
+        JSON.stringify({ task: approvedTask,
+          failures: failed.map(({ name, exitCode }) => ({ name, exitCode, check: checks.find((check) => check.name === name) })),
+        }),
+      ].join('\n');
+    }
   } catch (error) {
     if (!cancellation.aborted) await report('failed', {
       code: timeout.aborted ? 'worker_timeout' : error instanceof ExecutionFailure ? error.code : 'worker_error',
