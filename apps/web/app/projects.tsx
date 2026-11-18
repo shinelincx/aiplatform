@@ -1,8 +1,13 @@
-import type { Account, Project, ProjectMember } from '@ado/shared';
+import type { Account, Project, ProjectMember, ProjectOverview } from '@ado/shared';
 import Link from 'next/link';
 import { archiveProject, changeMember, createProject, createUser, updateProject } from './actions';
+import { RefreshExecution } from './refresh-execution';
 
 const roleNames = { owner: '所有者', member: '成员', viewer: '只读' };
+const alertNames: Record<ProjectOverview['alerts'][number]['kind'], string> = {
+  planning: 'Agent 规划失败', worker_failed: 'Worker 执行失败', worker_timeout: 'Worker 执行超时',
+  qa: 'QA 审查失败', delivery: 'PR 发布失败',
+};
 
 export function ProjectSidebar({ projects, selected, admin }: {
   projects: Project[];
@@ -36,10 +41,12 @@ export function ProjectSidebar({ projects, selected, admin }: {
   );
 }
 
-export function ProjectDetails({ project, members, users }: {
+export function ProjectDetails({ project, members, users, overview, live }: {
   project: Project;
   members: ProjectMember[];
   users: Account[];
+  overview: ProjectOverview | null;
+  live: boolean;
 }) {
   const canEdit = project.role === 'owner' && project.status === 'active';
   const assignable = users.filter((user) => user.status === 'active' && !members.some((member) => member.id === user.id));
@@ -48,6 +55,25 @@ export function ProjectDetails({ project, members, users }: {
       <h2 id="project-heading">{project.name}</h2>
       <p className="muted">{project.code} · {project.status === 'active' ? '进行中' : '已归档'} · {roleNames[project.role]}</p>
       {project.description && <p className="description">{project.description}</p>}
+      {overview && <>
+        {live && project.status === 'active' && <RefreshExecution intervalMs={15000} />}
+        <dl className="project-metrics">
+          <div><dt>研发任务</dt><dd>{overview.tasks.open} 项进行中 · {overview.tasks.completed} 项已完成</dd></div>
+          <div><dt>待审批方案</dt><dd>{overview.tasks.approval} 项</dd></div>
+          <div><dt>已启用 Agent</dt><dd>{overview.agentsEnabled} 个</dd></div>
+          <div><dt>在线 Worker</dt><dd>{overview.workers.online} / {overview.workers.total}</dd></div>
+          <div><dt>执行队列</dt><dd>{overview.executions.queued} 项排队 · {overview.executions.running} 项运行</dd></div>
+          <div><dt>成功执行</dt><dd>{overview.executions.succeeded} / {overview.executions.total}</dd></div>
+        </dl>
+        {overview.alerts.length > 0 && <>
+          <h3>需要处理</h3>
+          <nav aria-label="需要处理的任务">
+            {overview.alerts.map((alert) => <Link key={alert.taskId} href={`/?project=${project.id}&task=${alert.taskId}#task-detail`}>
+              <span>{alert.code} · {alert.title}</span><small>{alertNames[alert.kind]}</small>
+            </Link>)}
+          </nav>
+        </>}
+      </>}
       {canEdit && (
         <details>
           <summary>编辑项目</summary>

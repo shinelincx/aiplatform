@@ -48,4 +48,5 @@ export interface RepositoryBinding extends Omit<GitHubRepository, 'id'> {
   githubId: string;
   installationId: string;
   checks: VerificationCheck[];
+  autoDraftPr: boolean;
 }

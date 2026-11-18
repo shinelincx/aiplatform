@@ -11,6 +11,7 @@ import {
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
+import { DeliveriesService } from './deliveries';
 import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
@@ -119,6 +120,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     @Inject(ProjectsService) private readonly projects: ProjectsService,
     @Inject(TasksService) private readonly tasks: TasksService,
     @Inject(GitHubApp) private readonly github: GitHubApp,
+    @Inject(DeliveriesService) private readonly deliveries: DeliveriesService,
   ) {}
 
   onModuleInit() {
@@ -142,10 +144,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
            'version', r.qa_assignment->'version', 'model', r.qa_assignment->'model', 'assessment', q.assessment)
            FROM execution_qa q WHERE q.run_id = r.id) AS qa,
          (SELECT jsonb_build_object('state', d.state, 'branch', d.branch, 'baseBranch', d.base_branch,
-           'pullNumber', d.pull_number, 'pullUrl', d.pull_url, 'pullState', d.pull_state, 'error', d.error)
+           'pullNumber', d.pull_number, 'pullUrl', d.pull_url, 'pullState', d.pull_state, 'error', d.error,
+           'configured', $3::boolean)
            FROM execution_deliveries d WHERE d.run_id = r.id) AS delivery
        FROM execution_runs r WHERE project_id = $1 AND task_id = $2
-       ORDER BY created_at DESC, id DESC LIMIT 20`, [projectId, taskId],
+       ORDER BY created_at DESC, id DESC LIMIT 20`, [projectId, taskId, this.github.configured],
     );
     return rows;
   }
@@ -234,6 +237,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       await this.tasks.event(client, task, 'task.execution_reviewed', { runId, actorId: actor.id, decision });
       await this.projects.audit(client, actor.id, projectId, 'execution.reviewed', runId);
       if (decision === 'rejected') await this.move(client, task, 'REJECTED', { runId, actorId: actor.id });
+      else await this.deliveries.enqueueApproved(client, actor.id, task, runId, true);
       return saved;
     });
   }

@@ -8,8 +8,10 @@ import { AgentRegistryService } from '../apps/api/src/agent-registry.ts';
 import { ArtifactStore } from '../apps/api/src/artifacts.ts';
 import { AuthService } from '../apps/api/src/auth.ts';
 import { Database } from '../apps/api/src/database.ts';
+import { DeliveriesService } from '../apps/api/src/deliveries.ts';
 import { ExecutionQaService } from '../apps/api/src/execution-qa.ts';
 import { ExecutionsService } from '../apps/api/src/executions.ts';
+import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { GitHubApp } from '../apps/api/src/github.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
@@ -24,7 +26,9 @@ const auth = new AuthService(db);
 const projects = new ProjectsService(db, auth);
 const tasks = new TasksService(db, projects);
 const registry = new AgentRegistryService(db, projects);
-const executions = new ExecutionsService(db, projects, tasks, new GitHubApp());
+const github = new GitHubApp();
+const deliveries = new DeliveriesService(db, tasks, projects, github, new ArtifactStore(), pushCandidate);
+const executions = new ExecutionsService(db, projects, tasks, github, deliveries);
 const modelCalls = [];
 const qaCalls = [];
 const modelReply = (agent, output) => ({
@@ -90,6 +94,7 @@ try {
   const first = await project('AGENT');
   const second = await project('AGENT-OTHER');
   const prefix = `/projects/${first.id}`;
+  const overviewPath = `${prefix}/operations/overview`;
   const registryPath = `${prefix}/agent-registry`;
   const developerPath = `${registryPath}/agents/FRONTEND_DEVELOPER`;
   const viewer = await request('/users', { token, status: 201, method: 'POST',
@@ -153,6 +158,8 @@ try {
   assert.equal(failed.state, 'failed');
   assert.equal(failed.stage, 'PRODUCT_MANAGER');
   assert.equal(failed.steps.length, 1);
+  assert.deepEqual((await request(overviewPath, { token })).alerts.map(({ taskId, kind }) => [taskId, kind]),
+    [[queued.taskId, 'planning']]);
   await request(`${planPath}/retry`, { token: viewerToken, method: 'POST', status: 403 });
   assert.equal((await planning.retry(account, first.id, queued.taskId)).state, 'queued');
   // A replacement processor can recover an expired claim after a restart.
@@ -172,6 +179,10 @@ try {
   assert.equal(modelCalls[3].input.priorSteps.length, 2);
   const proposed = await request(taskPath, { token });
   assert.equal(proposed.status, 'WAITING_APPROVAL');
+  const proposedOverview = await request(overviewPath, { token: viewerToken });
+  assert.equal(proposedOverview.agentsEnabled, 8);
+  assert.equal(proposedOverview.tasks.approval, 1);
+  assert.deepEqual(proposedOverview.alerts, []);
   assert.equal(proposed.title, outputs.PRODUCT_MANAGER.title);
   assert.deepEqual(proposed.acceptanceCriteria, outputs.PRODUCT_MANAGER.acceptanceCriteria);
   await request(`${taskPath}/executions`, { token, method: 'POST', status: 409 });
@@ -231,6 +242,7 @@ try {
 
   assert.equal(await qa.runNext(), true);
   assert.equal((await request(`${taskPath}/executions`, { token }))[0].qa.state, 'failed');
+  assert.equal((await request(overviewPath, { token })).alerts[0].kind, 'qa');
   await request(`${runPath}/qa/retry`, { token: viewerToken, method: 'POST', status: 403 });
   await request(`${runPath}/qa/retry`, { token, method: 'POST', status: 503 });
   await qa.retry(account, first.id, queued.taskId, run.id);
@@ -268,12 +280,16 @@ try {
   assert.equal((await request(operationsPath, { token: viewerToken })).audit, null);
   assert.deepEqual((await request(`/projects/${second.id}/operations`, { token })).usage, []);
   await request(`/projects/${second.id}/operations`, { token: viewerToken, status: 404 });
+  const otherOverview = `/projects/${second.id}/operations/overview`;
+  await request(otherOverview, { token: viewerToken, status: 404 });
+  assert.deepEqual((await request(otherOverview, { token })).executions, { queued: 0, running: 0, succeeded: 0, total: 0 });
+  assert.equal((await request(overviewPath, { token })).executions.succeeded, 1);
   const metricsPage = await globalThis.fetch(new URL(`/?project=${first.id}&section=operations`, web), {
     headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
   });
   assert.equal(metricsPage.status, 200);
   const metricsHtml = await metricsPage.text();
-  assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录'));
+  assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
 
   const cancelled = await planning.start(account, first.id, { ...input, request: 'Cancel during inference' });
   const inFlight = planning.runNext();

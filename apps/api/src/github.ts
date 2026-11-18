@@ -175,7 +175,8 @@ export class GitHubApp {
 }
 
 const columns = `id, github_repository_id::text AS "githubId", owner || '/' || repo_name AS "fullName",
-  repository_url AS url, default_branch AS "defaultBranch", installation_id::text AS "installationId", check_plan AS checks`;
+  repository_url AS url, default_branch AS "defaultBranch", installation_id::text AS "installationId",
+  check_plan AS checks, auto_draft_pr AS "autoDraftPr"`;
 
 @Controller('projects/:id/repositories')
 @UseGuards(SessionGuard)
@@ -247,6 +248,10 @@ export class RepositoriesController {
   async checks(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string,
     @Param('repositoryId', ParseUUIDPipe) repositoryId: string, @Body() body: unknown) {
     const input = objectInput(body);
+    const autoDraftPr = input.autoDraftPr;
+    if (autoDraftPr !== undefined && typeof autoDraftPr !== 'boolean') {
+      throw new BadRequestException('Invalid automatic draft PR setting');
+    }
     const checks = (() => {
       try { return parseCheckPlan(input.checks); }
       catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid check plan'); }
@@ -254,8 +259,9 @@ export class RepositoriesController {
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, id, { owner: true, active: true }, client);
       const { rows: [binding] } = await client.query<RepositoryBinding>(
-        `UPDATE repositories SET check_plan = $3 WHERE project_id = $1 AND id = $2 RETURNING ${columns}`,
-        [id, repositoryId, JSON.stringify(checks)],
+        `UPDATE repositories SET check_plan = $3, auto_draft_pr = COALESCE($4, auto_draft_pr)
+         WHERE project_id = $1 AND id = $2 RETURNING ${columns}`,
+        [id, repositoryId, JSON.stringify(checks), autoDraftPr ?? null],
       );
       if (!binding) throw new NotFoundException('Repository binding not found');
       await this.projects.audit(client, actor.id, id, 'repository.checks_updated', repositoryId);

@@ -124,7 +124,7 @@ export async function updateRepositoryChecks(form: FormData) {
     redirect(query + '&issue=verification');
   }
   const response = await execute(`${endpoint}/repositories/${repositoryId}/checks`, {
-    method: 'PATCH', body: JSON.stringify({ checks }),
+    method: 'PATCH', body: JSON.stringify({ checks, autoDraftPr: form.get('autoDraftPr') === 'on' }),
   });
   if (!response?.ok) redirect(`${query}&issue=${issue(response, 'verification')}`);
   redirect(`${query}&notice=checks-saved`);

@@ -42,13 +42,16 @@ const deliveryErrors: Record<string, string> = {
   github_failed: 'GitHub 发布或 PR 创建失败，请检查安装权限后重试。',
 };
 
-export async function Executions({ project, task, hasChecks }: { project: Project; task: Task; hasChecks: boolean }) {
+export async function Executions({ project, task, hasChecks, autoDraftPr }: {
+  project: Project; task: Task; hasChecks: boolean; autoDraftPr: boolean;
+}) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
   const runs = await read<ExecutionRun[]>(url) ?? [];
   const latest = runs[0];
   const events = latest ? await read<ExecutionEvent[]>(`${url}/${latest.id}/events`) : null;
   const active = latest?.status === 'queued' || latest?.status === 'running';
-  const publishing = latest?.delivery?.state === 'queued' || latest?.delivery?.state === 'publishing';
+  const waitingOnGithub = latest?.delivery?.state === 'queued' && !latest.delivery.configured;
+  const publishing = (latest?.delivery?.state === 'queued' && !waitingOnGithub) || latest?.delivery?.state === 'publishing';
   const owner = project.role === 'owner';
   const checkingQa = latest?.qa?.state === 'queued' || latest?.qa?.state === 'running';
   const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
@@ -105,6 +108,7 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
       </div> : owner && project.status === 'active' && task.status === 'REVIEW' && latest.report?.passed
         && <form action={reviewExecution} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
+          {autoDraftPr && latest.artifact && <p>批准变更后将自动发布分支并创建草稿 PR。</p>}
           <label>审核意见<textarea name="comment" maxLength={1500} placeholder="驳回时请填写原因" /></label>
           <div className="inline-fields">
             <button name="decision" value="approved">批准变更</button>
@@ -112,7 +116,7 @@ export async function Executions({ project, task, hasChecks }: { project: Projec
           </div>
         </form>}
       {latest.delivery && <div>
-        <p role="status">{deliveryLabels[latest.delivery.state]}
+        <p role="status">{waitingOnGithub ? '等待 GitHub App 配置' : deliveryLabels[latest.delivery.state]}
           {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
         <p className="description">{latest.delivery.branch} → {latest.delivery.baseBranch}</p>
         {latest.delivery.pullUrl && <p><a href={latest.delivery.pullUrl}>查看 GitHub PR #{latest.delivery.pullNumber}</a></p>}

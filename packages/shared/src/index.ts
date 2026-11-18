@@ -12,7 +12,7 @@ export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
 export { canRepair, maxVerificationAttempts, parseCheckPlan } from './verification';
 export type { CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
-export type { ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, TokenUsage } from './operations';
+export type { ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
 
 export interface ApiHealth {
   service: 'ado-api';

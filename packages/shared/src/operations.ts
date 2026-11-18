@@ -30,3 +30,12 @@ export interface ProjectOperations {
   usage: ModelUsageRow[];
   audit: ProjectAuditEntry[] | null;
 }
+
+export interface ProjectOverview {
+  tasks: { open: number; completed: number; approval: number };
+  agentsEnabled: number;
+  workers: { online: number; total: number };
+  executions: { queued: number; running: number; succeeded: number; total: number };
+  alerts: { taskId: string; code: string; title: string;
+    kind: 'planning' | 'worker_failed' | 'worker_timeout' | 'qa' | 'delivery' }[];
+}

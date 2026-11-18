@@ -6,6 +6,7 @@ const actions: Record<string, string> = {
   'agent.version_published': '发布 Agent 版本', 'agent.settings_updated': '变更 Agent 配置',
   'skill.version_published': '发布 Skill 版本', 'skill.settings_updated': '变更 Skill 配置',
   'task.approved': '批准任务方案', 'task.rejected': '驳回任务方案', 'execution.reviewed': '人工审核',
+  'repository.checks_updated': '更新仓库检查与交付设置', 'delivery.queued': '提交发布请求',
   'agent.step_completed': '完成规划阶段', 'agent.plan_failed': '规划阶段失败',
   'agent.qa_completed': '提交 QA 意见', 'agent.qa_failed': 'QA 失败', 'task.status_changed': '更新执行状态',
 };

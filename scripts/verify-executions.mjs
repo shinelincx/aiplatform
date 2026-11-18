@@ -370,15 +370,17 @@ try {
         assert.equal(repo, Number.parseInt(suffix, 16));
         return 'release-fixture-token';
       },
-      async draftPull(credential, repositoryName, head, base, commit) {
+      async draftPull(credential, repositoryName, head, base, commit, title, body) {
         assert.equal(credential, 'release-fixture-token');
         assert.equal(repositoryName, 'test/execution-fixture');
-        assert.equal(head, branch);
+        assert.equal(head.startsWith('ado/'), true);
         assert.equal(base, 'main');
-        assert.equal(git('rev-parse', branch).trim(), commit);
+        assert.equal(git('rev-parse', head).trim(), commit);
         assert.equal(git('show', `${commit}:index.ts`), 'new\n');
+        assert.match(title, /^\[(VERIFY-AND-REPAIR|AUTO-DRAFT-PR)\]/);
+        assert(body.includes('Changed files') && body.includes('index.ts') && body.includes('unit') && body.includes(repairedHash));
         pullCalls++;
-        return { number: 1, url: 'https://github.com/test/execution-fixture/pull/1',
+        return { number: pullCalls, url: `https://github.com/test/execution-fixture/pull/${pullCalls}`,
           updatedAt: '2026-01-01T00:00:00Z', state: 'open' };
       },
     };
@@ -434,7 +436,40 @@ try {
     await webhook('pull_request', pull(sha, '2026-01-02T00:00:02Z'));
     assert.equal((await request(verified.path, { token })).status, 'COMPLETED');
     assert.equal((await request(verified.runs, { token }))[0].delivery.pullState, 'merged');
+
+    await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: 'true' }, status: 400 });
+    const autoSetting = await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: true } });
+    assert.equal(autoSetting.autoDraftPr, true);
+    const automatic = await newTask('AUTO-DRAFT-PR');
+    const autoRun = await request(automatic.runs, { token, method: 'POST', status: 201 });
+    assert.equal((await worker.send('WORKER_CLAIM')).id, autoRun.id);
+    const reportAuto = (sequence, kind, payload) =>
+      worker.send('EXECUTION_EVENT', { runId: autoRun.id, sequence, kind, payload });
+    assert.equal((await reportAuto(1, 'thread', { threadId: 'auto-pr-fixture' })).accepted, true);
+    assert.equal((await reportAuto(2, 'result', candidate(1, repairedHash))).accepted, true);
+    await upload(autoRun.id, approved, patchBytes, 200);
+    assert.equal((await reportAuto(3, 'verification', { ...passing, attempt: 1 })).accepted, true);
+    assert.equal((await request(automatic.runs, { token }))[0].delivery, null);
+    const autoReview = `${automatic.runs}/${autoRun.id}/review`;
+    await request(autoReview, approve);
+    await request(autoReview, approve);
+    let draft;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      draft = (await request(automatic.runs, { token }))[0].delivery;
+      if (draft?.state === 'published' || draft?.state === 'failed') break;
+      await delay(250);
+    }
+    assert.equal(draft?.state, 'published', draft?.error ?? 'Approval did not publish the draft pull request');
+    assert.equal(draft.pullNumber, 2);
+    assert.equal(pullCalls, 2);
+    const autoEvents = (await request(`${automatic.path}/events`, { token }))
+      .filter(({ eventType }) => eventType === 'task.delivery_queued');
+    assert.equal(autoEvents.length, 1);
+    assert.equal(autoEvents[0].payload.automatic, true);
+    assert.equal((await request(automatic.path, { token })).status, 'REVIEW');
+    assert.equal(git('rev-parse', 'main').trim(), baseline);
     console.log('Signed GitHub events, deduplication and verified-commit merge tracking passed');
+    console.log('Human approval atomically queued an automatic draft PR with verified evidence');
   }
 
   await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
@@ -463,6 +498,7 @@ try {
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected' }, status: 400 });
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Needs product review' } });
   assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
+  assert.equal((await request(rejected.runs, { token }))[0].delivery, null);
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');
   console.log('Repository check snapshots, repair limits, patch-linked reports and human approval passed');

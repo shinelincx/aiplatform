@@ -1,8 +1,10 @@
 import { Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, UseGuards } from '@nestjs/common';
-import type { Account, ModelUsageRow, ProjectAuditEntry, ProjectOperations } from '@ado/shared';
+import { agentRoleLabels, workerOfflineMs, type Account, type ModelUsageRow, type ProjectAuditEntry,
+  type ProjectOperations, type ProjectOverview } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { ProjectsService } from './projects';
+import { workerOnline } from './workers';
 
 @Injectable()
 export class OperationsService {
@@ -10,6 +12,48 @@ export class OperationsService {
     @Inject(Database) private readonly db: Database,
     @Inject(ProjectsService) private readonly projects: ProjectsService,
   ) {}
+
+  async overview(actor: Account, projectId: string): Promise<ProjectOverview> {
+    await this.projects.access(actor.id, projectId);
+    const { rows: [summary] } = await this.db.pool.query<ProjectOverview>(
+      `WITH current_tasks AS (
+        SELECT id, task_code, title, status, updated_at, archived_at FROM tasks WHERE project_id = $1
+      ), latest_run AS (
+        SELECT DISTINCT ON (task_id) task_id, id FROM execution_runs WHERE project_id = $1
+        ORDER BY task_id, created_at DESC, id DESC
+      ), alerts AS (
+        SELECT t.id AS "taskId", t.task_code AS code, t.title, t.updated_at,
+          CASE
+            WHEN t.status = 'FAILED' THEN 'worker_failed'
+            WHEN t.status = 'TIMEOUT' THEN 'worker_timeout'
+            WHEN t.status = 'PLANNING' AND plan.state = 'failed' THEN 'planning'
+            WHEN t.status = 'TESTING' AND qa.state = 'failed' THEN 'qa'
+            WHEN t.status = 'REVIEW' AND delivery.state = 'failed' THEN 'delivery'
+          END AS kind
+        FROM current_tasks t LEFT JOIN latest_run r ON r.task_id = t.id
+        LEFT JOIN task_agent_plans plan ON plan.task_id = t.id
+        LEFT JOIN execution_qa qa ON qa.run_id = r.id
+        LEFT JOIN execution_deliveries delivery ON delivery.run_id = r.id
+        WHERE t.archived_at IS NULL
+      )
+      SELECT
+        (SELECT jsonb_build_object(
+          'open', count(*) FILTER (WHERE archived_at IS NULL AND status NOT IN ('COMPLETED','CANCELLED')),
+          'completed', count(*) FILTER (WHERE status = 'COMPLETED'),
+          'approval', count(*) FILTER (WHERE status = 'WAITING_APPROVAL')
+        ) FROM current_tasks) AS tasks,
+        ($3::int - (SELECT count(*)::int FROM project_agent_settings WHERE project_id = $1 AND NOT enabled)) AS "agentsEnabled",
+        (SELECT jsonb_build_object('online', count(*) FILTER (WHERE ${workerOnline}), 'total', count(*))
+         FROM workers w JOIN worker_projects wp ON wp.worker_id = w.id WHERE wp.project_id = $1) AS workers,
+        (SELECT jsonb_build_object(
+           'queued', count(*) FILTER (WHERE status = 'queued'), 'running', count(*) FILTER (WHERE status = 'running'),
+           'succeeded', count(*) FILTER (WHERE status = 'succeeded'), 'total', count(*)
+         ) FROM execution_runs WHERE project_id = $1) AS executions,
+        ARRAY(SELECT jsonb_build_object('taskId', "taskId", 'code', code, 'title', title, 'kind', kind)
+          FROM alerts WHERE kind IS NOT NULL ORDER BY updated_at DESC, "taskId" LIMIT 10) AS alerts`,
+      [projectId, workerOfflineMs, Object.keys(agentRoleLabels).length]);
+    return summary;
+  }
 
   async list(actor: Account, projectId: string): Promise<ProjectOperations> {
     const project = await this.projects.access(actor.id, projectId);
@@ -57,5 +101,10 @@ export class OperationsController {
   @Get()
   list(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string) {
     return this.operations.list(actor, projectId);
+  }
+
+  @Get('overview')
+  overview(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string) {
+    return this.operations.overview(actor, projectId);
   }
 }

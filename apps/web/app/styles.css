@@ -34,6 +34,10 @@ textarea { min-height: 5rem; resize: vertical; }
 .workspace-grid { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(0, 3fr); gap: 2rem; }
 .workspace-grid aside h2 { margin-top: 0; }
 .workspace-panels { display: grid; align-content: start; gap: 1.25rem; min-width: 0; }
+.project-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: .75rem; }
+.project-metrics div { padding: .75rem; background: #f5f7f5; border-radius: .35rem; }
+.project-metrics dt { color: #475e60; font-size: .875rem; }
+.project-metrics dd { margin: .35rem 0 0; font-weight: 600; }
 nav { display: grid; gap: .35rem; }
 nav a { display: flex; gap: .75rem; justify-content: space-between; align-items: center; min-height: 44px; padding: .6rem; border-radius: .35rem; color: inherit; text-decoration: none; overflow-wrap: anywhere; }
 nav a:hover, nav a[aria-current="page"] { background: #e5eeea; }

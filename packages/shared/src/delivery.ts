@@ -6,6 +6,7 @@ export interface PatchArtifact {
 }
 
 export interface ExecutionDelivery {
+  configured?: boolean;
   state: 'queued' | 'publishing' | 'published' | 'failed';
   branch: string;
   baseBranch: string;

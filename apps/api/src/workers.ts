@@ -16,6 +16,8 @@ const hasActiveProject = `EXISTS (
   SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id
   WHERE wp.worker_id = w.id AND p.status = 'active'
 )`;
+export const workerOnline = `NOT w.disabled AND w.connection_id IS NOT NULL AND w.credential_expires_at > now()
+  AND w.last_heartbeat_at >= now() - ($2 * interval '1 millisecond')`;
 
 function credentialHash(token: string) {
   return createHash('sha256').update(token).digest('hex');
@@ -71,9 +73,8 @@ export class WorkersService {
          CASE
            WHEN w.disabled THEN 'disabled'
            WHEN w.last_heartbeat_at IS NULL THEN 'unregistered'
-           WHEN w.connection_id IS NULL OR w.credential_expires_at <= now()
-             OR w.last_heartbeat_at < now() - ($2 * interval '1 millisecond') THEN 'disconnected'
-           ELSE 'online'
+           WHEN ${workerOnline} THEN 'online'
+           ELSE 'disconnected'
          END AS status
        FROM workers w JOIN worker_projects wp ON wp.worker_id = w.id
        WHERE wp.project_id = $1 ORDER BY w.name, w.id`, [projectId, workerOfflineMs],

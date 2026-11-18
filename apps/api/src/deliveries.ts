@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import type { Account, ExecutionDelivery } from '@ado/shared';
+import type { Account, ExecutionDelivery, Task, VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
@@ -34,8 +34,20 @@ type Publication = {
   createdAt: Date;
   code: string;
   title: string;
+  files: string[];
+  checks: VerificationReport['checks'];
   lease: string;
 };
+
+function pullBody(work: Publication) {
+  const format = (value: string) => '`' + value.replace(/[`\r\n]/g, ' ') + '`';
+  return [
+    `ADO task ${format(work.code)} · Run ${format(work.runId)}`,
+    '', '### Changed files', ...work.files.map((file) => `- ${format(file)}`),
+    '', '### Verification', ...work.checks.map(({ name, status }) => `- ${format(name)} · ${status}`),
+    '', `Tested patch SHA-256: ${format(work.patchHash)}`,
+  ].join('\n');
+}
 
 @Injectable()
 export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
@@ -77,35 +89,42 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
       );
       if (existing && existing.state !== 'failed') return existing;
       if (task.status !== 'REVIEW') throw new ConflictException('Only an approved candidate in review can be published');
-      const { rows: [candidate] } = await client.query<{
-        repoId: string; baseBranch: string; baseCommit: string; patchHash: string;
-      }>(
-        `SELECT r.repository_id AS "repoId", COALESCE(r.source_branch, g.default_branch) AS "baseBranch",
-           e.payload->>'baseCommit' AS "baseCommit", a.sha256 AS "patchHash"
-         FROM execution_runs r JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
-         JOIN repositories g ON g.id = r.repository_id AND g.project_id = r.project_id
-         JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = r.verification_report->>'patchHash'
-         JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result' AND payload->>'patchHash' = a.sha256
-           ORDER BY sequence DESC LIMIT 1) e ON true
-         WHERE r.project_id = $1 AND r.task_id = $2 AND r.id = $3 AND r.status = 'succeeded'
-           AND r.verification_report->>'passed' = 'true'
-           AND r.id = (SELECT id FROM execution_runs WHERE project_id = $1 AND task_id = $2
-             ORDER BY created_at DESC, id DESC LIMIT 1)`,
-        [projectId, taskId, runId],
-      );
-      if (!candidate) throw new ConflictException('Publish requires an approved, tested and archived patch');
-      if (!this.github.configured) throw new ServiceUnavailableException('GitHub App delivery is not configured');
-      const { rows: [delivery] } = await client.query<ExecutionDelivery>(
-        `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch, state)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'queued')
-         ON CONFLICT (run_id) DO UPDATE SET state = 'queued', error = NULL, updated_at = now(), requested_by = EXCLUDED.requested_by
-         RETURNING ${deliveryColumns}`,
-        [runId, candidate.repoId, actor.id, candidate.patchHash, candidate.baseCommit, candidate.baseBranch, `ado/${runId}`],
-      );
-      await this.projects.audit(client, actor.id, projectId, 'delivery.queued', runId);
-      await this.tasks.event(client, task, 'task.delivery_queued', { runId, actorId: actor.id });
-      return delivery;
+      return this.enqueueApproved(client, actor.id, task, runId, false);
     });
+  }
+
+  async enqueueApproved(client: PoolClient, actorId: string, task: Task, runId: string, automatic: boolean) {
+    const { projectId, id: taskId } = task;
+    const { rows: [candidate] } = await client.query<{
+      repoId: string; baseBranch: string; baseCommit: string; patchHash: string;
+    }>(
+      `SELECT r.repository_id AS "repoId", COALESCE(r.source_branch, g.default_branch) AS "baseBranch",
+         e.payload->>'baseCommit' AS "baseCommit", a.sha256 AS "patchHash"
+       FROM execution_runs r JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
+       JOIN repositories g ON g.id = r.repository_id AND g.project_id = r.project_id
+       JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = r.verification_report->>'patchHash'
+       JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result' AND payload->>'patchHash' = a.sha256
+         ORDER BY sequence DESC LIMIT 1) e ON true
+       WHERE r.project_id = $1 AND r.task_id = $2 AND r.id = $3 AND r.status = 'succeeded'
+         AND r.verification_report->>'passed' = 'true'
+         AND (NOT $4::boolean OR g.auto_draft_pr)
+         AND r.id = (SELECT id FROM execution_runs WHERE project_id = $1 AND task_id = $2
+           ORDER BY created_at DESC, id DESC LIMIT 1)`,
+      [projectId, taskId, runId, automatic],
+    );
+    if (!candidate && automatic) return null;
+    if (!candidate) throw new ConflictException('Publish requires an approved, tested and archived patch');
+    if (!automatic && !this.github.configured) throw new ServiceUnavailableException('GitHub App delivery is not configured');
+    const { rows: [delivery] } = await client.query<ExecutionDelivery>(
+      `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch, state)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'queued')
+       ON CONFLICT (run_id) DO UPDATE SET state = 'queued', error = NULL, updated_at = now(), requested_by = EXCLUDED.requested_by
+       RETURNING ${deliveryColumns}`,
+      [runId, candidate.repoId, actorId, candidate.patchHash, candidate.baseCommit, candidate.baseBranch, `ado/${runId}`],
+    );
+    await this.projects.audit(client, actorId, projectId, 'delivery.queued', runId);
+    await this.tasks.event(client, task, 'task.delivery_queued', { runId, actorId, automatic });
+    return delivery;
   }
 
   private async claim() {
@@ -116,13 +135,16 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
         `SELECT r.id AS "runId", r.project_id AS "projectId", r.task_id AS "taskId", r.created_at AS "createdAt",
            g.owner || '/' || g.repo_name AS repository, g.installation_id::text AS "installationId",
            g.github_repository_id::text AS "externalId", d.branch, d.base_branch AS "baseBranch", d.base_commit AS "baseCommit",
-           d.patch_hash AS "patchHash", a.object_key AS "objectKey", a.size, t.task_code AS code, t.title
+           d.patch_hash AS "patchHash", a.object_key AS "objectKey", a.size, t.task_code AS code, t.title,
+           e.payload->'files' AS files, r.verification_report->'checks' AS checks
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'REVIEW'
          JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
          JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
          JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = d.patch_hash
+         JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result'
+           AND payload->>'patchHash' = d.patch_hash ORDER BY sequence DESC LIMIT 1) e ON true
          WHERE d.state = 'queued' OR (d.state = 'publishing' AND d.lease_expires_at < now())
          ORDER BY d.updated_at, d.run_id LIMIT 1 FOR UPDATE OF d SKIP LOCKED`,
       );
@@ -152,7 +174,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
         baseCommit: work.baseCommit, branch: work.branch, patch, runId: work.runId, timestamp: work.createdAt.toISOString(),
       }, signal);
       const pr = await this.github.draftPull(token, work.repository, work.branch, work.baseBranch, commit,
-        `[${work.code}] ${work.title}`.slice(0, 240), `ADO run ${work.runId}\n\nTested patch SHA-256: ${work.patchHash}`);
+        `[${work.code}] ${work.title}`.slice(0, 240), pullBody(work));
       await this.db.transaction(async (client) => {
         const result = await client.query(
           `UPDATE execution_deliveries SET state = 'published', error = NULL, pull_number = $3, pull_url = $4,

@@ -77,6 +77,7 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
   ]);
   const plan = planning?.plan;
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
+  const boundRepository = repositories?.find(({ id }) => id === task?.repositoryId);
   const taskLink = (id: string) => `/?project=${project.id}&task=${id}#task-detail`;
   const labels = new Map(tasks.map(({ id, code }) => [id, code]));
   const taskIdentity = task && <>
@@ -137,7 +138,7 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
             <form action={archiveTask} className="repository-form">{taskIdentity}<button className="secondary">归档任务</button></form>}
         </>}
         <Executions project={project} task={task}
-          hasChecks={Boolean(repositories?.find(({ id }) => id === task.repositoryId)?.checks.length)} />
+          hasChecks={Boolean(boundRepository?.checks.length)} autoDraftPr={boundRepository?.autoDraftPr === true} />
         <details>
           <summary>任务记录</summary>
           <ol className="members">

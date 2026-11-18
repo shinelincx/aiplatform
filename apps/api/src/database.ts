@@ -253,6 +253,7 @@ const migrations = [
     FOREIGN KEY (run_id, patch_hash) REFERENCES execution_artifacts(run_id, sha256)
   );
   CREATE INDEX execution_qa_queue ON execution_qa (state, updated_at);`,
+  `ALTER TABLE repositories ADD COLUMN auto_draft_pr boolean NOT NULL DEFAULT false;`,
 ];
 
 @Injectable()

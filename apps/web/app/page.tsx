@@ -1,4 +1,4 @@
-import { checkApiHealth, type Account, type Project, type ProjectMember } from '@ado/shared';
+import { checkApiHealth, type Account, type Project, type ProjectMember, type ProjectOverview } from '@ado/shared';
 import Link from 'next/link';
 import { login, logout } from './actions';
 import { Agents } from './agents';
@@ -46,9 +46,10 @@ export default async function Home({ searchParams }: {
   const admin = account?.systemRole === 'admin';
   const projects = account ? await read<Project[]>('/projects') : null;
   const selected = projects?.find((project) => project.id === query.project) ?? projects?.[0];
-  const [members, users] = await Promise.all([
+  const [members, users, overview] = await Promise.all([
     selected?.role === 'owner' ? read<ProjectMember[]>(`/projects/${selected.id}/members`) : null,
     admin ? read<Account[]>('/users') : null,
+    selected ? read<ProjectOverview>(`/projects/${selected.id}/operations/overview`) : null,
   ]);
 
   return (
@@ -68,12 +69,13 @@ export default async function Home({ searchParams }: {
         </div>
         {query.issue && Object.hasOwn(issues, query.issue) && <p role="alert" className="feedback">{issues[query.issue]}</p>}
         {query.notice === 'user-created' && account && <p role="status">账号已创建。</p>}
-        {query.notice === 'checks-saved' && account && <p role="status">检查计划已保存。</p>}
+        {query.notice === 'checks-saved' && account && <p role="status">检查与交付设置已保存。</p>}
         {account ? (
           <div className="workspace-grid">
             <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
             <div className="workspace-panels">
-              {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []} />}
+              {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []}
+                overview={overview} live={!query.task && query.section !== 'operations'} />}
               {selected && <div className="inline-fields">
                 {query.section === 'operations'
                   ? <Link href={`/?project=${selected.id}`}>返回项目工作台</Link>
