@@ -180,24 +180,38 @@ try {
   assert.equal(await alternate.send('WORKER_CLAIM'), null);
   const assignmentPath = `${task.runs}/${initial.id}/worker`;
   const assign = (workerId, status = 204) => request(assignmentPath, { token, method: 'POST', body: { workerId }, status });
+  const overviewPath = `/projects/${first.id}/operations/overview`;
+  const workerAlert = async (taskId) => (await request(overviewPath, { token })).alerts
+    .some((alert) => alert.taskId === taskId && alert.kind === 'worker_unavailable');
   await assign(foreignCredential.workerId, 409);
   await assign(alternateCredential.workerId);
   assert.equal(await worker.send('WORKER_CLAIM'), null);
+  assert.equal(await workerAlert(task.id), false);
+  await alternate.close();
+  let alerted = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    alerted = await workerAlert(task.id);
+    if (alerted) break;
+    await delay(100);
+  }
+  assert(alerted, 'An offline assigned Worker should alert even when another Worker is online');
   await assign(null);
   assert.equal((await request(task.runs, { token }))[0].requestedWorkerId, null);
+  assert.equal(await workerAlert(task.id), false);
 
   const diskLow = { diskFreeBytes: 32, memoryFreeBytes: 64, minFreeDiskBytes: 128 };
   const diskReady = { ...diskLow, diskFreeBytes: 128, memoryFreeBytes: 256 };
   assert.equal(await worker.send('WORKER_HEARTBEAT', { runId: null, resources: diskLow }), null);
   assert.equal(await worker.send('WORKER_CLAIM'), null);
-  const overviewPath = `/projects/${first.id}/operations/overview`;
   assert.equal((await request(overviewPath, { token })).workers.diskPaused, 1);
+  assert.equal(await workerAlert(task.id), true);
   const workerState = (await request(`/projects/${first.id}/workers`, { token })).find(({ id }) => id === approved.workerId);
   assert.equal(workerState.status, 'online');
   assert.equal(workerState.capabilities.diskFreeBytes, diskLow.diskFreeBytes);
   assert.equal(workerState.capabilities.memoryFreeBytes, diskLow.memoryFreeBytes);
   assert.equal(await worker.send('WORKER_HEARTBEAT', { runId: null, resources: diskReady }), null);
   assert.equal((await request(overviewPath, { token })).workers.diskPaused, 0);
+  assert.equal(await workerAlert(task.id), false);
 
   const offer = await worker.send('WORKER_CLAIM');
   assert.equal(offer.id, initial.id);
@@ -374,7 +388,10 @@ try {
   await request(checksPath, { token, method: 'PATCH', body: { checks: nodePlan } });
   const serverPage = new URL(`/?project=${first.id}&task=${serverTask.id}`, web);
   const waitingPage = await globalThis.fetch(serverPage, { headers: { Cookie: cookie } });
-  assert((await waitingPage.text()).includes('当前分配范围内没有可领取任务的 Maven Worker'));
+  const waitingHtml = await waitingPage.text();
+  assert(waitingHtml.includes('当前分配范围内没有可领取任务的 Maven Worker'));
+  assert(waitingHtml.includes('暂无符合条件的在线 Worker'));
+  assert.equal(await workerAlert(serverTask.id), true);
   assert.deepEqual((await request(serverTask.runs, { token }))[0].checkPlan, mavenPlan);
   const nodeTask = await newTask('NODE-ROUTING');
   const nodeRun = await request(nodeTask.runs, { token, method: 'POST', status: 201 });
@@ -417,6 +434,7 @@ try {
 
   const mavenCredential = await credentials(first.id);
   const mavenWorker = await open(mavenCredential, true, true, true, true);
+  assert.equal(await workerAlert(serverTask.id), false);
   await request(mavenAssign, { token, method: 'POST', body: { workerId: mavenCredential.workerId }, status: 204 });
   await request(mavenAssign, { token, method: 'POST', body: { workerId: null }, status: 204 });
   const mavenOffer = await mavenWorker.send('WORKER_CLAIM');
@@ -430,6 +448,7 @@ try {
     await client.close();
   }
   console.log('Maven-aware assignment and claiming honored the queued check plan with two Workers');
+  console.log('Queued task alerts tracked assignment, connectivity, disk pressure and tool support');
   await request(checksPath, { token, method: 'PATCH', body: { checks: [{ ...plan[0], directory: '../other' }] }, status: 400 });
   const configured = await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
   assert.deepEqual(configured.checks, plan);

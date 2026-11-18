@@ -5,7 +5,7 @@ import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput } from './input';
 import { ProjectsService } from './projects';
-import { workerDiskReady, workerOnline } from './workers';
+import { workerCanVerify, workerDiskReady, workerMatchesAssignment, workerOnline } from './workers';
 
 const rateFields = `model, input_usd::text AS "inputUsdPerMillion", cached_input_usd::text AS "cachedInputUsdPerMillion",
   output_usd::text AS "outputUsdPerMillion"`;
@@ -25,12 +25,13 @@ export class OperationsService {
   ) {}
 
   async overview(actor: Account, projectId: string): Promise<ProjectOverview> {
-    await this.projects.access(actor.id, projectId);
+    const project = await this.projects.access(actor.id, projectId);
     const { rows: [summary] } = await this.db.pool.query<ProjectOverview>(
       `WITH current_tasks AS (
         SELECT id, task_code, title, status, updated_at, archived_at FROM tasks WHERE project_id = $1
       ), latest_run AS (
-        SELECT DISTINCT ON (task_id) task_id, id FROM execution_runs WHERE project_id = $1
+        SELECT DISTINCT ON (task_id) task_id, id, status, cancel_requested, requested_worker_id,
+          repository_id, check_plan, qa_assignment FROM execution_runs WHERE project_id = $1
         ORDER BY task_id, created_at DESC, id DESC
       ), alerts AS (
         SELECT t.id AS "taskId", t.task_code AS code, t.title, t.updated_at,
@@ -40,8 +41,15 @@ export class OperationsService {
             WHEN t.status = 'PLANNING' AND plan.state = 'failed' THEN 'planning'
             WHEN t.status = 'TESTING' AND qa.state = 'failed' THEN 'qa'
             WHEN t.status = 'REVIEW' AND delivery.state = 'failed' THEN 'delivery'
+            WHEN $4::boolean AND t.status = 'QUEUED' AND r.status = 'queued' AND NOT r.cancel_requested
+              AND NOT EXISTS (
+                SELECT 1 FROM worker_projects wp JOIN workers w ON w.id = wp.worker_id
+                WHERE wp.project_id = $1 AND ${workerOnline} AND ${workerDiskReady}
+                  AND w.capabilities ? 'codexVersion' AND ${workerMatchesAssignment} AND ${workerCanVerify}
+              ) THEN 'worker_unavailable'
           END AS kind
         FROM current_tasks t LEFT JOIN latest_run r ON r.task_id = t.id
+        LEFT JOIN repositories g ON g.id = r.repository_id AND g.project_id = $1
         LEFT JOIN task_agent_plans plan ON plan.task_id = t.id
         LEFT JOIN execution_qa qa ON qa.run_id = r.id
         LEFT JOIN execution_deliveries delivery ON delivery.run_id = r.id
@@ -63,7 +71,7 @@ export class OperationsService {
          ) FROM execution_runs WHERE project_id = $1) AS executions,
         ARRAY(SELECT jsonb_build_object('taskId', "taskId", 'code', code, 'title', title, 'kind', kind)
           FROM alerts WHERE kind IS NOT NULL ORDER BY updated_at DESC, "taskId" LIMIT 10) AS alerts`,
-      [projectId, workerOfflineMs, Object.keys(agentRoleLabels).length]);
+      [projectId, workerOfflineMs, Object.keys(agentRoleLabels).length, project.status === 'active']);
     return summary;
   }
 

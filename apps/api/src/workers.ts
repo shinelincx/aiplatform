@@ -20,6 +20,13 @@ export const workerOnline = `NOT w.disabled AND w.connection_id IS NOT NULL AND 
   AND w.last_heartbeat_at >= now() - ($2 * interval '1 millisecond')`;
 export const workerDiskReady = `COALESCE((w.capabilities->>'diskFreeBytes')::bigint
   >= (w.capabilities->>'minFreeDiskBytes')::bigint, true)`;
+export const workerMatchesAssignment = `(r.requested_worker_id IS NULL OR r.requested_worker_id = w.id)`;
+export const workerCanVerify = `(jsonb_array_length(r.check_plan) = 0 OR (
+  w.capabilities->'verificationVersion' = '1'::jsonb
+  AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
+  AND (w.capabilities @> '{"mavenVerification":true}'::jsonb
+    OR NOT jsonb_path_exists(r.check_plan, '$[*].argv[0] ? (@ == "mvn")'))
+))`;
 
 function credentialHash(token: string) {
   return createHash('sha256').update(token).digest('hex');

@@ -6,6 +6,7 @@ import { RefreshExecution } from './refresh-execution';
 const roleNames = { owner: '所有者', member: '成员', viewer: '只读' };
 const alertNames: Record<ProjectOverview['alerts'][number]['kind'], string> = {
   planning: 'Agent 规划失败', worker_failed: 'Worker 执行失败', worker_timeout: 'Worker 执行超时',
+  worker_unavailable: '暂无符合条件的在线 Worker',
   qa: 'QA 审查失败', delivery: 'PR 发布失败',
 };
 

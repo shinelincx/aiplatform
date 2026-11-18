@@ -46,5 +46,5 @@ export interface ProjectOverview {
   workers: { online: number; total: number; diskPaused: number };
   executions: { queued: number; running: number; succeeded: number; total: number };
   alerts: { taskId: string; code: string; title: string;
-    kind: 'planning' | 'worker_failed' | 'worker_timeout' | 'qa' | 'delivery' }[];
+    kind: 'planning' | 'worker_failed' | 'worker_timeout' | 'worker_unavailable' | 'qa' | 'delivery' }[];
 }

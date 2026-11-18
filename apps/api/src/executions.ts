@@ -17,17 +17,11 @@ import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
-import { workerDiskReady, type WorkerIdentity } from './workers';
+import { workerCanVerify, workerDiskReady, workerMatchesAssignment, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
   finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId"`;
-const workerCanVerify = `(jsonb_array_length(r.check_plan) = 0 OR (
-  w.capabilities->'verificationVersion' = '1'::jsonb
-  AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
-  AND (w.capabilities @> '{"mavenVerification":true}'::jsonb
-    OR NOT jsonb_path_exists(r.check_plan, '$[*].argv[0] ? (@ == "mvn")'))
-))`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
@@ -389,7 +383,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          JOIN tasks t ON t.id = r.task_id AND t.status = 'QUEUED'
          JOIN repositories g ON g.id = r.repository_id
          WHERE r.status = 'queued' AND NOT r.cancel_requested
-           AND (r.requested_worker_id IS NULL OR r.requested_worker_id = $1)
+           AND ${workerMatchesAssignment}
            AND ${workerCanVerify}
          ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`,
         [worker.workerId],
