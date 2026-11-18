@@ -91,6 +91,14 @@ Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时�
 
 执行记录显示每轮 Codex 的状态和耗时、命令退出码、文件变更数量及工具调用状态。Worker 和控制面只保留这些结构化字段，以便重连后重放并定位失败。[OpenAI Codex SDK 流式事件](https://learn.chatgpt.com/docs/codex-sdk)
 
+在已安装依赖的 Linux 或 WSL Worker 上，可以用本地 Responses 夹具验证原生 CLI、SDK 流式事件、同线程修复和 Git 工作区隔离。
+
+```sh
+npm run build:shared
+npm run build -w @ado/worker
+ADO_CODEX_BIN=/absolute/path/to/codex node scripts/verify-codex-sdk.mjs
+```
+
 ## 检查和人工审核
 
 项目所有者可在仓库绑定的“检查计划”中保存最多八项检查。设置 `kind` 为 `unit`、`api` 或 `static`，在 `argv` 中分别填写可执行文件和参数。应用同时支持仓库相对目录和每项检查超时。
