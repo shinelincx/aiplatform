@@ -75,6 +75,7 @@ Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研�
 | `ADO_CODEX_API_KEY` | 可选，设定后用于模型认证。也可通过 Codex CLI 在独立状态目录中登录 |
 | `ADO_MIN_FREE_DISK_MIB` | 执行目录的最低可用磁盘空间，默认 256 MiB |
 | `ADO_NPM_CACHE_ROOT` | 可选，存放各仓库 npm 缓存的绝对路径 |
+| `ADO_MAVEN_CACHE_ROOT` | 可选，存放各仓库 Maven 缓存的绝对路径 |
 
 Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实际 Git worktree 中验证隔离。状态目录使用默认配置。测试代码、密钥和其他项目文件应放在工作目录之外。生产部署可在独立 Worker 服务上设置 CPU、内存和磁盘配额。
 
@@ -102,6 +103,22 @@ Worker 随心跳上报可用磁盘和内存。工作目录低于磁盘阈值时�
 使用 npm 的项目可以在与 Worker 同平台的可信检出目录预热该仓库的专用缓存。例如在已检出的 Fitbest 目录中运行 `npm --prefix fit-best-trainer ci --ignore-scripts --no-audit --no-fund --cache /srv/ado-caches/shinelincx/fitbest`，并设置 Worker 的 `ADO_NPM_CACHE_ROOT=/srv/ado-caches`。为其他使用到的 npm 子包重复预热，使用同一个仓库缓存。
 
 将对应目录的 `["npm","ci","--offline","--ignore-scripts","--no-audit","--no-fund"]` 放在依赖它的检查前。Worker 仅将选中仓库的 `_cacache` 复制到当前任务的检查沙箱。缓存写入保留在该任务内，检查仍运行在无网络沙箱中。请在仓库中忽略安装生成的 `node_modules`。 [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci) · [npm 缓存](https://docs.npmjs.com/cli/v11/commands/npm-cache)
+
+对 Maven 项目，在 Worker 的系统目录安装 JDK 和 Maven，使 `java` 和 `mvn` 可从系统 `PATH` 找到。在可信检出目录预热与检查对应的依赖和插件。以 Fitbest 为例，在 `fitbest-server` 目录用 Java 21 运行 `mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/srv/ado-maven/shinelincx/fitbest/repository test`，然后设置 `ADO_MAVEN_CACHE_ROOT=/srv/ado-maven`。Worker 复制该仓库的 `repository` 到任务目录，并为 `mvn` 自动设置离线模式、依赖路径和 JVM 临时目录。[Maven CLI](https://maven.apache.org/ref/3.9.11/maven-embedder/cli.html)
+
+Fitbest 的沙箱检查可使用下面的检查计划。测试 JVM 从任务缓存显式加载 Mockito，数据库和浏览器联调由 Fitbest 的 GitHub Actions 执行。[Mockito Java 21 配置](https://github.com/mockito/mockito/blob/v5.17.0/mockito-core/src/main/java/org/mockito/Mockito.java#L168)
+
+```json
+[
+  {
+    "name": "server-tests",
+    "kind": "api",
+    "directory": "fitbest-server",
+    "argv": ["mvn", "--batch-mode", "--no-transfer-progress", "-DargLine=-javaagent:../../.maven-cache/repository/org/mockito/mockito-core/5.17.0/mockito-core-5.17.0.jar", "test"],
+    "timeoutSeconds": 150
+  }
+]
+```
 
 全部检查通过后，项目所有者可批准或驳回该候选补丁，驳回需填写原因。检查计划为空的任务停在“待测试”，配置计划后可重新派发。
 

@@ -10,6 +10,7 @@ export interface VerificationSandbox {
   worktree: string;
   profile: string[];
   npmCache?: string;
+  mavenCache?: string;
 }
 
 interface CheckExecution {
@@ -18,6 +19,10 @@ interface CheckExecution {
 }
 
 const diagnosticBytes = 4096;
+
+function javaPath(path: string) {
+  return path.split('"').map((part) => `"${part}"`).join(`'"'`);
+}
 
 function diagnosticText(tail: Buffer) {
   const text = Array.from(tail.toString('utf8')).filter((character) =>
@@ -57,12 +62,22 @@ async function runCheck(sandbox: VerificationSandbox, check: VerificationCheck, 
   }
   if (!executable) return result('executable_unavailable');
   signal.throwIfAborted();
+  const mavenCache = program === 'mvn' ? sandbox.mavenCache : undefined;
+  const environment = [
+    `PATH=${sandbox.env.PATH}`, `HOME=${mavenCache ?? sandbox.npmCache ?? sandbox.worktree}`, 'CI=true',
+    `npm_config_cache=${sandbox.npmCache ?? '/tmp/ado-npm-cache'}`,
+    ...(sandbox.npmCache ? ['npm_config_offline=true'] : []),
+  ];
+  if (mavenCache) {
+    const javaTemp = join(mavenCache, 'tmp');
+    environment.push(`TMPDIR=${javaTemp}`,
+      `JAVA_TOOL_OPTIONS=-Duser.home=${javaPath(mavenCache)} -Djava.io.tmpdir=${javaPath(javaTemp)}`);
+    arguments_.unshift('--offline', `-Dmaven.repo.local=${join(mavenCache, 'repository')}`);
+  }
 
   return new Promise<CheckExecution>((resolve, reject) => {
     const child = spawn(sandbox.binary, ['sandbox', ...sandbox.profile.flatMap((part) => ['-c', part]),
-      '-P', 'ado-job', '--', '/usr/bin/env', `PATH=${sandbox.env.PATH}`, `HOME=${sandbox.npmCache ?? sandbox.worktree}`,
-      `npm_config_cache=${sandbox.npmCache ?? '/tmp/ado-npm-cache'}`,
-      ...(sandbox.npmCache ? ['npm_config_offline=true'] : []), 'CI=true', executable, ...arguments_], {
+      '-P', 'ado-job', '--', '/usr/bin/env', ...environment, executable, ...arguments_], {
       cwd: directory, env: sandbox.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let tail = Buffer.alloc(0);

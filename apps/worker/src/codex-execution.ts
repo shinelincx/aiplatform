@@ -6,13 +6,13 @@ import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { canRepair, maxVerificationAttempts, type ExecutionOffer, type VerificationReport } from '@ado/shared';
 import { runVerification } from './verification';
-import { copyRepositoryNpmCache } from './npm-cache';
+import { copyRepositoryCache } from './repository-cache';
 
 const exec = promisify(execFile);
 export const codexVersion = '0.170.0';
 type Report = (kind: string, payload: object) => Promise<void>;
 type WorkerFailure = 'source_unavailable' | 'sandbox_rejected' | 'codex_failed' | 'no_changes' | 'worker_timeout'
-  | 'worker_error' | 'checks_changed_candidate' | 'npm_cache_unavailable';
+  | 'worker_error' | 'checks_changed_candidate' | 'npm_cache_unavailable' | 'maven_cache_unavailable';
 
 class ExecutionFailure extends Error {
   constructor(readonly code: WorkerFailure) { super(code); }
@@ -24,13 +24,13 @@ interface Runtime {
   env: Record<string, string>;
   apiKey?: string;
   npmCacheRoot?: string;
+  mavenCacheRoot?: string;
 }
 
 export async function configureExecution(): Promise<Runtime | undefined> {
   const root = process.env.ADO_EXECUTION_ROOT;
   const binary = process.env.ADO_CODEX_BIN;
   const state = process.env.ADO_CODEX_STATE_DIR;
-  const cache = process.env.ADO_NPM_CACHE_ROOT;
   if (!root && !binary && !state) return;
   if (process.platform !== 'linux' || process.getuid?.() === 0) {
     throw new Error('Codex execution requires a non-root Linux or WSL Worker');
@@ -44,11 +44,17 @@ export async function configureExecution(): Promise<Runtime | undefined> {
   if (contains(checkedRoot, stateDir) || contains(stateDir, checkedRoot) || contains(checkedRoot, checkedBinary)) {
     throw new Error('Codex binary, state and job workspaces must use separate directories');
   }
-  if (cache && !isAbsolute(cache)) throw new Error('Set an absolute ADO_NPM_CACHE_ROOT path');
-  const npmCacheRoot = cache ? await realpath(cache) : undefined;
-  if (npmCacheRoot && [checkedRoot, stateDir].some((dir) => contains(dir, npmCacheRoot) || contains(npmCacheRoot, dir))) {
-    throw new Error('Use a separate repository cache directory outside Worker workspaces and Codex state');
-  }
+  const cacheRoot = async (variable: string) => {
+    const path = process.env[variable];
+    if (!path) return;
+    if (!isAbsolute(path)) throw new Error(`Set an absolute ${variable} path`);
+    const cache = await realpath(path);
+    if ([checkedRoot, stateDir].some((dir) => contains(dir, cache) || contains(cache, dir))) {
+      throw new Error(`Set ${variable} outside Worker workspaces and Codex state`);
+    }
+    return cache;
+  };
+  const [npmCacheRoot, mavenCacheRoot] = await Promise.all([cacheRoot('ADO_NPM_CACHE_ROOT'), cacheRoot('ADO_MAVEN_CACHE_ROOT')]);
   // The dedicated login directory must have no CLI configuration that can override the job permission profile.
   await rejectCustomConfig(stateDir);
   const env: Record<string, string> = {
@@ -58,7 +64,7 @@ export async function configureExecution(): Promise<Runtime | undefined> {
   };
   const { stdout } = await exec(checkedBinary, ['--version'], { env, timeout: 5000 });
   if (stdout.trim() !== `codex-cli ${codexVersion}`) throw new Error(`Worker requires Codex CLI ${codexVersion}`);
-  const runtime = { root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot };
+  const runtime = { root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot };
   const probe = await mkdtemp(join(checkedRoot, '.sandbox-check-'));
   try {
     const checkout = join(probe, 'checkout');
@@ -87,11 +93,11 @@ async function rejectCustomConfig(stateDir: string) {
   }
 }
 
-export function isolatedProfile(worktree: string, gitDir: string, binary: string, npmCache?: string) {
+export function isolatedProfile(worktree: string, gitDir: string, binary: string, ...writable: string[]) {
   const files = [
     '":root" = "deny"', '":minimal" = "read"', '":tmpdir" = "deny"', '":slash_tmp" = "deny"',
     `${JSON.stringify(worktree)} = "write"`, `${JSON.stringify(gitDir)} = "read"`, `${JSON.stringify(binary)} = "read"`,
-    ...(npmCache ? [`${JSON.stringify(npmCache)} = "write"`] : []),
+    ...writable.map((path) => `${JSON.stringify(path)} = "write"`),
     '":workspace_roots" = { ".git" = "read", ".codex" = "read" }',
   ].join(', ');
   return [
@@ -173,10 +179,12 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     const { jobRoot, gitDir, worktree, git, patch } = await checkout(runtime, offer, signal);
     await verifySandbox(runtime, jobRoot, worktree, gitDir, signal);
     const checks = offer.checks ?? [];
-    const npmCache = runtime.npmCacheRoot && checks.length > 0
-      ? await copyRepositoryNpmCache(runtime.npmCacheRoot, offer.repository, jobRoot, signal).catch(() => {
-        throw new ExecutionFailure('npm_cache_unavailable');
+    const prepareCache = (root: string | undefined, manager: 'npm' | 'maven') => root
+      ? copyRepositoryCache(root, offer.repository, jobRoot, manager, signal).catch(() => {
+        throw new ExecutionFailure(`${manager}_cache_unavailable`);
       }) : undefined;
+    const npmCache = checks.length > 0 ? await prepareCache(runtime.npmCacheRoot, 'npm') : undefined;
+    const mavenCache = checks.some(({ argv }) => argv[0] === 'mvn') ? await prepareCache(runtime.mavenCacheRoot, 'maven') : undefined;
     await report('progress', { stage: 'inference' });
     const { Codex } = await import('@openai/codex-sdk');
     const profile = isolatedProfile(worktree, gitDir, runtime.binary);
@@ -194,7 +202,8 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria,
       ...(offer.development && { development: offer.development }),
     };
-    const verificationProfile = npmCache ? isolatedProfile(worktree, gitDir, runtime.binary, npmCache) : profile;
+    const cachePaths = [npmCache, mavenCache].filter((path) => path !== undefined);
+    const verificationProfile = isolatedProfile(worktree, gitDir, runtime.binary, ...cachePaths);
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
@@ -241,7 +250,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       if (!checks.length) return;
 
       const executions = await runVerification({
-        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, npmCache,
+        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, npmCache, mavenCache,
       }, checks, signal);
       const results = executions.map(({ result }) => result);
       await git(['add', '-A']);

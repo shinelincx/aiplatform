@@ -20,7 +20,7 @@ import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
 import { WorkerJobs } from '../apps/worker/src/jobs.ts';
-import { copyRepositoryNpmCache } from '../apps/worker/src/npm-cache.ts';
+import { copyRepositoryCache } from '../apps/worker/src/repository-cache.ts';
 import { runVerification } from '../apps/worker/src/verification.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
@@ -366,10 +366,10 @@ try {
   mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'cached-entry'), 'repository-cache');
   const cacheSignal = globalThis.AbortSignal.timeout(5000);
-  assert.equal(await copyRepositoryNpmCache(cacheRoot, 'test/other-project', workerJournal, cacheSignal), undefined);
+  assert.equal(await copyRepositoryCache(cacheRoot, 'test/other-project', workerJournal, 'npm', cacheSignal), undefined);
   symlinkSync(join(cacheRoot, 'test', 'execution-fixture'), join(cacheRoot, 'test', 'aliased-project'));
-  await assert.rejects(copyRepositoryNpmCache(cacheRoot, 'test/aliased-project', workerJournal, cacheSignal), /symbolic path/);
-  const npmCache = await copyRepositoryNpmCache(cacheRoot, 'TEST/Execution-Fixture', workerJournal, cacheSignal);
+  await assert.rejects(copyRepositoryCache(cacheRoot, 'test/aliased-project', workerJournal, 'npm', cacheSignal), /symbolic path/);
+  const npmCache = await copyRepositoryCache(cacheRoot, 'TEST/Execution-Fixture', workerJournal, 'npm', cacheSignal);
   const [cacheCheck] = await runVerification({
     binary: shim, worktree: fixtureRepo, profile: [], env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` }, npmCache,
   }, [verifyFixture('offline-cache', ['node', '-e',
@@ -377,6 +377,28 @@ try {
   ])], cacheSignal);
   assert.equal(cacheCheck.result.status, 'passed');
   assert.equal(readFileSync(join(source, 'cached-entry'), 'utf8'), 'repository-cache');
+  const mavenSource = join(cacheRoot, 'test', 'execution-fixture', 'repository');
+  mkdirSync(mavenSource);
+  writeFileSync(join(mavenSource, 'cached-entry'), 'maven-seed');
+  const mavenCache = await copyRepositoryCache(cacheRoot, 'test/execution-fixture', workerJournal, 'maven', cacheSignal);
+  writeFileSync(join(workerJournal, 'mvn'), `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const { HOME, TMPDIR, JAVA_TOOL_OPTIONS } = process.env;
+const repository = HOME + '/repository';
+assert.deepEqual(process.argv.slice(2), ['--offline', '-Dmaven.repo.local=' + repository, 'verify']);
+assert.equal(TMPDIR, HOME + '/tmp');
+assert.equal(JAVA_TOOL_OPTIONS, '-Duser.home="' + HOME + '" -Djava.io.tmpdir="' + TMPDIR + '"');
+assert.equal(fs.readFileSync(repository + '/cached-entry', 'utf8'), 'maven-seed');
+fs.writeFileSync(repository + '/cached-entry', 'job-local');
+fs.writeFileSync(TMPDIR + '/probe', '');
+`, { mode: 0o700 });
+  const [mavenCheck] = await runVerification({
+    binary: shim, worktree: fixtureRepo, profile: [], mavenCache,
+    env: { PATH: `${workerJournal}:${dirname(process.execPath)}:/usr/bin:/bin` },
+  }, [verifyFixture('offline-maven', ['mvn', 'verify'])], cacheSignal);
+  assert.equal(mavenCheck.result.status, 'passed', mavenCheck.diagnostic);
+  assert.equal(readFileSync(join(mavenSource, 'cached-entry'), 'utf8'), 'maven-seed');
   git('init', '-q', '-b', 'main');
   writeFileSync(join(fixtureRepo, 'index.ts'), 'old\n');
   git('add', 'index.ts');
