@@ -39,7 +39,15 @@ jobs:
       - run: docker compose exec -T api node scripts/verify-workers.mjs
       - run: docker compose exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-executions.mjs
       - run: docker compose exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-agent-planning.mjs
+      - name: Restore isolated backup
+        run: |
+          bash scripts/compose-backup.sh backup ado-platform "${RUNNER_TEMP}/ado-snapshot"
+          WEB_PORT=23100 API_PORT=23101 POSTGRES_PORT=25432 REDIS_PORT=26379 S3_PORT=29000 \
+            bash scripts/compose-backup.sh restore ado-ci-restore "${RUNNER_TEMP}/ado-snapshot"
+          docker compose -p ado-ci-restore exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-recovery.mjs
       - if: failure()
         run: docker compose logs --no-color --tail 80
       - if: always()
-        run: docker compose down
+        run: |
+          docker compose -p ado-ci-restore down --volumes
+          docker compose down

@@ -1,4 +1,4 @@
-import type { AgentAssignment, ArchitecturePlan, DirectorPlan, PlanningOutput, PlanningRole, ProductPlan } from '@ado/shared';
+import type { AgentAssignment, ArchitecturePlan, DirectorPlan, ModelUsage, PlanningOutput, PlanningRole, ProductPlan } from '@ado/shared';
 import { objectInput, textInput } from './input';
 
 const string = { type: 'string' };
@@ -43,10 +43,15 @@ export function validatePlanningOutput(role: PlanningRole, input: unknown): Plan
 
 export const PLANNING_MODEL = Symbol('PLANNING_MODEL');
 
+export interface AgentResponse {
+  output: unknown;
+  usage?: ModelUsage;
+}
+
 export interface PlanningModel {
   available(): boolean;
   defaultModel(): string;
-  generate(role: PlanningRole, agent: AgentAssignment, input: object): Promise<unknown>;
+  generate(role: PlanningRole, agent: AgentAssignment, input: object): Promise<AgentResponse>;
 }
 
 export const openAIPlanningModel: PlanningModel = {
@@ -64,7 +69,8 @@ export function responsesConfigured() {
   return Boolean(process.env.ADO_AGENT_API_KEY?.trim());
 }
 
-export async function generateStructuredOutput(agent: AgentAssignment, properties: object, instructions: string[], input: object) {
+export async function generateStructuredOutput(agent: AgentAssignment, properties: object, instructions: string[],
+  input: object): Promise<AgentResponse> {
   const key = process.env.ADO_AGENT_API_KEY?.trim();
   if (!key) throw new Error('Responses provider is unconfigured');
   const response = await fetch('https://api.openai.com/v1/responses', {
@@ -83,7 +89,9 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
   if (!response.ok) throw new Error('Responses provider request failed');
   const result = await response.json() as {
     status?: string;
+    model?: string;
     output?: { type?: string; content?: { type?: string; text?: string }[] }[];
+    usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   };
   const content = result.output?.filter(({ type }) => type === 'message').flatMap((item) => item.content ?? []);
   if (result.status !== 'completed' || content?.some(({ type }) => type === 'refusal')) {
@@ -91,5 +99,17 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
   }
   const output = content?.filter(({ type }) => type === 'output_text').map(({ text }) => text).join('');
   if (!output) throw new Error('Responses provider returned no structured output');
-  return JSON.parse(output) as unknown;
+  const usage = result.usage;
+  const model = result.model;
+  const modelUsage = usage && typeof model === 'string' && /^[\w.-]{1,100}$/.test(model)
+    && count(usage.input_tokens) && count(usage.output_tokens) && count(usage.input_tokens_details?.cached_tokens)
+    && usage.input_tokens_details.cached_tokens <= usage.input_tokens ? {
+      model, inputTokens: usage.input_tokens, cachedInputTokens: usage.input_tokens_details.cached_tokens,
+      outputTokens: usage.output_tokens,
+    } : undefined;
+  return { output: JSON.parse(output) as unknown, usage: modelUsage };
+}
+
+function count(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }

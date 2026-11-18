@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
-  type ArchitecturePlan, type ProductPlan } from '@ado/shared';
+  type ArchitecturePlan, type ModelUsage, type ProductPlan } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -152,25 +152,28 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       const agent = row.assignments[role];
       const developers = developerRoles.filter((item) => row.assignments[item]);
       let step: AgentPlan['steps'][number];
+      let usage: ModelUsage | undefined;
       try {
         if (!agent) throw new Error('Planning role is missing');
-        const output = validatePlanningOutput(role, await this.model.generate(role, agent, {
+        const response = await this.model.generate(role, agent, {
           ...row.input, priorSteps: row.steps, availableDevelopers: developers,
-        }));
+        });
+        usage = response.usage;
+        const output = validatePlanningOutput(role, response.output);
         if ('developer' in output && !developers.includes(output.developer)) throw new Error('Developer role is disabled');
         step = { role, version: agent.version, model: agent.model, output };
       } catch {
-        await this.settle(row, null);
+        await this.settle(row, null, usage);
         return true;
       }
-      await this.settle(row, step);
+      await this.settle(row, step, usage);
       return true;
     } finally {
       this.busy = false;
     }
   }
 
-  private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null) {
+  private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null, usage?: ModelUsage) {
     await this.db.transaction(async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [row.projectId]);
@@ -179,6 +182,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         [row.taskId, row.leaseId]);
       if (!current.rowCount) return;
       const task = await this.tasks.find(row.projectId, row.taskId, client);
+      if (usage) await this.tasks.event(client, task, 'agent.model_usage', { role: planningRoles[row.steps.length], usage });
       if (task.status !== 'PLANNING' || task.archivedAt || project?.status !== 'active') {
         await this.saveProgress(client, row, 'cancelled', row.steps, null);
         await this.tasks.event(client, task, 'agent.plan_cancelled', {});

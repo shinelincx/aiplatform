@@ -13,6 +13,7 @@ import { ExecutionsController, ExecutionsService } from './executions';
 import { ExecutionQaController, ExecutionQaService, openAIQaModel, QA_MODEL } from './execution-qa';
 import { GitHubApp, RepositoriesController } from './github';
 import { GitHubWebhookController } from './github-webhook';
+import { OperationsController, OperationsService } from './operations';
 import { openAIPlanningModel, PLANNING_MODEL } from './planning-model';
 import { ProjectsController, ProjectsService } from './projects';
 import { TasksController, TasksService } from './tasks';
@@ -30,11 +31,11 @@ class HealthController {
 @Module({
   controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController, WorkersController,
     ExecutionsController, ArtifactsController, DeliveriesController, GitHubWebhookController, AgentPlanningController,
-    AgentRegistryController, ExecutionQaController],
+    AgentRegistryController, ExecutionQaController, OperationsController],
   providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService, WorkersService, WorkerGateway,
     ExecutionsService, ArtifactStore, ArtifactsService, DeliveriesService, { provide: GIT_PUBLISH, useValue: pushCandidate },
     AgentPlanningService, AgentRegistryService, { provide: PLANNING_MODEL, useValue: openAIPlanningModel },
-    ExecutionQaService, { provide: QA_MODEL, useValue: openAIQaModel }],
+    ExecutionQaService, { provide: QA_MODEL, useValue: openAIQaModel }, OperationsService],
 })
 class AppModule {}
 

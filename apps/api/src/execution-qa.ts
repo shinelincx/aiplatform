@@ -2,12 +2,12 @@ import {
   ConflictException, Controller, HttpCode, Inject, Injectable, Logger, type OnApplicationBootstrap,
   type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
-import type { Account, AgentAssignment, PatchArtifact, QaAssessment, VerificationReport } from '@ado/shared';
+import type { Account, AgentAssignment, ModelUsage, PatchArtifact, QaAssessment, VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
-import { generateStructuredOutput, responsesConfigured } from './planning-model';
+import { generateStructuredOutput, responsesConfigured, type AgentResponse } from './planning-model';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
 
@@ -24,7 +24,7 @@ interface QaInput {
 
 export interface QaModel {
   available(): boolean;
-  generate(agent: AgentAssignment, input: QaInput): Promise<unknown>;
+  generate(agent: AgentAssignment, input: QaInput): Promise<AgentResponse>;
 }
 
 export const QA_MODEL = Symbol('QA_MODEL');
@@ -132,26 +132,29 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
 
       let assessment: QaAssessment | null = null;
       let partialPatch = false;
+      let usage: ModelUsage | undefined;
       try {
         const task = await this.tasks.find(job.projectId, job.taskId);
         const bytes = await this.storage.get(job.artifact);
         partialPatch = bytes.length > maxReviewBytes;
         const { title, description, acceptanceCriteria } = task;
-        assessment = assessmentInput(await this.model.generate(job.agent, {
+        const response = await this.model.generate(job.agent, {
           task: { title, description, acceptanceCriteria }, verification: job.verification,
           patch: bytes.subarray(0, maxReviewBytes).toString('utf8'), partialPatch,
-        }), partialPatch);
+        });
+        usage = response.usage;
+        assessment = assessmentInput(response.output, partialPatch);
       } catch {
         // Missing evidence and provider failures are retryable, and do not unblock review.
       }
-      await this.settle(job, assessment, partialPatch);
+      await this.settle(job, assessment, partialPatch, usage);
       return true;
     } finally {
       this.busy = false;
     }
   }
 
-  private async settle(job: ClaimedQa, assessment: QaAssessment | null, partialPatch: boolean) {
+  private async settle(job: ClaimedQa, assessment: QaAssessment | null, partialPatch: boolean, usage?: ModelUsage) {
     await this.db.transaction(async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [job.projectId]);
@@ -165,6 +168,7 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
         [job.runId, job.leaseId, state, cancelled ? null : assessment, partialPatch]);
       if (!updated.rowCount) return;
       const payload = { runId: job.runId, patchHash: job.artifact.sha256 };
+      if (usage) await this.tasks.event(client, task, 'agent.model_usage', { runId: job.runId, role: job.agent.role, usage });
       await this.tasks.event(client, task, `agent.qa_${state}`, {
         ...payload, ...(assessment && !cancelled && { recommendation: assessment.recommendation, version: job.agent.version }),
       });

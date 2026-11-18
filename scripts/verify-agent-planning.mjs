@@ -27,12 +27,17 @@ const registry = new AgentRegistryService(db, projects);
 const executions = new ExecutionsService(db, projects, tasks, new GitHubApp());
 const modelCalls = [];
 const qaCalls = [];
+const modelReply = (agent, output) => ({
+  output, usage: { model: `${agent.model}-resolved`, inputTokens: 20, cachedInputTokens: 5, outputTokens: 8 },
+});
 const qa = new ExecutionQaService(db, projects, tasks, new ArtifactStore(), {
   available: () => true,
   async generate(agent, input) {
     qaCalls.push({ agent, input });
     if (qaCalls.length === 1) throw new Error('Fixture transient error');
-    return { recommendation: 'ready', testCases: ['Check the empty state'], findings: ['The settings route renders the saved value'] };
+    return modelReply(agent, {
+      recommendation: 'ready', testCases: ['Check the empty state'], findings: ['The settings route renders the saved value'],
+    });
   },
 });
 const outputs = {
@@ -60,9 +65,9 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
     }
     if (role === 'PRODUCT_MANAGER' && failProduct) {
       failProduct = false;
-      return { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] };
+      return modelReply(agent, { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] });
     }
-    return outputs[role];
+    return modelReply(agent, outputs[role]);
   },
 });
 
@@ -250,6 +255,26 @@ try {
   assert(reviewHtml.includes('证据不足') && reviewHtml.includes('批准变更') && reviewHtml.includes('截至本轮'));
   assert.equal((await request(`${runPath}/review`, review)).decision, 'approved');
 
+  const operationsPath = `${prefix}/operations`;
+  const operations = await request(operationsPath, { token });
+  const pmUsage = operations.usage.find(({ role }) => role === 'PRODUCT_MANAGER');
+  assert.deepEqual(pmUsage, { role: 'PRODUCT_MANAGER', model: 'fixture-pm-resolved',
+    inputTokens: '40', cachedInputTokens: '10', outputTokens: '16' });
+  assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
+  assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
+  for (const action of ['task.approved', 'agent.step_completed', 'task.status_changed', 'agent.qa_completed', 'execution.reviewed']) {
+    assert(operations.audit.some((entry) => entry.action === action), `Missing ${action} in the project audit`);
+  }
+  assert.equal((await request(operationsPath, { token: viewerToken })).audit, null);
+  assert.deepEqual((await request(`/projects/${second.id}/operations`, { token })).usage, []);
+  await request(`/projects/${second.id}/operations`, { token: viewerToken, status: 404 });
+  const metricsPage = await globalThis.fetch(new URL(`/?project=${first.id}&section=operations`, web), {
+    headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  assert.equal(metricsPage.status, 200);
+  const metricsHtml = await metricsPage.text();
+  assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录'));
+
   const cancelled = await planning.start(account, first.id, { ...input, request: 'Cancel during inference' });
   const inFlight = planning.runNext();
   await cancelledCallStarted;
@@ -265,7 +290,7 @@ try {
   assert.deepEqual(plan.steps, []);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
-  process.stdout.write('Agent registry, planning recovery, approved Worker handoff and patch-bound QA verified.\n');
+  process.stdout.write('Agent planning, Worker handoff, patch-bound QA, project usage and audit verified.\n');
 } finally {
   await db.onModuleDestroy();
 }

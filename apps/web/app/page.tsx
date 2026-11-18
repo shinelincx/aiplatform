@@ -1,7 +1,9 @@
 import { checkApiHealth, type Account, type Project, type ProjectMember } from '@ado/shared';
+import Link from 'next/link';
 import { login, logout } from './actions';
 import { Agents } from './agents';
 import { read } from './api-client';
+import { Operations } from './operations';
 import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
 import { Repositories } from './repositories';
 import { Tasks } from './tasks';
@@ -32,7 +34,7 @@ const issues: Record<string, string> = {
 };
 
 export default async function Home({ searchParams }: {
-  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string }>;
+  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string }>;
 }) {
   const query = await searchParams;
   const [connection, accountResult] = await Promise.allSettled([
@@ -72,6 +74,12 @@ export default async function Home({ searchParams }: {
             <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
             <div className="workspace-panels">
               {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []} />}
+              {selected && <div className="inline-fields">
+                {query.section === 'operations'
+                  ? <Link href={`/?project=${selected.id}`}>返回项目工作台</Link>
+                  : <Link href={`/?project=${selected.id}&section=operations#operations`}>项目用量与审计</Link>}
+              </div>}
+              {selected && query.section === 'operations' && <Operations project={selected} />}
               {selected && <Repositories project={selected} installation={query.installation}
                 manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {selected && <Tasks project={selected} selectedId={query.task} />}

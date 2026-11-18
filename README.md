@@ -89,6 +89,8 @@ Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实�
 
 通过 Agent 规划的任务由支持补丁归档的 Worker 运行检查。全部检查通过后，QA Agent 会向 OpenAI Responses API 发送已校验的补丁内容（最多 64 KiB）、验收条件和检查报告，返回建议验证用例和发现。QA 结果进入工作台后由项目所有者决定是否批准。QA 失败可使用同一补丁重试。
 
+项目工作台的“项目用量与审计”按岗位和模型汇总已记录的输入、缓存和输出 token。Codex 执行只累计每次运行最近提交的用量，避免重复统计重试轮次。项目所有者还可查看最近的配置、审批、Agent 和 Worker 记录。
+
 ## 发布到 GitHub
 
 支持归档的 Worker 会在提交通过报告前将补丁存入 S3 兼容对象存储。工作台的“下载受测补丁”会校验长度和 SHA-256。通过审核后，项目所有者可点击“发布分支并创建草稿 PR”。
@@ -96,6 +98,18 @@ Worker 启动时验证 CLI 版本和文件隔离，领到任务后还会在实�
 发布需要目标仓库的 GitHub App 安装具备 `Contents: Write` 和 `Pull requests: Write`。控制面只为选定仓库签发短期发布凭证。发布从受测基准提交重建代码，创建 `ado/<runId>` 分支，并将草稿 PR 关联到执行记录。重试会检查已有分支和 PR，分支包含不同提交时将显示冲突。
 
 GitHub App 可把 Pull requests、Push 和 Check runs 事件发送到控制面的 HTTPS `/github/webhook`。在同一 GitHub App 设置与 `GITHUB_WEBHOOK_SECRET` 一致的密钥。控制面验证签名并忽略重复交付。合并的 PR 必须指向受测提交，任务才会进入“已完成”。
+
+## 备份与恢复
+
+在 Bash 或 WSL 中运行 `scripts/compose-backup.sh`。备份会短暂停止控制面和对象存储，生成 PostgreSQL 逻辑备份、SeaweedFS 数据卷归档和 SHA-256 清单，随后恢复原本运行的服务。请把备份存到仓库之外，为备份目录保留项目数据所需的访问权限。
+
+```sh
+bash scripts/compose-backup.sh backup ado-platform /absolute/path/ado-snapshot
+WEB_PORT=23100 API_PORT=23101 POSTGRES_PORT=25432 REDIS_PORT=26379 S3_PORT=29000 \
+  bash scripts/compose-backup.sh restore ado-restore /absolute/path/ado-snapshot
+```
+
+恢复使用同一版 Compose 配置和对象存储凭据，并要求新的 Compose 项目名。恢复实例首次启动时禁用外部模型和 GitHub 集成。成功后可以用备份中的账号登录，核对项目、任务和受测补丁。需要启用集成时，请为恢复实例单独配置。
 
 ## Monorepo 与 CI
 
@@ -113,4 +127,4 @@ npm run check
 | `@ado/worker` | `apps/worker` | Node.js Worker 注册、心跳、重连和连通检查 |
 | `@ado/shared` | `packages/shared` | Web、API、Worker 共用的数据类型和协议 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Agent 规划与重试、Worker 注册、派发、事件重放、检查与审核、补丁归档和签名 Webhook。Git 交付测试使用本地仓库，规划模型、GitHub API 和 Worker 协议测试使用夹具。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 从干净的 Compose 环境验证登录、项目隔离、Agent 规划、Worker 派发、检查与审核、签名 Webhook，以及备份恢复后的补丁完整性。Git 交付测试使用本地仓库，模型、GitHub API 和 Worker 协议测试使用夹具。
