@@ -1,19 +1,79 @@
-import { checkApiHealth } from '@ado/shared';
+import { checkApiHealth, type Account, type Project, type ProjectMember } from '@ado/shared';
+import { login, logout } from './actions';
+import { read } from './api-client';
+import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
+import { Repositories } from './repositories';
+import { Tasks } from './tasks';
 
 export const dynamic = 'force-dynamic';
 
-export default async function Home() {
-  const reachable = await checkApiHealth(process.env.API_BASE_URL ?? 'http://127.0.0.1:3101');
+const issues: Record<string, string> = {
+  login: '登录失败，请检查邮箱和密码。',
+  expired: '会话已失效，请重新登录。',
+  offline: '无法连接控制面 API，请稍后重试。',
+  forbidden: '当前账号没有执行此操作的权限。',
+  conflict: '数据已存在或项目已归档，请检查后重试。',
+  project: '无法保存项目，请检查输入。',
+  user: '无法创建账号，请检查输入。',
+  member: '无法更新成员，请刷新页面后重试。',
+  repository: '无法绑定仓库，请确认 GitHub App 的仓库权限和分支名。',
+  task: '无法保存任务，请检查输入、任务关联和当前状态。',
+  'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
+};
+
+export default async function Home({ searchParams }: {
+  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string }>;
+}) {
+  const query = await searchParams;
+  const [connection, accountResult] = await Promise.allSettled([
+    checkApiHealth(process.env.API_BASE_URL ?? 'http://127.0.0.1:3101'),
+    read<Account>('/auth/session'),
+  ]);
+  const reachable = connection.status === 'fulfilled' && connection.value;
+  const account = accountResult.status === 'fulfilled' ? accountResult.value : null;
+  const admin = account?.systemRole === 'admin';
+  const projects = account ? await read<Project[]>('/projects') : null;
+  const selected = projects?.find((project) => project.id === query.project) ?? projects?.[0];
+  const [members, users] = await Promise.all([
+    selected?.role === 'owner' ? read<ProjectMember[]>(`/projects/${selected.id}/members`) : null,
+    admin ? read<Account[]>('/users') : null,
+  ]);
+
   return (
     <>
-      <header><strong>ADO</strong><span>研发管理平台</span></header>
-      <main>
-        <h1>开发环境状态</h1>
-        <dl>
-          <div><dt>Web 控制台</dt><dd>运行中</dd></div>
-          <div><dt>控制面 API</dt><dd data-offline={!reachable}>{reachable ? '连接正常' : '连接失败'}</dd></div>
-        </dl>
-        <form action="/"><button type="submit">重新检查</button></form>
+      <header>
+        <strong>ADO</strong><span>研发管理平台</span>
+        {account && <form className="header-session" action={logout}>
+          <span>{account.name}</span><button className="secondary">退出</button>
+        </form>}
+      </header>
+      <main className={account ? 'workspace' : undefined}>
+        <div className="heading">
+          <h1>{account ? '项目工作台' : '登录研发平台'}</h1>
+          <p className="connection" data-offline={!reachable}>
+            控制面 API · {reachable ? '连接正常' : '连接失败'}
+          </p>
+        </div>
+        {query.issue && Object.hasOwn(issues, query.issue) && <p role="alert" className="feedback">{issues[query.issue]}</p>}
+        {query.notice === 'user-created' && account && <p role="status">账号已创建。</p>}
+        {account ? (
+          <div className="workspace-grid">
+            <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
+            <div className="workspace-panels">
+              {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []} />}
+              {selected && <Repositories project={selected} installation={query.installation}
+                manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
+              {selected && <Tasks project={selected} selectedId={query.task} />}
+              {admin && <CreateAccount users={users ?? []} />}
+            </div>
+          </div>
+        ) : (
+          <form className="panel fields login" action={login}>
+            <label>邮箱<input name="email" type="email" autoComplete="username" maxLength={255} required /></label>
+            <label>密码<input name="password" type="password" autoComplete="current-password" maxLength={256} required /></label>
+            <button>登录</button>
+          </form>
+        )}
       </main>
     </>
   );

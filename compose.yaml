@@ -44,6 +44,15 @@ services:
     image: ado-platform-dev:local
     environment:
       PORT: 3101
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ado
+      PGUSER: ado
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ado-local-dev}
+      ADO_BOOTSTRAP_EMAIL: ${ADO_BOOTSTRAP_EMAIL-}
+      ADO_BOOTSTRAP_PASSWORD: ${ADO_BOOTSTRAP_PASSWORD-}
+      GITHUB_APP_ID: ${GITHUB_APP_ID-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY-}
     volumes: [./apps/api/src:/app/apps/api/src:ro]
     ports: ["127.0.0.1:${API_PORT:-3101}:3101"]
     depends_on:
@@ -62,6 +71,7 @@ services:
     command: npm run dev -w @ado/web
     environment:
       API_BASE_URL: http://api:3101
+      ADO_SECURE_COOKIES: ${ADO_SECURE_COOKIES:-false}
     volumes: [./apps/web/app:/app/apps/web/app:ro]
     ports: ["127.0.0.1:${WEB_PORT:-3100}:3000"]
     depends_on:

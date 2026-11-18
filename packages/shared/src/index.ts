@@ -1,3 +1,8 @@
+export type { Account, GitHubInstallation, GitHubRepository, Project, ProjectMember, ProjectRole,
+  RepositoryBinding, Session } from './projects';
+export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
+export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
+
 export interface ApiHealth {
   service: 'ado-api';
   status: 'ok';

@@ -1,6 +1,6 @@
 # ADO 研发平台
 
-M0 工程基线。Web 和 Worker 可以检查控制面 API 的连通性。Worker 在本阶段是一次性自检命令，注册、心跳和任务执行在 M2 接入。
+Web 工作台支持登录、切换项目、管理成员、绑定 GitHub 仓库及维护研发任务。Worker 当前提供一次性连通性检查，注册、心跳和任务执行在 M2 接入。
 
 ## 启动开发环境
 
@@ -10,7 +10,15 @@ M0 工程基线。Web 和 Worker 可以检查控制面 API 的连通性。Worker
 docker compose up --build --wait
 ```
 
-打开 [Web 控制台](http://127.0.0.1:3100)，点击“重新检查”可获取最新 API 状态。也可以直接访问 [API 健康接口](http://127.0.0.1:3101/health)。
+打开 [Web 控制台](http://127.0.0.1:3100) 查看 API 状态并登录。也可直接访问 [API 健康接口](http://127.0.0.1:3101/health)。
+
+首次登录前，将 `.env.example` 复制为 `.env`，设置 `ADO_BOOTSTRAP_EMAIL` 和至少 12 字符的 `ADO_BOOTSTRAP_PASSWORD`，再启动 Compose。API 启动时自动执行 PostgreSQL 迁移。首次启动创建管理员后，可以清空启动账号环境变量并重启，现有账号与项目继续保存在 PostgreSQL。
+
+管理员可创建 Fitbest、ADO 项目和用户账号。项目创建者拥有项目所有者权限，可添加成员或只读用户。项目列表和仓库信息按成员关系过滤。归档项目保留历史并停止接受设置变更。
+
+仓库绑定使用安装到目标仓库的 GitHub App。仅授予已选目标仓库 `Metadata: Read` 和 `Contents: Read`，并在 `.env` 设置 `GITHUB_APP_ID` 与 `GITHUB_APP_PRIVATE_KEY` 后重启。管理员在自己拥有的项目中可选择安装、仓库与分支。API 会核实分支存在，同一个 GitHub 仓库只允许绑定到一个项目。
+
+在项目中创建任务时，可以记录优先级、验收条件、仓库、父任务和前置任务。任务由草稿进入规划，提交后由项目所有者审批，所有状态变更保存在任务记录中。前置任务完成后才能批准关联任务进入待派发状态。
 
 | 服务 | 宿主机端口 | 容器内地址或开发默认值 |
 | --- | --- | --- |
@@ -47,4 +55,4 @@ npm run check
 | `@ado/worker` | `apps/worker` | Node.js Worker 入口及 API 连通检查 |
 | `@ado/shared` | `packages/shared` | Web、API、Worker 共用的健康响应契约 |
 
-`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 在 push、pull request 或手动触发时运行同一组检查，并在独立任务中从干净环境启动 Compose、验证 Web 到 API 及 Worker 到 API 的连通性。
+`npm run check` 依次执行 ESLint、TypeScript 类型检查、Vitest 单元测试和全部应用构建。GitHub Actions 在 push、pull request 或手动触发时运行同一组检查，并从干净的 Compose 环境验证 Worker 连通性、Web 登录、会话撤销和项目隔离。集成验证脚本会创建测试用户和项目，建议在独立 Compose 实例中执行。
