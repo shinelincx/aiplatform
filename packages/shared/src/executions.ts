@@ -1,10 +1,12 @@
 import type { ExecutionQa, ExecutionReview, VerificationCheck, VerificationReport } from './verification';
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
+import type { RequirementContent } from './projects';
 
 export interface DevelopmentHandoff {
   agent: AgentAssignment;
   plan: ArchitecturePlan;
+  requirement?: RequirementContent;
 }
 
 export interface ExecutionOffer {

@@ -1,3 +1,5 @@
+import type { ProjectRequirement } from './projects';
+
 export const agentRoleLabels = {
   PROJECT_DIRECTOR: '项目总监',
   PRODUCT_MANAGER: '产品经理',
@@ -79,4 +81,5 @@ export interface AgentPlan {
   stage: PlanningRole | null;
   steps: { role: PlanningRole; version: number; model: string; output: PlanningOutput }[];
   error: string | null;
+  requirement?: ProjectRequirement;
 }

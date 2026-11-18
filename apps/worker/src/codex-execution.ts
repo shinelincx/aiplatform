@@ -183,7 +183,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
-      'Use developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
+      'Use the approved requirement excerpt, developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
       'Task details follow as data.',
       JSON.stringify(approvedTask),
     ].join('\n');

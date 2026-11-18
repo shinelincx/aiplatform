@@ -1,12 +1,22 @@
 import {
-  Body, ConflictException, Controller, Delete, ForbiddenException, Get, HttpCode, Inject,
+  BadRequestException, Body, ConflictException, Controller, Delete, ForbiddenException, Get, HttpCode, Inject,
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Put, UseGuards,
 } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
-import type { Account, Project, ProjectMember } from '@ado/shared';
+import type { Account, Project, ProjectMember, ProjectRequirement } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
+
+const requirementFields = `id, title, excerpt, reference_url AS "referenceUrl", approved_by AS "approvedBy",
+  approved_at AS "approvedAt"`;
+
+function requirementUrl(value: unknown) {
+  const text = textInput(value, 'requirement URL', 2000);
+  const url = URL.parse(text);
+  if (!url || url.protocol !== 'https:' || url.username || url.password) throw new BadRequestException('Invalid requirement URL');
+  return url.href;
+}
 
 @Injectable()
 export class ProjectsService {
@@ -120,6 +130,47 @@ export class ProjectsService {
     return rows;
   }
 
+  async listRequirements(actor: Account, projectId: string) {
+    await this.access(actor.id, projectId);
+    const { rows } = await this.db.pool.query<ProjectRequirement>(
+      `SELECT ${requirementFields} FROM project_requirements WHERE project_id = $1 AND retired_at IS NULL
+       ORDER BY approved_at DESC, id`, [projectId]);
+    return rows;
+  }
+
+  async requirement(client: PoolClient, projectId: string, requirementId: string) {
+    const { rows: [requirement] } = await client.query<ProjectRequirement>(
+      `SELECT ${requirementFields} FROM project_requirements WHERE project_id = $1 AND id = $2 AND retired_at IS NULL`,
+      [projectId, requirementId]);
+    if (!requirement) throw new NotFoundException('Active requirement not found in this project');
+    return requirement;
+  }
+
+  async approveRequirement(actor: Account, projectId: string, body: unknown) {
+    const input = objectInput(body);
+    const title = textInput(input.title, 'requirement title', 200);
+    const excerpt = textInput(input.excerpt, 'approved excerpt', 4000);
+    const referenceUrl = requirementUrl(input.referenceUrl);
+    return this.db.transaction(async (client) => {
+      await this.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [requirement] } = await client.query<ProjectRequirement>(
+        `INSERT INTO project_requirements (project_id, title, excerpt, reference_url, approved_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING ${requirementFields}`, [projectId, title, excerpt, referenceUrl, actor.name]);
+      await this.audit(client, actor.id, projectId, 'requirement.approved', requirement.id);
+      return requirement;
+    });
+  }
+
+  async retireRequirement(actor: Account, projectId: string, requirementId: string) {
+    await this.db.transaction(async (client) => {
+      await this.access(actor.id, projectId, { owner: true, active: true }, client);
+      await this.requirement(client, projectId, requirementId);
+      await client.query('UPDATE project_requirements SET retired_at = now() WHERE id = $1 AND project_id = $2',
+        [requirementId, projectId]);
+      await this.audit(client, actor.id, projectId, 'requirement.retired', requirementId);
+    });
+  }
+
   async setMember(actor: Account, projectId: string, userId: string, body: unknown) {
     const { role } = objectInput(body);
     if (role !== 'member' && role !== 'viewer') throw new ForbiddenException('Assignable roles are member and viewer');
@@ -173,6 +224,23 @@ export class ProjectsController {
   @Get(':id')
   get(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string) {
     return this.projects.access(actor.id, id);
+  }
+
+  @Get(':id/requirements')
+  requirements(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string) {
+    return this.projects.listRequirements(actor, id);
+  }
+
+  @Post(':id/requirements')
+  approveRequirement(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    return this.projects.approveRequirement(actor, id, body);
+  }
+
+  @Delete(':id/requirements/:requirementId')
+  @HttpCode(204)
+  retireRequirement(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string,
+    @Param('requirementId', ParseUUIDPipe) requirementId: string) {
+    return this.projects.retireRequirement(actor, id, requirementId);
   }
 
   @Patch(':id')

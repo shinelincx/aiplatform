@@ -104,6 +104,14 @@ export function PlanProgress({ projectId, plan, canRetry }: { projectId: string;
   return (
     <section aria-labelledby="agent-plan-heading">
       <h4 id="agent-plan-heading">Agent 规划</h4>
+      {plan.requirement && <>
+        <p>需求来源 · <a href={plan.requirement.referenceUrl} rel="noreferrer">{plan.requirement.title}</a></p>
+        <details>
+          <summary>规划使用的批准摘录</summary>
+          <p className="description">{plan.requirement.excerpt}</p>
+          <small>登记人 · {plan.requirement.approvedBy}</small>
+        </details>
+      </>}
       <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
       {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
       {plan.state === 'failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}

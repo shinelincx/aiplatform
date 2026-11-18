@@ -8,7 +8,7 @@ import {
   canRepair, canTransitionTask, checkFailureStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
   type CheckFailureReason, type CheckResult,
   type AgentAssignment, type ArchitecturePlan, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type Task, type TaskStatus,
-  type VerificationCheck, type VerificationReport, type WorkerRecovery,
+  type RequirementContent, type VerificationCheck, type VerificationReport, type WorkerRecovery,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
@@ -201,16 +201,23 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         await this.move(client, task, 'RETRYING', { actorId: actor.id });
         task.status = 'RETRYING';
       }
-      const { rows: [planned] } = await client.query<{ plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null }>(
+      const { rows: [planned] } = await client.query<{
+        plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null; requirement: RequirementContent | null;
+      }>(
         `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent,
-           assignments->'QA_ENGINEER' AS qa
+           assignments->'QA_ENGINEER' AS qa,
+           CASE WHEN input ? 'requirement' THEN jsonb_build_object(
+             'title', input->'requirement'->>'title', 'excerpt', input->'requirement'->>'excerpt'
+           ) END AS requirement
          FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state = 'completed'`, [projectId, taskId]);
       if (planned && !planned.agent) throw new ConflictException('Approved developer assignment is missing');
       const { rows: [run] } = await client.query<ExecutionRun>(
         `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment, qa_assignment)
          SELECT $1, $2, id, check_plan, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
          RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
-        [projectId, taskId, task.repositoryId, planned ? { plan: planned.plan, agent: planned.agent } : null, planned?.qa ?? null],
+        [projectId, taskId, task.repositoryId, planned ? {
+          plan: planned.plan, agent: planned.agent, ...(planned.requirement && { requirement: planned.requirement }),
+        } : null, planned?.qa ?? null],
       );
       if (workerId) {
         await this.assignWorker(client, projectId, run.id, workerId);

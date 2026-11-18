@@ -255,6 +255,17 @@ const migrations = [
   CREATE INDEX execution_qa_queue ON execution_qa (state, updated_at);`,
   `ALTER TABLE repositories ADD COLUMN auto_draft_pr boolean NOT NULL DEFAULT false;`,
   `ALTER TABLE execution_runs ADD COLUMN requested_worker_id uuid REFERENCES workers(id);`,
+  `CREATE TABLE project_requirements (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL REFERENCES projects(id),
+    title varchar(200) NOT NULL,
+    excerpt text NOT NULL,
+    reference_url text NOT NULL,
+    approved_by varchar(100) NOT NULL,
+    approved_at timestamptz NOT NULL DEFAULT now(),
+    retired_at timestamptz
+  );
+  CREATE INDEX project_active_requirements ON project_requirements (project_id, approved_at DESC) WHERE retired_at IS NULL;`,
 ];
 
 @Injectable()

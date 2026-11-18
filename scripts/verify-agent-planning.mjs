@@ -95,6 +95,7 @@ try {
   const second = await project('AGENT-OTHER');
   const prefix = `/projects/${first.id}`;
   const overviewPath = `${prefix}/operations/overview`;
+  const requirementsPath = `${prefix}/requirements`;
   const registryPath = `${prefix}/agent-registry`;
   const developerPath = `${registryPath}/agents/FRONTEND_DEVELOPER`;
   const viewer = await request('/users', { token, status: 201, method: 'POST',
@@ -105,6 +106,16 @@ try {
   await request(registryPath, { status: 401 });
   await request(registryPath, { token: viewerToken, status: 404 });
   await request(`${prefix}/members/${viewer.id}`, { token, method: 'PUT', body: { role: 'viewer' }, status: 204 });
+  const approvedContent = { title: 'Approved settings requirement', excerpt: 'The settings page renders the saved value and covers the empty state.' };
+  const requirementBody = { ...approvedContent, referenceUrl: 'https://github.com/test/planning-fixture/issues/1' };
+  await request(requirementsPath, { token: viewerToken, method: 'POST', status: 403, body: requirementBody });
+  await request(requirementsPath, { token, method: 'POST', status: 400, body: { ...requirementBody, referenceUrl: 'javascript:alert(1)' } });
+  const requirement = await request(requirementsPath, { token, method: 'POST', status: 201, body: requirementBody });
+  const foreignRequirement = await request(`/projects/${second.id}/requirements`, {
+    token, method: 'POST', status: 201, body: { ...requirementBody, title: 'Other project requirement' },
+  });
+  assert.deepEqual((await request(requirementsPath, { token: viewerToken })).map(({ id }) => id), [requirement.id]);
+  await request(`/projects/${second.id}/requirements`, { token: viewerToken, status: 404 });
   assert.equal((await request(registryPath, { token: viewerToken })).agents.length, 8);
   await request(developerPath, { token: viewerToken, method: 'PUT', body: { enabled: false }, status: 403 });
 
@@ -134,16 +145,21 @@ try {
      VALUES ($1, $2, 'test', 'planning-fixture', 'https://github.com/test/planning-fixture', 'main', 1) RETURNING id`,
     [first.id, Number.parseInt(suffix, 16)],
   );
-  const input = { request: 'Add a settings page', repositoryId: repo.id };
+  const input = { request: 'Add a settings page', repositoryId: repo.id, requirementId: requirement.id };
   await request(`${prefix}/agent-plans`, { token: viewerToken, method: 'POST', body: input, status: 403 });
   await request(`/projects/${second.id}/agent-plans`, { token, method: 'POST', body: input, status: 404 });
   await request(`${prefix}/agent-plans`, { token, method: 'POST', body: input, status: 503 });
 
   const directStart = () => planning.start(account, first.id, input);
+  await assert.rejects(planning.start(account, first.id, { ...input, requirementId: foreignRequirement.id }), /not found/i);
   await request(`${registryPath}/agents/ARCHITECT`, { token, method: 'PUT', body: { enabled: false } });
   await assert.rejects(directStart(), /disabled/);
   await request(`${registryPath}/agents/ARCHITECT`, { token, method: 'PUT', body: { enabled: true } });
   const queued = await directStart();
+  assert.equal(queued.requirement.id, requirement.id);
+  await request(`${requirementsPath}/${requirement.id}`, { token, method: 'DELETE', status: 204 });
+  assert.deepEqual(await request(requirementsPath, { token }), []);
+  await assert.rejects(directStart(), /not found/i);
   const taskPath = `${prefix}/tasks/${queued.taskId}`;
   const planPath = `${taskPath}/agent-plan`;
   assert.equal(queued.state, 'queued');
@@ -173,6 +189,8 @@ try {
   const { plan: complete } = await request(planPath, { token });
   assert.equal(complete.state, 'completed');
   assert.equal(complete.stage, null);
+  assert.deepEqual(complete.requirement, requirement);
+  assert(modelCalls.every(({ input: modelInput }) => JSON.stringify(modelInput.approvedRequirement) === JSON.stringify(approvedContent)));
   assert.deepEqual(modelCalls.map(({ role }) => role), ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'PRODUCT_MANAGER', 'ARCHITECT']);
   assert.equal(modelCalls[2].agent.model, 'fixture-pm');
   assert.equal(modelCalls[2].agent.skills[0].version, 2);
@@ -193,6 +211,7 @@ try {
   assert.equal(rendered.status, 200);
   const html = await rendered.text();
   assert(html.includes('用 Agent 规划需求') && html.includes('批准方案') && html.includes('实施步骤') && html.includes('Agent 与 Skill'));
+  assert(html.includes(requirement.referenceUrl) && html.includes('规划使用的批准摘录'));
 
   await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
   await request(`${prefix}/repositories/${repo.id}/checks`, {
@@ -214,6 +233,7 @@ try {
   assert.equal(offer.development.agent.version, 2);
   assert.equal(offer.development.agent.model, config.model);
   assert.equal(offer.development.agent.skills[0].instructions, skillV2.instructions);
+  assert.deepEqual(offer.development.requirement, approvedContent);
   assert.equal(offer.archivePatch, true);
   assert.equal(offer.development.qa, undefined);
 
@@ -253,6 +273,7 @@ try {
   assert.deepEqual(qaCalls[1].input.task.acceptanceCriteria, outputs.PRODUCT_MANAGER.acceptanceCriteria);
   assert.equal(qaCalls[1].input.verification.patchHash, patchHash);
   assert.equal(qaCalls[1].input.verification.checks[0].name, 'unit');
+  assert.deepEqual(qaCalls[1].input.approvedRequirement, approvedContent);
   assert.equal(qaCalls[1].input.patch, patch.subarray(0, 64 * 1024).toString('utf8'));
   const [qaRun] = await request(`${taskPath}/executions`, { token });
   assert.equal(qaRun.qa.state, 'completed');
@@ -274,7 +295,8 @@ try {
     inputTokens: '40', cachedInputTokens: '10', outputTokens: '16' });
   assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
   assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
-  for (const action of ['task.approved', 'agent.step_completed', 'task.status_changed', 'agent.qa_completed', 'execution.reviewed']) {
+  for (const action of ['requirement.approved', 'requirement.retired', 'task.approved', 'agent.step_completed', 'task.status_changed',
+    'agent.qa_completed', 'execution.reviewed']) {
     assert(operations.audit.some((entry) => entry.action === action), `Missing ${action} in the project audit`);
   }
   assert.equal((await request(operationsPath, { token: viewerToken })).audit, null);
@@ -291,7 +313,7 @@ try {
   const metricsHtml = await metricsPage.text();
   assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
 
-  const cancelled = await planning.start(account, first.id, { ...input, request: 'Cancel during inference' });
+  const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference' });
   const inFlight = planning.runNext();
   await cancelledCallStarted;
   const cancelledPath = `${prefix}/tasks/${cancelled.taskId}`;
@@ -306,7 +328,7 @@ try {
   assert.deepEqual(plan.steps, []);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
-  process.stdout.write('Agent planning, Worker handoff, patch-bound QA, project usage and audit verified.\n');
+  process.stdout.write('Approved requirement snapshots, Agent planning, Worker handoff, patch-bound QA, project usage and audit verified.\n');
 } finally {
   await db.onModuleDestroy();
 }

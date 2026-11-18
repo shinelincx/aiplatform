@@ -1,10 +1,10 @@
 import {
-  Body, ConflictException, Controller, Get, HttpCode, Inject, Injectable, Logger, NotFoundException,
+  BadRequestException, Body, ConflictException, Controller, Get, HttpCode, Inject, Injectable, Logger, NotFoundException,
   type OnApplicationBootstrap, type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
-  type ArchitecturePlan, type ModelUsage, type ProductPlan } from '@ado/shared';
+  type ArchitecturePlan, type ModelUsage, type ProductPlan, type ProjectRequirement } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -22,7 +22,7 @@ interface PlanRecord {
   taskId: string;
   projectId: string;
   state: AgentPlan['state'];
-  input: { request: string; project: string; repository: string; baseBranch: string };
+  input: { request: string; project: string; repository: string; baseBranch: string; requirement?: ProjectRequirement };
   assignments: Partial<Record<AgentRole, AgentAssignment>>;
   steps: AgentPlan['steps'];
   error: string | null;
@@ -32,6 +32,7 @@ interface PlanRecord {
 function publicPlan(row: PlanRecord): AgentPlan {
   return {
     taskId: row.taskId, state: row.state, stage: planningRoles[row.steps.length] ?? null, steps: row.steps, error: row.error,
+    ...(row.input.requirement && { requirement: row.input.requirement }),
   };
 }
 
@@ -66,6 +67,8 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
     const input = objectInput(body);
     const repositoryId = textInput(input.repositoryId, 'repository ID', 36);
     const request = textInput(input.request, 'request', 8000);
+    const requirementId = input.requirementId ?? null;
+    if (requirementId !== null && !isWorkerId(requirementId)) throw new BadRequestException('Invalid requirement ID');
     return this.db.transaction(async (client) => {
       const project = await this.projects.access(actor.id, projectId, { write: true, active: true }, client);
       if (!isWorkerId(repositoryId)) throw new NotFoundException('Repository not found');
@@ -73,6 +76,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         `SELECT owner || '/' || repo_name AS "fullName", default_branch AS "baseBranch"
          FROM repositories WHERE project_id = $1 AND id = $2`, [projectId, repositoryId]);
       if (!repository) throw new NotFoundException('Repository not found');
+      const requirement = requirementId ? await this.projects.requirement(client, projectId, requirementId) : undefined;
       if (!this.model.available()) throw new ServiceUnavailableException('Planning provider is unconfigured');
       const registry = await this.registry.view(projectId, client);
       const assignments: PlanRecord['assignments'] = {};
@@ -102,9 +106,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       const { rows: [row] } = await client.query<PlanRecord>(
         `INSERT INTO task_agent_plans (project_id, task_id, state, input, assignments)
          VALUES ($1,$2,'queued',$3,$4) RETURNING ${planFields}`,
-        [projectId, taskId, { request, project: project.name, repository: repository.fullName, baseBranch: repository.baseBranch }, assignments]);
+        [projectId, taskId, {
+          request, project: project.name, repository: repository.fullName, baseBranch: repository.baseBranch, requirement,
+        }, assignments]);
       await this.tasks.event(client, task, 'task.created', { actorId: actor.id, status: task.status });
-      await this.tasks.event(client, task, 'agent.plan_queued', { actorId: actor.id });
+      await this.tasks.event(client, task, 'agent.plan_queued', { actorId: actor.id, ...(requirement && { requirementId: requirement.id }) });
       return publicPlan(row);
     });
   }
@@ -155,8 +161,10 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       let usage: ModelUsage | undefined;
       try {
         if (!agent) throw new Error('Planning role is missing');
+        const { requirement, ...intake } = row.input;
         const response = await this.model.generate(role, agent, {
-          ...row.input, priorSteps: row.steps, availableDevelopers: developers,
+          ...intake, priorSteps: row.steps, availableDevelopers: developers,
+          ...(requirement && { approvedRequirement: { title: requirement.title, excerpt: requirement.excerpt } }),
         });
         usage = response.usage;
         const output = validatePlanningOutput(role, response.output);

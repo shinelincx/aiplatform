@@ -8,6 +8,7 @@ const actions: Record<string, string> = {
   'task.approved': '批准任务方案', 'task.rejected': '驳回任务方案', 'execution.reviewed': '人工审核',
   'repository.checks_updated': '更新仓库检查与交付设置', 'delivery.queued': '提交发布请求',
   'execution.worker_reassigned': '调整 Worker 分配',
+  'requirement.approved': '登记已批准需求', 'requirement.retired': '撤下需求来源',
   'agent.step_completed': '完成规划阶段', 'agent.plan_failed': '规划阶段失败',
   'agent.qa_completed': '提交 QA 意见', 'agent.qa_failed': 'QA 失败', 'task.status_changed': '更新执行状态',
 };

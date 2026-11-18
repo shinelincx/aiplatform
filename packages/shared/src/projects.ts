@@ -31,6 +31,18 @@ export interface ProjectMember {
   role: ProjectRole;
 }
 
+export interface RequirementContent {
+  title: string;
+  excerpt: string;
+}
+
+export interface ProjectRequirement extends RequirementContent {
+  id: string;
+  referenceUrl: string;
+  approvedBy: string;
+  approvedAt: string;
+}
+
 export interface GitHubInstallation {
   id: number;
   account: string;

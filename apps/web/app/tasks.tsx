@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { canTransitionTask, taskPriorities, type Project, type RepositoryBinding, type Task,
-  type AgentPlan, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
-import { archiveTask, saveTask, startAgentPlan, transitionTask } from './actions';
+  type AgentPlan, type ProjectRequirement, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
+import { archiveTask, registerRequirement, retireRequirement, saveTask, startAgentPlan, transitionTask } from './actions';
 import { PlanProgress } from './agents';
 import { read } from './api-client';
 import { Executions } from './executions';
@@ -69,12 +69,14 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
   const tasks = await read<Task[]>(path) ?? [];
   const selected = tasks.find(({ id }) => selectedId === id);
   const canWrite = project.status === 'active' && project.role !== 'viewer';
-  const [task, events, repositories, planning] = await Promise.all([
+  const [task, events, repositories, planning, sources] = await Promise.all([
     selected ? read<TaskDetail>(`${path}/${selected.id}`) : null,
     selected ? read<TaskEvent[]>(`${path}/${selected.id}/events`) : null,
     canWrite ? read<RepositoryBinding[]>(`/projects/${project.id}/repositories`) : null,
     selected ? read<{ plan: AgentPlan | null }>(`${path}/${selected.id}/agent-plan`) : null,
+    read<ProjectRequirement[]>(`/projects/${project.id}/requirements`),
   ]);
+  const manageRequirements = project.role === 'owner' && project.status === 'active';
   const plan = planning?.plan;
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
   const boundRepository = repositories?.find(({ id }) => id === task?.repositoryId);
@@ -96,12 +98,38 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
           </Link>
         ))}
       </nav>
+      {(manageRequirements || Boolean(sources?.length)) && <details id="task-requirements">
+        <summary>已批准的需求来源</summary>
+        {sources?.length ? <ul className="members">{sources.map((source) => <li key={source.id}>
+          <div>
+            <a href={source.referenceUrl} rel="noreferrer">{source.title}</a>
+            <p className="description">{source.excerpt}</p>
+            <small>登记人 · {source.approvedBy}</small>
+          </div>
+          {manageRequirements && <form action={retireRequirement}>
+            <input type="hidden" name="projectId" value={project.id} />
+            <input type="hidden" name="requirementId" value={source.id} />
+            <button className="secondary">从新任务撤下</button>
+          </form>}
+        </li>)}</ul> : <p className="muted">尚未登记需求来源。</p>}
+        {manageRequirements && <form action={registerRequirement} className="fields">
+          <input type="hidden" name="projectId" value={project.id} />
+          <label>需求标题<input name="title" maxLength={200} required /></label>
+          <label>已批准的 Issue 或 PRD 链接<input name="referenceUrl" type="url" maxLength={2000} required /></label>
+          <label>批准内容摘录<textarea name="excerpt" maxLength={4000} required /></label>
+          <button>登记已批准需求</button>
+        </form>}
+      </details>}
       {canWrite && Boolean(repositories?.length) && <details><summary>用 Agent 规划需求</summary>
         <form className="fields" action={startAgentPlan}>
           <input type="hidden" name="projectId" value={project.id} />
           <label>目标仓库<select name="repositoryId" required>
             {repositories?.map(({ id, fullName }) => <option key={id} value={id}>{fullName}</option>)}
           </select></label>
+          {Boolean(sources?.length) && <label>采用已批准需求<select name="requirementId">
+            <option value="">未选择</option>
+            {sources?.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
+          </select></label>}
           <label>需求<textarea name="request" maxLength={8000} required /></label>
           <button>开始规划</button>
         </form>
