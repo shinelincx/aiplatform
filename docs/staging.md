@@ -27,11 +27,13 @@ docker compose -p ado-staging up -d --build --wait
 
 工作台和 `/health` 走 TLS 入口。发布到远端时，将 `ADO_STAGING_BIND` 设置为预发布主机的可达地址，并配置相应防火墙入口。基础 API、数据库、Redis 和对象存储端口绑定在主机回环地址。网关转发 Worker WebSocket、归档上传与签名 Webhook。 [Nginx WebSocket 转发](https://nginx.org/en/docs/http/websocket.html)
 
+预发布容器随 Docker 恢复运行。网关通过 Compose 的 DNS 跟踪 API 和 Web 容器地址，容器重建后仍使用原来的入口域名。主动停止的服务用 `docker compose -p ado-staging up -d --wait` 恢复。 [Docker 容器重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/) · [Nginx 动态解析上游](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#resolve)
+
 ## 接入 Worker 与验收
 
-按 [Windows + WSL2 Worker 安装与运行手册](windows-wsl-worker.md) 创建预发布专用实例。在预发布项目生成注册凭证，把 `API_BASE_URL` 设置为 HTTPS 网关地址，并在 Worker 上配置该证书的信任链。工作台中确认注册、心跳、Codex 能力和项目授权，然后派发一项人已审批的任务，检查 Worker 重连、离线检查、受测补丁和复验证据。
+按 [Windows + WSL2 Worker 安装与运行手册](windows-wsl-worker.md) 创建预发布专用实例。在预发布项目生成注册凭证，把 `API_BASE_URL` 设置为 HTTPS 网关地址。若使用私有 CA，将 CA 证书保存为实例目录下的 `ca.crt`。从独立 Worker 主机接入后，在工作台确认两个项目各自的注册、心跳、Codex 能力和项目授权。分别派发一项已人工审批的业务任务，记录需求链接、Worker 心跳、离线检查结果、补丁哈希和人工复验证据。
 
-本机演练可通过 `ADO_VERIFY_WORKER_URL=https://127.0.0.1:3443` 和 `NODE_EXTRA_CA_CERTS` 运行 Worker 协议检查。`scripts/verify-workers.mjs` 通过回环 TCP 转发器测试断线重连，使用证书包含的回环主机名。`scripts/verify-executions.mjs` 可使用同一 Compose 网络的 HTTPS 网关地址，证书须包含所用名称。协议夹具覆盖 WebSocket 领任务、事件回传、HTTPS 补丁上传和人工审核。Node 需在启动时加载 CA。
+CI 的 `compose` 作业通过 HTTPS 网关验证 Secure Cookie、Worker 注册与重连、领任务、事件回传、补丁上传、人工审核、探测失败和备份恢复。本机可用下面的命令复验 Worker 协议。`scripts/verify-workers.mjs` 通过回环 TCP 转发器测试断线重连，证书须包含测试使用的回环地址。Node 在进程启动时加载 CA。
 
 ```bash
 ADO_VERIFY_API_URL=http://127.0.0.1:43101 \
@@ -42,7 +44,13 @@ NODE_EXTRA_CA_CERTS=/absolute/path/to/staging-ca.crt \
 
 ## 检查运行异常和备份恢复
 
-从网关探测 `/health` 并检查 `docker compose -p ado-staging ps`；将探测失败配置为部署环境的服务告警。工作台项目概览的「需要处理」列出规划、执行、QA 和发布失败，以及缺少兼容 Worker 的排队任务。处理时先核对 Worker 心跳、执行租约、错误分类和发布状态，再决定重试或重新分配。
+用以下命令从待部署网络探测 HTTPS 入口。它校验 TLS 证书，并在 `/health` 或工作台首页未返回 HTTP 200 时以非零状态退出。可将该退出状态接入部署环境的告警。私有 CA 环境设置 `CURL_CA_BUNDLE=/absolute/path/to/staging-ca.crt`。
+
+```bash
+bash scripts/probe-staging.sh https://staging.example.com:3443
+```
+
+检查 `docker compose -p ado-staging ps` 确认组件健康。工作台项目概览的「需要处理」列出规划、执行、QA 和发布失败，以及缺少兼容 Worker 的排队任务。处理时先核对 Worker 心跳、执行租约、错误分类和发布状态，再决定重试或重新分配。
 
 备份命令会短暂停止该 Compose 项目中的写入服务。安排可接受的窗口，在继续使用同一组 Compose 文件和预发布环境配置时执行。
 

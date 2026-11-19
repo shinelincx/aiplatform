@@ -96,6 +96,9 @@ unset API_BASE_URL ADO_WORKER_ID ADO_WORKER_TOKEN ADO_CODEX_API_KEY ADO_CODEX_HT
 case ${1:-start} in
   start)
     exec >>"$instance/worker.log" 2>&1
+    if [[ -f $instance/ca.crt ]]; then
+      export NODE_EXTRA_CA_CERTS="$instance/ca.crt"
+    fi
     exec flock --nonblock --no-fork "$instance/worker.lock" "$node_bin" \
       --env-file="$instance/worker.env" --input-type=module -e '
         if (!process.env.ADO_WORKER_ID || !process.env.ADO_WORKER_TOKEN) {

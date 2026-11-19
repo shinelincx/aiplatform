@@ -114,6 +114,7 @@ const loginResult = await globalThis.fetch(web, {
 assert.equal(loginResult.status, 303, 'Expected Web login to redirect');
 const cookie = loginResult.headers.get('set-cookie');
 assert(cookie?.startsWith('ado_session=') && /HttpOnly/i.test(cookie), 'Expected secure session handling');
+if (new URL(web).protocol === 'https:') assert(/;\s*Secure(?:;|$)/i.test(cookie), 'Expected a Secure cookie over HTTPS');
 const dashboard = await globalThis.fetch(new URL(`/?project=${ado.id}`, web), {
   headers: { Cookie: cookie.split(';')[0] },
   signal: globalThis.AbortSignal.timeout(30000),
