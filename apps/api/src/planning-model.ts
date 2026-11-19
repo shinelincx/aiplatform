@@ -1,6 +1,35 @@
 import { developerRoles, type AgentAssignment, type ArchitecturePlan, type DirectorPlan, type ModelUsage,
-  type PlanningOutput, type PlanningRole, type ProductPlan } from '@ado/shared';
+  type PlanningFailureCategory, type PlanningOutput, type PlanningRole, type ProductPlan } from '@ado/shared';
 import { objectInput, textInput } from './input';
+
+export class PlanningFailure extends Error {
+  constructor(readonly category: PlanningFailureCategory) {
+    super(category);
+  }
+}
+
+function requestFailure(status: number): PlanningFailureCategory {
+  // A 403 alone cannot identify whether the credential lacks access to this particular model.
+  if (status === 401 || status === 403) return 'credentials_or_permissions';
+  if (status === 404) return 'model_unavailable'; // The provider URL is fixed.
+  if (status === 408) return 'network';
+  if (status === 429) return 'rate_limited';
+  if (status >= 500 && status < 600) return 'server_error';
+  return 'unknown';
+}
+
+function transportFailure(error: unknown): PlanningFailure {
+  if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) {
+    return new PlanningFailure('network');
+  }
+  const cause = error instanceof TypeError ? error.cause : undefined;
+  if (typeof cause === 'object' && cause !== null && 'code' in cause && typeof cause.code === 'string' &&
+    ['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
+      'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET'].includes(cause.code)) {
+    return new PlanningFailure('network');
+  }
+  return new PlanningFailure('unknown');
+}
 
 const string = { type: 'string' };
 const strings = { type: 'array', items: string };
@@ -18,6 +47,14 @@ function lines(input: unknown, key: string, required = false): string[] {
 }
 
 export function validatePlanningOutput(role: PlanningRole, input: unknown): PlanningOutput {
+  try {
+    return parsePlanningOutput(role, input);
+  } catch {
+    throw new PlanningFailure('invalid_structured_output');
+  }
+}
+
+function parsePlanningOutput(role: PlanningRole, input: unknown): PlanningOutput {
   const value = objectInput(input);
   if (role === 'PROJECT_DIRECTOR') {
     return {
@@ -73,8 +110,8 @@ export function responsesConfigured() {
 export async function generateStructuredOutput(agent: AgentAssignment, properties: object, instructions: string[],
   input: object): Promise<AgentResponse> {
   const key = process.env.ADO_AGENT_API_KEY?.trim();
-  if (!key) throw new Error('Responses provider is unconfigured');
-  const response = await fetch('https://api.openai.com/v1/responses', {
+  if (!key) throw new PlanningFailure('credentials_or_permissions');
+  const options = {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(90_000),
@@ -86,9 +123,23 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
       text: { format: { type: 'json_schema', name: agent.role.toLowerCase(), strict: true,
         schema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } } },
     }),
+  };
+  const response = await fetch('https://api.openai.com/v1/responses', options).catch((error: unknown) => {
+    throw transportFailure(error);
   });
-  if (!response.ok) throw new Error('Responses provider request failed');
-  const result = await response.json() as {
+  if (!response.ok) throw new PlanningFailure(requestFailure(response.status));
+  const result: unknown = await response.json().catch((error: unknown) => {
+    throw error instanceof SyntaxError ? new PlanningFailure('invalid_structured_output') : transportFailure(error);
+  });
+  try {
+    return decodeStructuredOutput(result);
+  } catch {
+    throw new PlanningFailure('invalid_structured_output');
+  }
+}
+
+function decodeStructuredOutput(input: unknown): AgentResponse {
+  const result = input as {
     status?: string;
     model?: string;
     output?: { type?: string; content?: { type?: string; text?: string }[] }[];

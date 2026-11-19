@@ -2,9 +2,9 @@ export type { Account, GitHubInstallation, GitHubRepository, Project, ProjectMem
   ProjectRequirement, RepositoryBinding, RequirementContent, Session } from './projects';
 export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
-export { agentRoleLabels, developerRoles, planningRoles } from './agents';
+export { agentRoleLabels, developerRoles, isPlanningFailureCategory, planningFailureMessages, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
-  DirectorPlan, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, SkillVersion } from './agents';
+  DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, SkillVersion } from './agents';
 export { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,
   workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,

@@ -276,6 +276,7 @@ const migrations = [
     output_usd numeric(15,6) NOT NULL CHECK (output_usd >= 0),
     UNIQUE (project_id, model)
   );`,
+  `ALTER TABLE task_agent_plans ADD COLUMN failure_category text;`,
 ];
 
 @Injectable()

@@ -152,7 +152,8 @@ export async function Tasks({ project, selectedId }: { project: Project; selecte
         {task.dependencies.length > 0 && <p>前置任务 {task.dependencies.map((id) => (
           <Link key={id} href={taskLink(id)} className="task-link">{labels.get(id)}</Link>
         ))}</p>}
-        {plan && <PlanProgress projectId={project.id} plan={plan} canRetry={canWrite && task.status === 'PLANNING'} />}
+        {plan && <PlanProgress projectId={project.id} plan={plan} showDiagnosis={project.role === 'owner'}
+          canRetry={canWrite && task.status === 'PLANNING'} />}
         {canWrite && !task.archivedAt && <>
           {!managedPlan && editable.includes(task.status) && <details><summary>编辑任务</summary>
             <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories ?? []} />
