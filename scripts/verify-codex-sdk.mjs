@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Codex } from '@openai/codex-sdk';
 import { WebSocketServer } from 'ws';
 import { configureExecution, isolatedProfile, summarizeItem } from '../apps/worker/dist/codex-execution.js';
+import { checkTempDirectory, runVerification } from '../apps/worker/dist/verification.js';
 
 const fixtureKey = 'ado-local-sdk-fixture';
 const revisions = ['implemented by SDK fixture', 'repaired by SDK fixture'];
@@ -42,6 +43,22 @@ async function verify() {
       ADO_EXECUTION_ROOT: jobs, ADO_CODEX_STATE_DIR: state, ADO_CODEX_API_KEY: '', ADO_NPM_CACHE_ROOT: '', ADO_MAVEN_CACHE_ROOT: '',
     });
     const runtime = await configureExecution();
+    const tempDirectory = join(root, checkTempDirectory);
+    await mkdir(tempDirectory);
+    const [check, failure] = await runVerification({
+      binary: runtime.binary, env: runtime.env, worktree: checkout, tempDirectory,
+      profile: isolatedProfile(checkout, source, runtime.binary, tempDirectory),
+    }, [{
+      name: 'temporary-directory', kind: 'static', directory: '.', timeoutSeconds: 5,
+      argv: ['sh', '-c', 'test "$TMPDIR" = "$1" && test ! -w /tmp && printf ok > "$TMPDIR/proof"', 'ado-check', tempDirectory],
+    }, {
+      name: 'failure-output', kind: 'static', directory: '.', timeoutSeconds: 5,
+      argv: ['node', '-e', 'console.error(process.argv[1]); process.exitCode = 7', 'check diagnostics'],
+    }], globalThis.AbortSignal.timeout(10000));
+    assert.equal(check?.result.status, 'passed');
+    assert.equal(await readFile(join(tempDirectory, 'proof'), 'utf8'), 'ok');
+    assert.equal(failure?.result.exitCode, 7);
+    assert.equal(failure?.diagnostic, 'check diagnostics');
     let sequence = 0;
     let revision = 0;
     let shellTool;

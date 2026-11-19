@@ -67,7 +67,7 @@ Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研�
 
 ## 执行已审批任务
 
-在非 root Linux 或 WSL 上使用 Node.js 24、Git 和 Codex CLI `0.170.0`。从 npm 安装依赖后，为 Worker 设置以下环境变量。
+在非 root Linux 或 WSL 上使用 Node.js 24、Bash、Git 和 Codex CLI `0.170.0`。如果 CLI 自带 bubblewrap，安装时保留它的 `codex-resources` 目录。从 npm 安装依赖后，为 Worker 设置以下环境变量。
 
 | 变量 | 用途 |
 | --- | --- |
@@ -112,11 +112,13 @@ ADO_CODEX_BIN=/absolute/path/to/codex node scripts/verify-codex-sdk.mjs
 ]
 ```
 
-派发时会保存该任务的检查计划快照。Worker 在同一无网络沙箱中执行检查，并确认检查前后的候选补丁一致。检查所需工具和依赖须已在隔离环境中可用。普通检查失败可在同一工作区和 Codex 线程内修复两次。每项失败检查最多提供 4 KiB 诊断尾部给修复轮次，控制面只记录状态、原因分类、退出码和耗时。超时、工具不可用或候选补丁被检查命令改动时结束运行。
+派发时会保存该任务的检查计划快照。Worker 在无网络沙箱中执行检查，并确认检查前后的候选补丁一致。检查工具通过 `TMPDIR` 使用任务内的临时目录，该目录位于 Git 工作区外。检查所需工具和依赖须已在隔离环境中可用。普通检查失败可在同一工作区和 Codex 线程内修复两次。每项失败检查最多提供 4 KiB 诊断尾部给修复轮次，控制面只记录状态、原因分类、退出码和耗时。超时、工具不可用或候选补丁被检查命令改动时结束运行。
 
 使用 npm 的项目可以在与 Worker 同平台的可信检出目录预热该仓库的专用缓存。例如在已检出的 Fitbest 目录中运行 `npm --prefix fit-best-trainer ci --ignore-scripts --no-audit --no-fund --cache /srv/ado-caches/shinelincx/fitbest`，并设置 Worker 的 `ADO_NPM_CACHE_ROOT=/srv/ado-caches`。为其他使用到的 npm 子包重复预热，使用同一个仓库缓存。
 
 将对应目录的 `["npm","ci","--offline","--ignore-scripts","--no-audit","--no-fund"]` 放在依赖它的检查前。Worker 仅将选中仓库的 `_cacache` 复制到当前任务的检查沙箱。缓存写入保留在该任务内，检查仍运行在无网络沙箱中。请在仓库中忽略安装生成的 `node_modules`。 [npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci) · [npm 缓存](https://docs.npmjs.com/cli/v11/commands/npm-cache)
+
+ADO 自身的沙箱检查在仓库根目录依次离线安装依赖、运行 `npm run lint`、`npm run typecheck` 和 `npm test`。GitHub Actions 再执行生产构建、Compose 联调和备份恢复。
 
 对 Maven 项目，在 Worker 的系统目录安装 JDK 和 Maven，使 `java` 和 `mvn` 可从系统 `PATH` 找到。在可信检出目录预热与检查对应的依赖和插件。以 Fitbest 为例，在 `fitbest-server` 目录用 Java 21 运行 `mvn --batch-mode --no-transfer-progress -Dmaven.repo.local=/srv/ado-maven/shinelincx/fitbest/repository test`，然后设置 `ADO_MAVEN_CACHE_ROOT=/srv/ado-maven`。Worker 复制该仓库的 `repository` 到任务目录，并为 `mvn` 自动设置离线模式、依赖路径和 JVM 临时目录。[Maven CLI](https://maven.apache.org/ref/3.9.11/maven-embedder/cli.html)
 

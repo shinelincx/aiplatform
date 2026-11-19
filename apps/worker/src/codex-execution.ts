@@ -6,7 +6,7 @@ import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { canRepair, maxVerificationAttempts, type ExecutionOffer, type VerificationReport } from '@ado/shared';
 import type { ThreadEvent } from '@openai/codex-sdk' with { 'resolution-mode': 'import' };
-import { runVerification } from './verification';
+import { checkTempDirectory, runVerification } from './verification';
 import { copyRepositoryCache } from './repository-cache';
 
 const exec = promisify(execFile);
@@ -209,6 +209,8 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       }) : undefined;
     const npmCache = checks.length > 0 ? await prepareCache(runtime.npmCacheRoot, 'npm') : undefined;
     const mavenCache = checks.some(({ argv }) => argv[0] === 'mvn') ? await prepareCache(runtime.mavenCacheRoot, 'maven') : undefined;
+    const tempDirectory = checks.length ? join(jobRoot, checkTempDirectory) : undefined;
+    if (tempDirectory) await mkdir(tempDirectory, { mode: 0o700 });
     await report('progress', { stage: 'inference' });
     const { Codex } = await import('@openai/codex-sdk');
     const profile = isolatedProfile(worktree, gitDir, runtime.binary);
@@ -226,8 +228,8 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria,
       ...(offer.development && { development: offer.development }),
     };
-    const cachePaths = [npmCache, mavenCache].filter((path) => path !== undefined);
-    const verificationProfile = isolatedProfile(worktree, gitDir, runtime.binary, ...cachePaths);
+    const writablePaths = [tempDirectory, npmCache, mavenCache].filter((path) => path !== undefined);
+    const verificationProfile = isolatedProfile(worktree, gitDir, runtime.binary, ...writablePaths);
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
@@ -286,7 +288,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       if (!checks.length) return;
 
       const executions = await runVerification({
-        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, npmCache, mavenCache,
+        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, tempDirectory, npmCache, mavenCache,
       }, checks, signal);
       const results = executions.map(({ result }) => result);
       await git(['add', '-A']);

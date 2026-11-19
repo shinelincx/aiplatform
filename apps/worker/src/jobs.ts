@@ -5,6 +5,7 @@ import { canRepair, isWorkerId, maxPatchBytes, parseCheckPlan, type ExecutionOff
   type WorkerRecovery } from '@ado/shared';
 import { configureExecution, executeCodex } from './codex-execution';
 import { jobCacheDirectories } from './repository-cache';
+import { checkTempDirectory } from './verification';
 
 type Runtime = NonNullable<Awaited<ReturnType<typeof configureExecution>>>;
 type Pending = { kind: string; payload: object };
@@ -198,7 +199,7 @@ export class WorkerJobs {
   private async finish(job: Job) {
     const directory = join(this.runtime.root, job.checkpoint.id);
     if (!job.recovered && await lstat(directory).then((entry) => entry.isDirectory(), () => false)) {
-      await Promise.all(['checkout', 'source.git', ...jobCacheDirectories].map((path) =>
+      await Promise.all(['checkout', 'source.git', checkTempDirectory, ...jobCacheDirectories].map((path) =>
         rm(join(directory, path), { recursive: true, force: true }).catch(() => undefined)));
     }
     await rename(this.checkpointPath, join(this.runtime.root, `${job.checkpoint.id}.events.json`));
