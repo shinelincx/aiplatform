@@ -277,6 +277,7 @@ const migrations = [
     UNIQUE (project_id, model)
   );`,
   `ALTER TABLE task_agent_plans ADD COLUMN failure_category text;`,
+  `ALTER TABLE execution_runs ADD COLUMN review_evidence jsonb NOT NULL DEFAULT '[]';`,
 ];
 
 @Injectable()

@@ -3,10 +3,25 @@ import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
 import type { RequirementContent } from './projects';
 
+export interface ExecutionRevision {
+  runId: string;
+  patchHash: string;
+  reason: string;
+}
+
+export interface ReviewEvidence {
+  patchHash: string;
+  summary: string;
+  url?: string;
+  author: string;
+  recordedAt: string;
+}
+
 export interface DevelopmentHandoff {
   agent: AgentAssignment;
   plan?: ArchitecturePlan;
   requirement?: RequirementContent;
+  revision?: ExecutionRevision;
 }
 
 export interface ExecutionOffer {
@@ -44,6 +59,8 @@ export interface ExecutionRun {
   artifact: PatchArtifact | null;
   delivery: ExecutionDelivery | null;
   qa?: ExecutionQa | null;
+  revision?: ExecutionRevision | null;
+  evidence?: ReviewEvidence[];
 }
 
 export interface ExecutionEvent {

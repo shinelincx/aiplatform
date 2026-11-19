@@ -47,6 +47,8 @@ API 和 Web 源码挂载到开发容器。修改共享包、依赖或配置后�
 
 ## 注册 Worker
 
+Windows 主机可以按 [Windows + WSL2 Worker 安装与运行手册](docs/windows-wsl-worker.md) 安装独立实例，配置离线缓存并注册登录自启动。
+
 项目所有者可在工作台的“项目 Worker”中生成注册凭证。将 `ADO_WORKER_ID` 和 `ADO_WORKER_TOKEN` 加入 Worker 进程的环境变量，从仓库根目录执行以下命令。
 
 ```sh
@@ -141,6 +143,8 @@ Fitbest 的沙箱检查可使用下面的检查计划。测试 JVM 从任务缓�
 
 全部检查通过后，项目所有者可批准或驳回该候选补丁，驳回需填写原因。检查计划为空的任务停在“待测试”，配置计划后可重新派发。
 
+审核前可为当前归档补丁补录复验结果和证据链接。候选驳回后，可以在原任务按驳回意见派发修订。修订 Worker 从仓库基线签出，收到上一轮执行、补丁摘要和驳回意见。新候选独立检查并回到人工审核。历史执行保留各自的补丁、证据和审核决定。
+
 通过 Agent 规划的任务由支持补丁归档的 Worker 运行检查。全部检查通过后，QA Agent 会向 OpenAI Responses API 发送已校验的补丁内容（最多 64 KiB）、验收条件和检查报告，返回建议验证用例和发现。QA 结果进入工作台后由项目所有者决定是否批准。QA 失败可使用同一补丁重试。
 
 项目工作台的“项目用量与审计”按岗位和模型汇总已记录的输入、缓存和输出 token。每轮 Codex 完成后保存累计用量，汇总时每次运行只计入已回传的最新值。失败、无变更或取消的运行也计入已报告的用量。项目所有者还可查看最近的配置、审批、Agent 和 Worker 记录。
@@ -158,6 +162,8 @@ GitHub App 可把 Pull requests、Push 和 Check runs 事件发送到控制面�
 在本地试点或 Webhook 延迟时，项目所有者可以在执行记录中点击“同步 GitHub PR 状态”。控制面使用该仓库的只读安装凭证查询 PR，并核对来源分支、目标分支和受测提交后记录合并结果。[GitHub PR 查询权限](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)
 
 ## 备份与恢复
+
+预发布环境的独立 Compose 配置、HTTPS/WSS 接入和恢复演练见 [ADO 预发布环境](docs/staging.md)。
 
 在 Bash 或 WSL 中运行 `scripts/compose-backup.sh`。备份会短暂停止控制面和对象存储，生成 PostgreSQL 逻辑备份、SeaweedFS 数据卷归档和 SHA-256 清单，随后恢复原本运行的服务。请把备份存到仓库之外，为备份目录保留项目数据所需的访问权限。
 

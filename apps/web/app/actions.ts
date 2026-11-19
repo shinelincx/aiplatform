@@ -279,7 +279,10 @@ export async function startExecution(form: FormData) {
   if (!id) redirect(query);
   const workerId = form.get('workerId') || null;
   if (workerId && !isWorkerId(workerId)) redirect(`${query}&issue=worker-assignment#task-detail`);
-  const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId }) });
+  const revisionOf = form.get('revisionOf') || null;
+  if (revisionOf && !isWorkerId(revisionOf)) redirect(`${query}&issue=revision#task-detail`);
+  const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId, revisionOf }) });
+  if (!response?.ok && revisionOf) redirect(`${query}&issue=revision#task-detail`);
   if (!response?.ok) redirect(`${query}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
   redirect(`${query}#task-detail`);
 }
@@ -312,6 +315,17 @@ export async function reviewExecution(form: FormData) {
     method: 'POST', body: JSON.stringify({ decision: form.get('decision'), comment: form.get('comment') }),
   });
   if (!response?.ok) redirect(`${query}&issue=${issue(response, 'review')}#task-detail`);
+  redirect(`${query}#task-detail`);
+}
+
+export async function addExecutionEvidence(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  if (!id || !isWorkerId(runId)) redirect(query);
+  const response = await execute(`${endpoint}/executions/${runId}/evidence`, {
+    method: 'POST', body: JSON.stringify({ patchHash: form.get('patchHash'), summary: form.get('summary'), url: form.get('url') }),
+  });
+  if (!response?.ok) redirect(`${query}&issue=evidence#task-detail`);
   redirect(`${query}#task-detail`);
 }
 

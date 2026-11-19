@@ -9,7 +9,7 @@ export { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs,
   workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,
   WorkerRecovery, WorkerReport, WorkerResources } from './workers';
-export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRun, ExecutionState } from './executions';
+export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRevision, ExecutionRun, ExecutionState, ReviewEvidence } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
 export { canRepair, checkFailureStatuses, maxVerificationAttempts, parseCheckPlan } from './verification';

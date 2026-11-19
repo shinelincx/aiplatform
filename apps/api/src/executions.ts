@@ -7,7 +7,7 @@ import type { PoolClient } from 'pg';
 import {
   canRepair, canTransitionTask, checkFailureStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
   type CheckFailureReason, type CheckResult,
-  type DevelopmentHandoff, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun,
+  type AgentAssignment, type DevelopmentHandoff, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type ReviewEvidence,
   type Task, type TaskStatus, type VerificationCheck, type VerificationReport, type WorkerRecovery,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -21,7 +21,8 @@ import { workerCanVerify, workerDiskReady, workerMatchesAssignment, type WorkerI
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
-  finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId"`;
+  finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId",
+  developer_assignment->'revision' AS revision, review_evidence AS evidence`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
@@ -205,13 +206,30 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   async queue(actor: Account, projectId: string, taskId: string, body?: unknown) {
     const workerId = requestedWorker(body);
+    const { revisionOf } = objectInput(body ?? {});
+    if (revisionOf != null && !isWorkerId(revisionOf)) throw new BadRequestException('Invalid rejected execution ID');
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const task = await this.tasks.find(projectId, taskId, client);
-      if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT', 'TESTING'].includes(task.status)) {
+      const revising = task.status === 'REJECTED';
+      if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT', 'TESTING', 'REJECTED'].includes(task.status)
+        || revising !== Boolean(revisionOf)) {
         throw new ConflictException('An approved task and bound repository are required');
       }
       if (!task.acceptanceCriteria.length) throw new ConflictException('Acceptance criteria are required');
+      const { rows: [prior] } = task.status !== 'READY' ? await client.query<{
+        id: string; repositoryId: string; patchHash: string | null; decision: string | null; comment: string | null;
+        development: DevelopmentHandoff | null; qa: AgentAssignment | null;
+      }>(
+        `SELECT r.id, r.repository_id AS "repositoryId", r.verification_report->>'patchHash' AS "patchHash",
+           h.decision, h.comment, r.developer_assignment AS development, r.qa_assignment AS qa
+         FROM execution_runs r LEFT JOIN execution_reviews h ON h.run_id = r.id
+         WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, [projectId, taskId],
+      ) : { rows: [] };
+      if (revising && (!prior || prior.id !== revisionOf || prior.repositoryId !== task.repositoryId
+        || prior.decision !== 'rejected' || !prior.patchHash || !prior.comment)) {
+        throw new ConflictException('Only the latest rejected candidate can be sent back for revision');
+      }
       if (task.status === 'TESTING') {
         const { rows: [previous] } = await client.query<{ status: string; hasReport: boolean; configured: boolean }>(
           `SELECT r.status, r.verification_report IS NOT NULL AS "hasReport",
@@ -230,13 +248,17 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
       const planned = await this.tasks.plannedDevelopment(client, task);
       const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);
-      const handoff: DevelopmentHandoff = { agent, ...(planned && { plan: planned.plan }),
+      const existing = (revising || prior?.development?.revision) ? prior?.development : null;
+      const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
         ...(planned?.requirement && { requirement: planned.requirement }) };
+      if (revising && prior?.patchHash && prior.comment) {
+        handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
+      }
       const { rows: [run] } = await client.query<ExecutionRun>(
         `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment, qa_assignment)
          SELECT $1, $2, id, check_plan, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
          RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
-        [projectId, taskId, task.repositoryId, handoff, planned?.qa ?? null],
+        [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
       );
       if (workerId) {
         await this.assignWorker(client, projectId, run.id, workerId);
@@ -244,7 +266,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
         ...(workerId && { requestedWorkerId: workerId }),
-        developer: agent.role, developerVersion: agent.version });
+        ...(handoff.revision && { revisionOf: handoff.revision.runId, previousPatchHash: handoff.revision.patchHash }),
+        developer: handoff.agent.role, developerVersion: handoff.agent.version });
+      if (revising) await this.projects.audit(client, actor.id, projectId, 'execution.revision_queued', run.id);
       return run;
     });
   }
@@ -315,6 +339,45 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       if (decision === 'rejected') await this.move(client, task, 'REJECTED', { runId, actorId: actor.id });
       else await this.deliveries.enqueueApproved(client, actor.id, task, runId, true);
       return saved;
+    });
+  }
+
+  async addEvidence(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
+    const input = objectInput(body);
+    const patchHash = textInput(input.patchHash, 'patch hash', 64);
+    if (!/^[0-9a-f]{64}$/.test(patchHash)) throw new BadRequestException('Invalid patch hash');
+    const summary = textInput(input.summary, 'review evidence', 2000);
+    const rawUrl = textInput(input.url ?? '', 'evidence URL', 1000, true);
+    const url = rawUrl ? URL.parse(rawUrl) : null;
+    if (rawUrl && (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password)) {
+      throw new BadRequestException('Evidence URL must be an HTTP or HTTPS link');
+    }
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [run] } = await client.query<ExecutionRun>(
+        `SELECT ${runColumns} FROM execution_runs WHERE project_id = $1 AND task_id = $2
+         ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [projectId, taskId],
+      );
+      if (!run || run.id !== runId) throw new NotFoundException('Current execution run not found');
+      const task = await this.tasks.find(projectId, taskId, client);
+      if (task.archivedAt || task.status !== 'REVIEW' || run.status !== 'succeeded'
+        || !run.report?.passed || run.report.patchHash !== patchHash) {
+        throw new ConflictException('Evidence requires the current tested patch in review');
+      }
+      const archived = await client.query(
+        `SELECT 1 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2
+         AND NOT EXISTS (SELECT 1 FROM execution_reviews WHERE run_id = $1)`, [runId, patchHash]);
+      if (!archived.rowCount || (run.evidence?.length ?? 0) >= 10) {
+        throw new ConflictException('Evidence requires an archived patch and at most ten entries');
+      }
+      const evidence: ReviewEvidence = {
+        patchHash, summary, ...(url && { url: url.href }), author: actor.name, recordedAt: new Date().toISOString(),
+      };
+      await client.query('UPDATE execution_runs SET review_evidence = review_evidence || $2::jsonb WHERE id = $1',
+        [runId, JSON.stringify([evidence])]);
+      await this.tasks.event(client, task, 'task.review_evidence_added', { runId, patchHash, actorId: actor.id });
+      await this.projects.audit(client, actor.id, projectId, 'execution.evidence_added', runId);
+      return evidence;
     });
   }
 
@@ -601,5 +664,11 @@ export class ExecutionsController {
   review(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string, @Body() body: unknown) {
     return this.executions.review(actor, projectId, taskId, runId, body);
+  }
+
+  @Post(':runId/evidence')
+  addEvidence(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string, @Body() body: unknown) {
+    return this.executions.addEvidence(actor, projectId, taskId, runId, body);
   }
 }
