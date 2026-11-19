@@ -174,7 +174,11 @@ async function checkout(runtime: Runtime, offer: ExecutionOffer, signal: AbortSi
     await mkdir(jobRoot, { mode: 0o700 });
     await exec('git', ['-c', 'http.followRedirects=false', 'clone', '--bare', '--single-branch', '--depth=1',
       '--branch', offer.defaultBranch, '--', `https://github.com/${offer.repository}.git`, gitDir], {
-      cwd: jobRoot, env: gitEnv(runtime, offer.repositoryToken), signal, timeout: 120_000, maxBuffer: 1024 * 1024,
+      cwd: jobRoot, env: {
+        ...gitEnv(runtime, offer.repositoryToken),
+        ...(runtime.codexEnv.HTTPS_PROXY && { HTTPS_PROXY: runtime.codexEnv.HTTPS_PROXY }),
+      },
+      signal, timeout: 120_000, maxBuffer: 1024 * 1024,
     });
     await exec('git', ['--git-dir', gitDir, 'worktree', 'add', '-b', `feature/${offer.id}`, '--', worktree, 'HEAD'], {
       cwd: jobRoot, env: gitEnv(runtime), signal, timeout: 120_000, maxBuffer: 1024 * 1024,

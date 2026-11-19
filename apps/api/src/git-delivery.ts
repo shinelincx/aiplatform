@@ -33,6 +33,7 @@ export async function pushCandidate(candidate: GitCandidate, signal: AbortSignal
   const blank = process.platform === 'win32' ? 'NUL' : '/dev/null';
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TMPDIR: cwd, TEMP: cwd, TMP: cwd,
+    HTTPS_PROXY: process.env.HTTPS_PROXY,
     HOME: cwd, GIT_CONFIG_GLOBAL: blank, GIT_CONFIG_SYSTEM: blank, GIT_TERMINAL_PROMPT: '0',
     GIT_AUTHOR_NAME: 'ADO Platform', GIT_AUTHOR_EMAIL: 'ado@users.noreply.github.com',
     GIT_COMMITTER_NAME: 'ADO Platform', GIT_COMMITTER_EMAIL: 'ado@users.noreply.github.com',

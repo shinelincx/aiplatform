@@ -61,7 +61,7 @@ npm run dev -w @ado/worker
 
 在 `.env` 设置 `ADO_AGENT_API_KEY` 和支持 Structured Outputs 的 `ADO_AGENT_MODEL`，再重启 API。项目成员可在“用 Agent 规划需求”选择项目仓库并输入需求。控制面将需求和仓库标识发给 OpenAI Responses API，由项目总监、产品经理和架构师依次整理范围、验收条件、实施步骤与风险。任务工作台会保留各阶段结果。失败时可从失败阶段重试，项目所有者审批后才可派发。
 
-OpenAI 请求需要经代理时，在 `.env` 设置 `ADO_API_HTTPS_PROXY`，地址须能从 API 容器访问。GitHub 和本地 Compose 服务保持直连。
+OpenAI 请求或 Git 发布需要经代理时，在 `.env` 设置 `ADO_API_HTTPS_PROXY`，地址须能从 API 容器访问。GitHub REST API 和本地 Compose 服务保持直连。
 
 Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研发任务中登记来源链接与批准摘录，再从规划表单选择该需求。任务保存所选版本，规划、开发和 QA 都使用同一份摘录。撤下来源只影响新任务，现有任务仍可查看已采用的链接与摘录。
 
@@ -77,7 +77,7 @@ Fitbest 试点使用当前已批准的 Issue 或 PRD。项目所有者可在研�
 | `ADO_CODEX_BIN` | Codex CLI 原生可执行文件的绝对路径 |
 | `ADO_CODEX_STATE_DIR` | 独立 Codex 状态目录的绝对路径，需预先创建，且位于工作目录之外 |
 | `ADO_CODEX_API_KEY` | 可选，设定后用于模型认证。也可通过 Codex CLI 在独立状态目录中登录 |
-| `ADO_CODEX_HTTPS_PROXY` | 可选，Worker 可访问的 HTTP(S) 代理地址，仅传给发起模型请求的 Codex CLI |
+| `ADO_CODEX_HTTPS_PROXY` | 可选，Worker 可访问的 HTTP(S) 代理地址，用于签出源代码和 Codex 模型请求 |
 | `ADO_MIN_FREE_DISK_MIB` | 执行目录的最低可用磁盘空间，默认 256 MiB |
 | `ADO_NPM_CACHE_ROOT` | 可选，存放各仓库 npm 缓存的绝对路径 |
 | `ADO_MAVEN_CACHE_ROOT` | 可选，存放各仓库 Maven 缓存的绝对路径 |
