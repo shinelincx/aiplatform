@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "baseline": "Post-MVP Evolution Roadmap V1.0",
+  "actual_status": "unverified",
+  "prerequisite": "MVP human acceptance evidence",
+  "phase_order": [
+    "P1",
+    "P2",
+    "P3",
+    "P4",
+    "P5"
+  ],
+  "phases": [
+    {
+      "id": "P1",
+      "name": "Fitbest 真实业务验证",
+      "status": "planned",
+      "actual_status": "unverified",
+      "entry_gate": "MVP"
+    },
+    {
+      "id": "P2",
+      "name": "专业研发能力",
+      "status": "planned",
+      "actual_status": "unverified",
+      "entry_gate": "P1"
+    },
+    {
+      "id": "P3",
+      "name": "ADO 自我迭代",
+      "status": "planned",
+      "actual_status": "unverified",
+      "entry_gate": "P2"
+    },
+    {
+      "id": "P4",
+      "name": "多项目规模化",
+      "status": "planned",
+      "actual_status": "unverified",
+      "entry_gate": "P3"
+    },
+    {
+      "id": "P5",
+      "name": "受控主动研发",
+      "status": "planned",
+      "actual_status": "unverified",
+      "entry_gate": "P4"
+    }
+  ]
+}

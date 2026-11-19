@@ -1,0 +1,685 @@
+{
+  "schema_version": "1.0",
+  "status": "planning_only",
+  "tasks": [
+    {
+      "id": "B00",
+      "title": "核查 MVP 与两项目基线",
+      "phase": "MVP",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "PROJECT_DIRECTOR",
+      "dependencies": [],
+      "labels": [
+        "ado-post-mvp",
+        "phase:mvp",
+        "priority:p0",
+        "role:project-director"
+      ],
+      "inputs": "两仓库、五项基础设计、MVP 验收及授权",
+      "outputs": "事实与差距报告",
+      "acceptance_criteria": [
+        "记录仓库提交、文档版本、MVP 每项证据及缺口；缺证据阻塞实施"
+      ],
+      "phase_gate": "MVP",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-01",
+      "title": "接入核查与项目隔离",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "PROJECT_DIRECTOR",
+      "dependencies": [
+        "B00"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p0",
+        "role:project-director"
+      ],
+      "inputs": "项目授权、仓库与配置",
+      "outputs": "项目边界与隔离报告",
+      "acceptance_criteria": [
+        "列出授权、代码/知识/凭证边界及未验证项，不暴露秘密"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-02",
+      "title": "核对冻结 PRD 与选择试点",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "PRODUCT_MANAGER",
+      "dependencies": [
+        "P1-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p0",
+        "role:product-manager"
+      ],
+      "inputs": "批准 PRD、现有功能和业务负责人",
+      "outputs": "候选任务与需求追踪",
+      "acceptance_criteria": [
+        "候选在批准范围、明确输入输出、可自动测试、涉及至少两个前后端模块；不得假设缺失"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-03",
+      "title": "架构和接口方案",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "ARCHITECT",
+      "dependencies": [
+        "P1-02"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p0",
+        "role:architect"
+      ],
+      "inputs": "现有代码、候选需求、架构资料",
+      "outputs": "方案、数据流、风险与回滚",
+      "acceptance_criteria": [
+        "映射现有接口与业务逻辑，标明重大变更审批与测试"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-04",
+      "title": "用户流程与设计核对",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "UI_UX",
+      "dependencies": [
+        "P1-02"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p1",
+        "role:ui-ux"
+      ],
+      "inputs": "批准设计、候选需求",
+      "outputs": "流程、状态及设计验收",
+      "acceptance_criteria": [
+        "覆盖相关正常、错误和空状态；符合已批准规范"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-05",
+      "title": "实现前端增量",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P1-03",
+        "P1-04"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p1",
+        "role:developer"
+      ],
+      "inputs": "已通过 G1/G2 的前端范围",
+      "outputs": "隔离分支变更与测试",
+      "acceptance_criteria": [
+        "与需求和设计可追溯；相关测试通过或说明阻塞"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-06",
+      "title": "实现后端与接口增量",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P1-03"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p1",
+        "role:developer"
+      ],
+      "inputs": "已通过 G1/G2 的接口范围",
+      "outputs": "隔离分支变更与测试",
+      "acceptance_criteria": [
+        "接口契约、权限、业务逻辑及相关测试有证据"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-07",
+      "title": "独立端到端 QA",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P1-05",
+        "P1-06"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "代码、需求追踪、测试环境",
+      "outputs": "测试报告与缺陷",
+      "acceptance_criteria": [
+        "覆盖验收标准、边界与回归；业务不符判失败；未执行项明确列出"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P1-08",
+      "title": "PR、人工验收与交付",
+      "phase": "P1",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "RELEASE",
+      "dependencies": [
+        "P1-07"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p1",
+        "priority:p0",
+        "role:release"
+      ],
+      "inputs": "测试报告、PR、回滚及审批",
+      "outputs": "交付报告与门禁记录",
+      "acceptance_criteria": [
+        "独立审查、人工业务验收和必要合并批准均有证据；发布另行批准"
+      ],
+      "phase_gate": "P1",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-01",
+      "title": "岗位标准与重复性评估",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "PROJECT_DIRECTOR",
+      "dependencies": [
+        "P1-08"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p1",
+        "role:project-director"
+      ],
+      "inputs": "P1 报告、现有岗位",
+      "outputs": "岗位 V2 和评估",
+      "acceptance_criteria": [
+        "不同实例对同类任务按统一标准完成并留可比较证据"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-02",
+      "title": "技能生命周期",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "ARCHITECT",
+      "dependencies": [
+        "P2-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p1",
+        "role:architect"
+      ],
+      "inputs": "现有技能及审批政策",
+      "outputs": "版本、评估、审批与回滚方案和实现",
+      "acceptance_criteria": [
+        "版本化、审核、启用及回滚得到可复现验证"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-03",
+      "title": "设计系统治理",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "UI_UX",
+      "dependencies": [
+        "P2-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p1",
+        "role:ui-ux"
+      ],
+      "inputs": "已批准设计系统",
+      "outputs": "检索与一致性规则",
+      "acceptance_criteria": [
+        "项目规范来源版本明确，可检索并对实现验收"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-04",
+      "title": "自动质量门禁",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P2-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "现有测试和构建能力",
+      "outputs": "门禁规则与报告",
+      "acceptance_criteria": [
+        "静态、单元、集成、UI、安全和依赖检查按适用性执行，缺项有理由和决策"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-05",
+      "title": "项目知识治理",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "ARCHITECT",
+      "dependencies": [
+        "P2-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p0",
+        "role:architect"
+      ],
+      "inputs": "知识来源与项目授权",
+      "outputs": "范围/版本/来源/审核机制",
+      "acceptance_criteria": [
+        "跨项目拒绝访问经负向测试；推测不自动升级为标准"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P2-06",
+      "title": "能力阶段验收",
+      "phase": "P2",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P2-02",
+        "P2-03",
+        "P2-04",
+        "P2-05"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p2",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "各能力证据",
+      "outputs": "P2 门禁报告",
+      "acceptance_criteria": [
+        "各能力和重复性证据齐全，独立 QA 与人工验收通过"
+      ],
+      "phase_gate": "P2",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P3-01",
+      "title": "选择 ADO 升级并评估权限",
+      "phase": "P3",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "PRODUCT_MANAGER",
+      "dependencies": [
+        "P2-06"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p3",
+        "priority:p0",
+        "role:product-manager"
+      ],
+      "inputs": "ADO 仓库和批准架构",
+      "outputs": "升级范围与风险",
+      "acceptance_criteria": [
+        "选择现有范围内真实增量；列出权限变更、隔离和审批"
+      ],
+      "phase_gate": "P3",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P3-02",
+      "title": "平台增量设计与实现",
+      "phase": "P3",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P3-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p3",
+        "priority:p1",
+        "role:developer"
+      ],
+      "inputs": "批准设计、隔离工作区",
+      "outputs": "代码、测试、PR 与回滚方案",
+      "acceptance_criteria": [
+        "可追溯实现并测试；迁移先在测试环境验证；独立审查"
+      ],
+      "phase_gate": "P3",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P3-03",
+      "title": "双项目与 Worker 故障测试",
+      "phase": "P3",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P3-02"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p3",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "授权测试环境、两个项目",
+      "outputs": "并行、离线和恢复测试报告",
+      "acceptance_criteria": [
+        "独立 Worker、两项目隔离、故障安全恢复均有证据"
+      ],
+      "phase_gate": "P3",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P3-04",
+      "title": "自我迭代交付与验收",
+      "phase": "P3",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "RELEASE",
+      "dependencies": [
+        "P3-03"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p3",
+        "priority:p0",
+        "role:release"
+      ],
+      "inputs": "PR、测试、审批与回滚",
+      "outputs": "升级交付与阶段报告",
+      "acceptance_criteria": [
+        "人工批准合并，交付升级并验证恢复；审计与审批保留"
+      ],
+      "phase_gate": "P3",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P4-01",
+      "title": "资源池与调度设计",
+      "phase": "P4",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "ARCHITECT",
+      "dependencies": [
+        "P3-04"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p4",
+        "priority:p1",
+        "role:architect"
+      ],
+      "inputs": "实际 Agent/Worker/模型能力",
+      "outputs": "资源和调度设计",
+      "acceptance_criteria": [
+        "明确项目授权、容量、争用、失败及接口隔离"
+      ],
+      "phase_gate": "P4",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P4-02",
+      "title": "项目接入与隔离验证",
+      "phase": "P4",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P4-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p4",
+        "priority:p0",
+        "role:developer"
+      ],
+      "inputs": "项目模板与授权测试项目",
+      "outputs": "接入和隔离验证",
+      "acceptance_criteria": [
+        "新增项目复用底层；项目权限、知识、工作区负向测试通过"
+      ],
+      "phase_gate": "P4",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P4-03",
+      "title": "成本预算与资源冲突",
+      "phase": "P4",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P4-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p4",
+        "priority:p1",
+        "role:developer"
+      ],
+      "inputs": "用量来源、预算政策",
+      "outputs": "项目成本和冲突处理证据",
+      "acceptance_criteria": [
+        "可按项目归集可用费用，缺失成本标未知；冲突处理可测"
+      ],
+      "phase_gate": "P4",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P4-04",
+      "title": "规模化阶段验收",
+      "phase": "P4",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P4-02",
+        "P4-03"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p4",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "并行、隔离、资源及成本报告",
+      "outputs": "P4 门禁报告",
+      "acceptance_criteria": [
+        "多项目并行、动态增退、岗位分配和冲突处理有证据"
+      ],
+      "phase_gate": "P4",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P5-01",
+      "title": "监测与改进建议",
+      "phase": "P5",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "PRODUCT_MANAGER",
+      "dependencies": [
+        "P4-04"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p5",
+        "priority:p1",
+        "role:product-manager"
+      ],
+      "inputs": "获授权的质量、依赖和反馈数据",
+      "outputs": "问题及证据化建议",
+      "acceptance_criteria": [
+        "每项含来源、影响、风险、预期收益与成本，不泄露敏感信息"
+      ],
+      "phase_gate": "P5",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P5-02",
+      "title": "自主权限与风险策略",
+      "phase": "P5",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "ARCHITECT",
+      "dependencies": [
+        "P5-01"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p5",
+        "priority:p0",
+        "role:architect"
+      ],
+      "inputs": "审批政策与项目负责人授权",
+      "outputs": "可审阅风险分级、授权范围和撤销方案",
+      "acceptance_criteria": [
+        "默认拒绝；低风险授权明确；高风险审批及生产自主关闭"
+      ],
+      "phase_gate": "P5",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P5-03",
+      "title": "受控低风险执行试验",
+      "phase": "P5",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P1",
+      "owner_role": "DEVELOPER",
+      "dependencies": [
+        "P5-02"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p5",
+        "priority:p1",
+        "role:developer"
+      ],
+      "inputs": "明确生效的低风险授权、测试环境",
+      "outputs": "隔离分支、测试、审计与回滚证据",
+      "acceptance_criteria": [
+        "仅在批准范围内执行；暂停取消可用；不得自动合并或发布"
+      ],
+      "phase_gate": "P5",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    },
+    {
+      "id": "P5-04",
+      "title": "主动研发阶段验收",
+      "phase": "P5",
+      "status": "planned",
+      "actual_status": "unverified",
+      "priority": "P0",
+      "owner_role": "QA",
+      "dependencies": [
+        "P5-03"
+      ],
+      "labels": [
+        "ado-post-mvp",
+        "phase:p5",
+        "priority:p0",
+        "role:qa"
+      ],
+      "inputs": "监测、建议、授权和执行记录",
+      "outputs": "P5 阶段报告",
+      "acceptance_criteria": [
+        "验证风险分类、证据、完整审计及人工暂停撤销；人工验收"
+      ],
+      "phase_gate": "P5",
+      "approval": "按审批政策；有敏感动作先取得对应批准"
+    }
+  ]
+}

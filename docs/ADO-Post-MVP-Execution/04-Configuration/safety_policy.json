@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "enforcement": "policy_only_not_configured",
+  "default": "deny",
+  "project_isolation_required": true,
+  "protected_branch_merge": "human_approval",
+  "production_operations": "human_approval",
+  "frozen_prd": "read_only_pending_approved_change",
+  "security_policy_change": "human_approval",
+  "audit_disable": "prohibited",
+  "approval_record_deletion": "prohibited",
+  "proactive_production_autonomy": "disabled",
+  "proactive_low_risk_execution": "explicit_prior_scoped_authorization_and_isolated_branch",
+  "approval_binding": [
+    "action",
+    "project",
+    "target",
+    "commit_or_artifact",
+    "environment",
+    "expiry"
+  ],
+  "separation_of_duties": true
+}

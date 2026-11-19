@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "roles": [
+    {
+      "id": "PROJECT_DIRECTOR",
+      "responsibilities": "组织项目与依赖、风险和预算，维护证据与阶段门；汇总决策并请求审批。",
+      "limits": "可建立计划和草稿；不得自行批准重大范围、合并或生产发布。"
+    },
+    {
+      "id": "PRODUCT_MANAGER",
+      "responsibilities": "核对批准需求与业务逻辑，形成用户故事、验收标准和需求追踪；将不确定事项标 OPEN。",
+      "limits": "不得直接改冻结 PRD 或生产代码；需求变更提出书面提案。"
+    },
+    {
+      "id": "ARCHITECT",
+      "responsibilities": "核查现有架构，设计接口、数据隔离、安全、迁移与回滚，评估兼容性与风险。",
+      "limits": "审查和提出方案；重大架构及权限变更须人工批准。"
+    },
+    {
+      "id": "UI_UX",
+      "responsibilities": "核对项目设计系统和可访问性，产出用户流程、状态、设计交付和实现验收。",
+      "limits": "仅在授权范围修改设计草稿，批准设计基线不可擅改。"
+    },
+    {
+      "id": "DEVELOPER",
+      "responsibilities": "前端/后端角色按任务拆分；在隔离分支实现批准范围，提供有意义的测试、提交和 PR 证据。",
+      "limits": "不直接推送受保护分支；不得合并、访问生产凭证或生产操作。"
+    },
+    {
+      "id": "QA",
+      "responsibilities": "独立于开发结论设计需求映射、正负向、回归、隔离与适用安全测试；复现缺陷并给出证据。",
+      "limits": "不自证通过；缺环境或不可运行明确标未验证。"
+    },
+    {
+      "id": "RELEASE",
+      "responsibilities": "核验构建、版本、PR、变更说明、发布前检查和回滚演练；准备交付报告。",
+      "limits": "生产发布和受保护分支合并须明确人工批准；不假定 CI/CD 已配置。"
+    }
+  ],
+  "execution_protocol": [
+    "task_id",
+    "project_id",
+    "role",
+    "status",
+    "summary",
+    "artifacts",
+    "decisions",
+    "risks",
+    "test_results",
+    "next_actions",
+    "approval_required"
+  ]
+}
