@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Codex } from '@openai/codex-sdk';
 import { WebSocketServer } from 'ws';
 import { configureExecution, isolatedProfile, summarizeItem } from '../apps/worker/dist/codex-execution.js';
+import { checkTempDirectory, runVerification } from '../apps/worker/dist/verification.js';
 
 const fixtureKey = 'ado-local-sdk-fixture';
 const revisions = ['implemented by SDK fixture', 'repaired by SDK fixture'];
@@ -24,6 +25,14 @@ async function verify() {
   const server = createServer((_, response) => { response.writeHead(404); response.end(); });
   const gateway = new WebSocketServer({ server, path: '/v1/responses' });
   try {
+    const modelProxyHost = 'ado-model-proxy.invalid';
+    server.on('connect', (request, socket) => {
+      if (request.url === `${modelProxyHost}:443`) server.emit('modelProxyConnect');
+      socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const proxyUrl = 'http://127.0.0.1:' + server.address().port;
     const jobs = join(root, 'jobs');
     const state = join(root, 'codex');
     const seed = join(root, 'seed');
@@ -40,8 +49,28 @@ async function verify() {
     git(['--git-dir', source, 'worktree', 'add', '-b', 'fixture', '--', checkout, 'HEAD']);
     Object.assign(process.env, {
       ADO_EXECUTION_ROOT: jobs, ADO_CODEX_STATE_DIR: state, ADO_CODEX_API_KEY: '', ADO_NPM_CACHE_ROOT: '', ADO_MAVEN_CACHE_ROOT: '',
+      ADO_CODEX_HTTPS_PROXY: proxyUrl,
     });
     const runtime = await configureExecution();
+    assert.equal(runtime.codexEnv.HTTPS_PROXY, proxyUrl);
+    assert.equal(runtime.env.HTTPS_PROXY, undefined);
+    const tempDirectory = join(root, checkTempDirectory);
+    await mkdir(tempDirectory);
+    const [check, failure] = await runVerification({
+      binary: runtime.binary, env: runtime.env, worktree: checkout, tempDirectory,
+      profile: isolatedProfile(checkout, source, runtime.binary, tempDirectory),
+    }, [{
+      name: 'temporary-directory', kind: 'static', directory: '.', timeoutSeconds: 5,
+      argv: ['sh', '-c', 'test "$TMPDIR" = "$1" && test -z "$HTTPS_PROXY" && test ! -w /tmp && printf ok > "$TMPDIR/proof"',
+        'ado-check', tempDirectory],
+    }, {
+      name: 'failure-output', kind: 'static', directory: '.', timeoutSeconds: 5,
+      argv: ['node', '-e', 'console.error(process.argv[1]); process.exitCode = 7', 'check diagnostics'],
+    }], globalThis.AbortSignal.timeout(10000));
+    assert.equal(check?.result.status, 'passed');
+    assert.equal(await readFile(join(tempDirectory, 'proof'), 'utf8'), 'ok');
+    assert.equal(failure?.result.exitCode, 7);
+    assert.equal(failure?.diagnostic, 'check diagnostics');
     let sequence = 0;
     let revision = 0;
     let shellTool;
@@ -70,7 +99,7 @@ async function verify() {
         'printf "late write\n" > cancellation-late-write',
       ] : [
         '(test ! -r ' + quote(outside) + ' || exit 21)',
-        '(test -z "$OPENAI_API_KEY" && test -z "$CODEX_API_KEY" || exit 22)',
+        '(test -z "$OPENAI_API_KEY" && test -z "$CODEX_API_KEY" && test -z "$HTTPS_PROXY" || exit 22)',
         '( (printf no > ' + quote(outside + '.new') + ') 2>/dev/null || :)',
         '/bin/bash --noprofile --norc -c true',
         '(if /bin/bash --noprofile --norc -c ' + quote('true >/dev/tcp/127.0.0.1/' + server.address().port)
@@ -106,12 +135,10 @@ async function verify() {
       }
     }));
 
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
+    const profile = isolatedProfile(checkout, source, runtime.binary);
     const codex = new Codex({
-      codexPathOverride: runtime.binary, env: runtime.env, apiKey: fixtureKey,
-      baseUrl: 'http://127.0.0.1:' + server.address().port + '/v1',
-      configOverrides: isolatedProfile(checkout, source, runtime.binary),
+      codexPathOverride: runtime.binary, env: runtime.codexEnv, apiKey: fixtureKey,
+      baseUrl: proxyUrl + '/v1', configOverrides: profile,
     });
     const thread = codex.startThread({ workingDirectory: checkout, approvalPolicy: 'never', webSearchMode: 'disabled',
       model: 'gpt-5.4' });
@@ -166,12 +193,27 @@ async function verify() {
       stop.abort();
       await ended;
     }
-    console.log('Native Codex SDK streaming, same-thread repair, sandbox isolation, and cancellation passed.');
+    const proxyOnlyCodex = new Codex({
+      codexPathOverride: runtime.binary, env: runtime.codexEnv, apiKey: fixtureKey,
+      baseUrl: `https://${modelProxyHost}/v1`, configOverrides: profile,
+    });
+    const proxyThread = proxyOnlyCodex.startThread({ workingDirectory: checkout, approvalPolicy: 'never', model: 'gpt-5.4' });
+    const stopProxy = new globalThis.AbortController();
+    const probeSignal = globalThis.AbortSignal.any([stopProxy.signal, globalThis.AbortSignal.timeout(12000)]);
+    const connection = once(server, 'modelProxyConnect', { signal: probeSignal });
+    const proxyRun = proxyThread.run('Check whether the HTTPS proxy is reachable.', { signal: probeSignal }).catch(() => null);
+    try {
+      await connection;
+    } finally {
+      stopProxy.abort();
+      await proxyRun;
+    }
+    console.log('Native Codex SDK streaming, same-thread repair, sandbox isolation, cancellation, and HTTPS proxy passed.');
   } finally {
     for (const socket of gateway.clients) socket.terminate();
     gateway.close();
     if (server.listening) await new Promise((resolve) => server.close(resolve));
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
   }
 }
 

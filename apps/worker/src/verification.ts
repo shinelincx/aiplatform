@@ -9,6 +9,7 @@ export interface VerificationSandbox {
   env: Record<string, string>;
   worktree: string;
   profile: string[];
+  tempDirectory?: string;
   npmCache?: string;
   mavenCache?: string;
 }
@@ -18,6 +19,7 @@ interface CheckExecution {
   diagnostic?: string;
 }
 
+export const checkTempDirectory = '.check-tmp';
 const diagnosticBytes = 4096;
 
 function javaPath(path: string) {
@@ -63,20 +65,22 @@ async function runCheck(sandbox: VerificationSandbox, check: VerificationCheck, 
   if (!executable) return result('executable_unavailable');
   signal.throwIfAborted();
   const mavenCache = program === 'mvn' ? sandbox.mavenCache : undefined;
+  const temporary = mavenCache ? join(mavenCache, 'tmp') : sandbox.tempDirectory ?? sandbox.worktree;
   const environment = [
     `PATH=${sandbox.env.PATH}`, `HOME=${mavenCache ?? sandbox.npmCache ?? sandbox.worktree}`, 'CI=true',
+    `TMPDIR=${temporary}`,
     `npm_config_cache=${sandbox.npmCache ?? '/tmp/ado-npm-cache'}`,
     ...(sandbox.npmCache ? ['npm_config_offline=true'] : []),
   ];
   if (mavenCache) {
-    const javaTemp = join(mavenCache, 'tmp');
-    environment.push(`TMPDIR=${javaTemp}`,
-      `JAVA_TOOL_OPTIONS=-Duser.home=${javaPath(mavenCache)} -Djava.io.tmpdir=${javaPath(javaTemp)}`);
+    environment.push(`JAVA_TOOL_OPTIONS=-Duser.home=${javaPath(mavenCache)} -Djava.io.tmpdir=${javaPath(temporary)}`);
     arguments_.unshift('--offline', `-Dmaven.repo.local=${join(mavenCache, 'repository')}`);
   }
 
   return new Promise<CheckExecution>((resolve, reject) => {
-    const child = spawn(sandbox.binary, ['sandbox', ...sandbox.profile.flatMap((part) => ['-c', part]),
+    // Use a POSIX pipe for sandbox output. Some runtimes cannot identify Node's stdio sockets with networking disabled.
+    const child = spawn('/bin/bash', ['-o', 'pipefail', '-c', '"$@" 2>&1 | /bin/cat', 'ado-check',
+      sandbox.binary, 'sandbox', ...sandbox.profile.flatMap((part) => ['-c', part]),
       '-P', 'ado-job', '--', '/usr/bin/env', ...environment, executable, ...arguments_], {
       cwd: directory, env: sandbox.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
     });

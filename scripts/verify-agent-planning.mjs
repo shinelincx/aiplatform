@@ -252,9 +252,10 @@ try {
   const patch = Buffer.from('diff --git a/settings.ts b/settings.ts\n--- a/settings.ts\n+++ b/settings.ts\n@@ -0,0 +1,3501 @@\n'
     + '+// Fixture settings patch\n'.repeat(3500) + '+export const savedValue = true;\n');
   const patchHash = createHash('sha256').update(patch).digest('hex');
+  const baseCommit = 'a'.repeat(40);
   const usage = { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 };
   assert.equal((await send(1, 'thread', { threadId: 'fixture-qa-thread' })).accepted, true);
-  assert.equal((await send(2, 'result', { attempt: 1, baseCommit: 'a'.repeat(40), patchHash, files: ['settings.ts'], usage })).accepted, true);
+  assert.equal((await send(2, 'result', { attempt: 1, baseCommit, patchHash, files: ['settings.ts'], usage })).accepted, true);
   const verification = { attempt: 1, patchHash, checks: [{ name: 'unit', status: 'passed', exitCode: 0, durationMs: 20 }] };
   assert.equal((await send(3, 'verification', verification)).accepted, false, 'QA requires the archived patch');
   const upload = await globalThis.fetch(new URL(`/worker-executions/${run.id}/artifact`, api), {
@@ -280,6 +281,7 @@ try {
   assert.equal(qaCalls[1].agent.model, 'fixture-qa');
   assert.equal(qaCalls[1].agent.version, 2);
   assert.deepEqual(qaCalls[1].input.task.acceptanceCriteria, outputs.PRODUCT_MANAGER.acceptanceCriteria);
+  assert.equal(qaCalls[1].input.baseCommit, baseCommit);
   assert.equal(qaCalls[1].input.verification.patchHash, patchHash);
   assert.equal(qaCalls[1].input.verification.checks[0].name, 'unit');
   assert.deepEqual(qaCalls[1].input.approvedRequirement, approvedContent);

@@ -6,7 +6,7 @@ import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { canRepair, maxVerificationAttempts, type ExecutionOffer, type VerificationReport } from '@ado/shared';
 import type { ThreadEvent } from '@openai/codex-sdk' with { 'resolution-mode': 'import' };
-import { runVerification } from './verification';
+import { checkTempDirectory, runVerification } from './verification';
 import { copyRepositoryCache } from './repository-cache';
 
 const exec = promisify(execFile);
@@ -23,6 +23,7 @@ interface Runtime {
   root: string;
   binary: string;
   env: Record<string, string>;
+  codexEnv: Record<string, string>;
   apiKey?: string;
   npmCacheRoot?: string;
   mavenCacheRoot?: string;
@@ -64,10 +65,15 @@ export async function configureExecution(): Promise<Runtime | undefined> {
     HOME: homedir(),
     CODEX_HOME: stateDir,
   };
+  const proxy = process.env.ADO_CODEX_HTTPS_PROXY?.trim();
+  if (proxy && !['http:', 'https:'].includes(URL.parse(proxy)?.protocol ?? '')) {
+    throw new Error('ADO_CODEX_HTTPS_PROXY must be an HTTP or HTTPS proxy URL');
+  }
+  const codexEnv = proxy ? { ...env, HTTPS_PROXY: proxy } : env;
   const { stdout } = await exec(checkedBinary, ['--version'], { env, timeout: 5000 });
   if (stdout.trim() !== `codex-cli ${codexVersion}`) throw new Error(`Worker requires Codex CLI ${codexVersion}`);
   const runtime: Runtime = {
-    root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
+    root: checkedRoot, binary: checkedBinary, env, codexEnv, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
   };
   const probe = await mkdtemp(join(checkedRoot, '.sandbox-check-'));
   try {
@@ -89,7 +95,7 @@ export async function configureExecution(): Promise<Runtime | undefined> {
 export async function verifyCodexLogin(runtime: Runtime) {
   if (runtime.apiKey) return;
   try {
-    await exec(runtime.binary, ['login', 'status'], { env: runtime.env, timeout: 5000, maxBuffer: 4096 });
+    await exec(runtime.binary, ['login', 'status'], { env: runtime.codexEnv, timeout: 5000, maxBuffer: 4096 });
   } catch {
     throw new Error('Sign in within the dedicated Codex state directory or set ADO_CODEX_API_KEY');
   }
@@ -168,7 +174,11 @@ async function checkout(runtime: Runtime, offer: ExecutionOffer, signal: AbortSi
     await mkdir(jobRoot, { mode: 0o700 });
     await exec('git', ['-c', 'http.followRedirects=false', 'clone', '--bare', '--single-branch', '--depth=1',
       '--branch', offer.defaultBranch, '--', `https://github.com/${offer.repository}.git`, gitDir], {
-      cwd: jobRoot, env: gitEnv(runtime, offer.repositoryToken), signal, timeout: 120_000, maxBuffer: 1024 * 1024,
+      cwd: jobRoot, env: {
+        ...gitEnv(runtime, offer.repositoryToken),
+        ...(runtime.codexEnv.HTTPS_PROXY && { HTTPS_PROXY: runtime.codexEnv.HTTPS_PROXY }),
+      },
+      signal, timeout: 120_000, maxBuffer: 1024 * 1024,
     });
     await exec('git', ['--git-dir', gitDir, 'worktree', 'add', '-b', `feature/${offer.id}`, '--', worktree, 'HEAD'], {
       cwd: jobRoot, env: gitEnv(runtime), signal, timeout: 120_000, maxBuffer: 1024 * 1024,
@@ -209,12 +219,14 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       }) : undefined;
     const npmCache = checks.length > 0 ? await prepareCache(runtime.npmCacheRoot, 'npm') : undefined;
     const mavenCache = checks.some(({ argv }) => argv[0] === 'mvn') ? await prepareCache(runtime.mavenCacheRoot, 'maven') : undefined;
+    const tempDirectory = checks.length ? join(jobRoot, checkTempDirectory) : undefined;
+    if (tempDirectory) await mkdir(tempDirectory, { mode: 0o700 });
     await report('progress', { stage: 'inference' });
     const { Codex } = await import('@openai/codex-sdk');
     const profile = isolatedProfile(worktree, gitDir, runtime.binary);
     const codex = new Codex({
       codexPathOverride: runtime.binary,
-      env: runtime.env,
+      env: runtime.codexEnv,
       apiKey: runtime.apiKey,
       configOverrides: profile,
     });
@@ -226,8 +238,8 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria,
       ...(offer.development && { development: offer.development }),
     };
-    const cachePaths = [npmCache, mavenCache].filter((path) => path !== undefined);
-    const verificationProfile = isolatedProfile(worktree, gitDir, runtime.binary, ...cachePaths);
+    const writablePaths = [tempDirectory, npmCache, mavenCache].filter((path) => path !== undefined);
+    const verificationProfile = isolatedProfile(worktree, gitDir, runtime.binary, ...writablePaths);
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
@@ -286,7 +298,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       if (!checks.length) return;
 
       const executions = await runVerification({
-        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, npmCache, mavenCache,
+        binary: runtime.binary, env: runtime.env, worktree, profile: verificationProfile, tempDirectory, npmCache, mavenCache,
       }, checks, signal);
       const results = executions.map(({ result }) => result);
       await git(['add', '-A']);
