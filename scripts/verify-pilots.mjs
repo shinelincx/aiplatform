@@ -6,9 +6,10 @@ import { URL } from 'node:url';
 import { verifyWorkflow } from './pilot-workflow-evidence.mjs';
 
 const args = process.argv.slice(2);
-const preflight = args[0] === '--preflight';
 const staging = args[0] === '--staging';
-const [fitbestCode, adoCode, ...extra] = preflight ? [] : staging ? args.slice(1) : args;
+const modeArgs = staging ? args.slice(1) : args;
+const preflight = modeArgs[0] === '--preflight';
+const [fitbestCode, adoCode, ...extra] = preflight ? [] : modeArgs;
 const pilots = [
   { projectCode: 'FITBEST', repository: 'shinelincx/fitbest', taskCode: fitbestCode },
   { projectCode: 'ADO', repository: 'shinelincx/aiplatform', taskCode: adoCode },
@@ -153,7 +154,8 @@ async function inspectInstallation(pilot, path, binding) {
     if (!check(installations.length > 0, `${label} 的 GitHub App 暂无有效安装`) || !binding) return;
     const installation = installations.find(({ id }) => String(id) === binding.installationId);
     if (!check(installation, `${label} 绑定的 GitHub App 安装失效或已暂停`)) return;
-    check(installation.canPublish === true, `${label} GitHub App 安装缺少 Contents: Write 或 Pull requests: Write 权限`);
+    if (staging) check(installation.canReadContents === true, `${label} GitHub App 安装缺少 Contents: Read 权限`);
+    else check(installation.canPublish === true, `${label} GitHub App 安装缺少 Contents: Write 或 Pull requests: Write 权限`);
     const accessible = await request(`${path}/repositories/installations/${installation.id}`);
     check(accessible.some((repo) => String(repo.id) === binding.githubId && repo.fullName.toLowerCase() === pilot.repository),
       `${label} 的 GitHub App 安装无法访问已绑定仓库`);
@@ -181,7 +183,8 @@ async function inspectPilot(pilot, projects, workerIds) {
   const owner = check(project.role === 'owner', `${pilot.projectCode} 须以项目所有者账号进行预检`);
   if (binding) {
     check(binding.checks.length > 0, `${pilot.projectCode} 仓库尚未配置自动检查计划`);
-    check(binding.autoDraftPr === true, `${pilot.projectCode} 仓库尚未启用自动草稿 PR`);
+    if (staging) check(binding.autoDraftPr === false, `${pilot.projectCode} 请关闭自动草稿 PR，再进行候选审批演练`);
+    else check(binding.autoDraftPr === true, `${pilot.projectCode} 仓库尚未启用自动草稿 PR`);
   }
   const [registry, sources] = await Promise.all([
     request(`${path}/agent-registry`), request(`${path}/requirements`),
@@ -202,14 +205,14 @@ async function inspectPilot(pilot, projects, workerIds) {
       `${pilot.projectCode} 在线 Worker 须支持自动检查、补丁归档${needsMaven ? '和 Maven' : ''}，并具备足够磁盘空间`);
   }
   for (const worker of eligible) workerIds.add(worker.id);
-  if (pilot.projectCode === 'FITBEST') check(sources.length > 0, 'FITBEST 尚未登记已批准的试点需求');
+  if (staging || pilot.projectCode === 'FITBEST') check(sources.length > 0, `${pilot.projectCode} 尚未登记已批准的试点需求`);
   if (!preflight) check(false, `${pilot.projectCode} 缺少待验证的试点任务编号`);
 }
 
 try {
-  assert(preflight ? args.length === 1 : extra.length === 0 && (!staging || Boolean(fitbestCode && adoCode))
-    && (staging ? args.slice(1) : args).every((value) => !value.startsWith('--')),
-  '用法：node --env-file=.env scripts/verify-pilots.mjs --preflight 或 node --env-file=.env scripts/verify-pilots.mjs [--staging] Fitbest任务编号 ADO任务编号');
+  assert(preflight ? modeArgs.length === 1 : extra.length === 0 && (!staging || Boolean(fitbestCode && adoCode))
+    && modeArgs.every((value) => !value.startsWith('--')),
+  '用法：node --env-file=.env scripts/verify-pilots.mjs [--staging] --preflight 或 [--staging] Fitbest任务编号 ADO任务编号');
   assert(email && password, '请配置 ADO_VERIFY_EMAIL 和 ADO_VERIFY_PASSWORD，或使用已有本地管理员配置');
   assert(api && !api.username && !api.password && (api.protocol === 'https:'
     || (api.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(api.hostname))),
@@ -226,7 +229,7 @@ try {
     for (const issue of issues) process.stderr.write(`待验收 · ${issue}\n`);
     process.exitCode = 1;
   } else {
-    const message = preflight ? 'Fitbest 和 ADO 试点的启动前配置检查通过。'
+    const message = preflight ? `Fitbest 和 ADO ${staging ? '预发布' : '试点'}的启动前配置检查通过。`
       : staging ? '两个预发布任务的需求出处、人工审批、Codex 执行、检查计划、QA、归档补丁和人工复验证据均已核对。'
         : '两个试点任务的规划、审批、执行、受测补丁、GitHub Actions 和合并证据均已核对。';
     process.stdout.write(`${message}\n`);

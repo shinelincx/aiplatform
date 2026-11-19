@@ -26,9 +26,10 @@ it('lists authorized repositories and narrows the branch token to one repository
     .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 43 } } }))
     .mockResolvedValueOnce(Response.json([
       { id: 7, account: { login: 'org' }, suspended_at: null, permissions: { contents: 'write', pull_requests: 'write' } },
-      { id: 8, account: { login: 'read-only' }, suspended_at: null, permissions: { contents: 'write', pull_requests: 'read' } },
+      { id: 8, account: { login: 'read-only' }, suspended_at: null, permissions: { contents: 'read' } },
       { id: 9, account: { login: 'suspended' }, suspended_at: '2026-01-01T00:00:00Z',
         permissions: { contents: 'write', pull_requests: 'write' } },
+      { id: 10, account: { login: 'metadata-only' }, suspended_at: null },
     ]));
   vi.stubGlobal('fetch', mock);
 
@@ -59,8 +60,9 @@ it('lists authorized repositories and narrows the branch token to one repository
   expect(mock.mock.calls[5][1]?.method).toBe('GET');
   expect(new Headers(mock.mock.calls[5][1]?.headers).get('Authorization')).toBe('Bearer pull-read');
   expect(await github.installations()).toEqual([
-    { id: 7, account: 'org', canPublish: true },
-    { id: 8, account: 'read-only', canPublish: false },
+    { id: 7, account: 'org', canReadContents: true, canPublish: true },
+    { id: 8, account: 'read-only', canReadContents: true, canPublish: false },
+    { id: 10, account: 'metadata-only', canReadContents: false, canPublish: false },
   ]);
 });
 

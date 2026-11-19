@@ -35,7 +35,13 @@ docker compose -p ado-staging up -d --build --wait
 
 跨主机验收时，从 Worker 主机运行下节的 HTTPS 探针。记录控制面和 Worker 的主机标识以及重启前后的心跳时间。任务执行完成后，在审批当前候选前录入与补丁哈希对应的人工复验证据。只演练到候选审批时，在预发布的仓库绑定中关闭自动草稿 PR。
 
-在预发布控制面主机上，用有权查看两个项目的账号核对试运行记录。依次传入 Fitbest 和 ADO 的任务编号。
+在预发布控制面主机上，用两个项目的管理员账号运行预检。只演练到候选审批时，GitHub App 安装只需读取两个目标仓库的 Contents 权限。预检检查只读签出权限、自动草稿 PR 已关闭、已登记的需求、规划模型、离线检查计划以及符合条件的两台 Worker。 [GitHub App 安装权限](https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app)
+
+```bash
+node --env-file=.env.staging scripts/verify-pilots.mjs --staging --preflight
+```
+
+试运行完成后，依次传入 Fitbest 和 ADO 的任务编号以核对结果。
 
 ```bash
 node --env-file=.env.staging scripts/verify-pilots.mjs --staging FITBEST_TASK_CODE ADO_TASK_CODE
