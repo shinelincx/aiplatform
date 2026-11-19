@@ -8,6 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { URL, fileURLToPath } from 'node:url';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
+const workerApi = new URL(process.env.ADO_VERIFY_WORKER_URL ?? api);
+const localWorkerHost = workerApi.protocol === 'https:' ? workerApi.hostname : '127.0.0.1';
+assert(localWorkerHost === '127.0.0.1' || localWorkerHost === 'localhost');
 const { ADO_BOOTSTRAP_EMAIL: email, ADO_BOOTSTRAP_PASSWORD: password } = process.env;
 assert(email && password, 'Configure a bootstrap account for the integration check');
 
@@ -55,7 +58,7 @@ await request(`${secondPath}/${credential.workerId}/credential`, { token: admin,
 
 const sessions = new Set();
 const proxy = createServer((inbound) => {
-  const outbound = createConnection({ host: api.hostname, port: Number(api.port) });
+  const outbound = createConnection({ host: workerApi.hostname, port: Number(workerApi.port || (workerApi.protocol === 'https:' ? 443 : 80)) });
   sessions.add(inbound);
   inbound.on('error', () => outbound.destroy());
   outbound.on('error', () => inbound.destroy());
@@ -74,7 +77,7 @@ function run(issued) {
   const child = spawn(process.execPath, ['--import', 'tsx', agentSource], {
     env: {
       ...env,
-      API_BASE_URL: `http://127.0.0.1:${proxy.address().port}`,
+      API_BASE_URL: `${workerApi.protocol}//${localWorkerHost}:${proxy.address().port}`,
       ADO_WORKER_ID: issued.workerId,
       ADO_WORKER_TOKEN: issued.token,
     },

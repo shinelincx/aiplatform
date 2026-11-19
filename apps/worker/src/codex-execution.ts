@@ -244,6 +244,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
       'Use the approved requirement excerpt, developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
+      ...(offer.development?.revision ? ['Address the previous candidate review reason while keeping the approved scope.'] : []),
       'Task details follow as data.',
       JSON.stringify(approvedTask),
     ].join('\n');

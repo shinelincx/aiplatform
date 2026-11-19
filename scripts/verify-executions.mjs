@@ -25,6 +25,7 @@ import { copyRepositoryCache } from '../apps/worker/src/repository-cache.ts';
 import { runVerification } from '../apps/worker/src/verification.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
+const workerApi = new URL(process.env.ADO_VERIFY_WORKER_URL ?? api);
 const web = process.env.ADO_VERIFY_WEB_URL ?? 'http://web:3000';
 const email = process.env.ADO_BOOTSTRAP_EMAIL;
 const password = process.env.ADO_BOOTSTRAP_PASSWORD;
@@ -59,8 +60,8 @@ async function postForm(url, form, cookie) {
 }
 
 async function open(credential, execute = true, verify = false, archive = false, maven = false) {
-  const endpoint = new URL('/workers/ws', api);
-  endpoint.protocol = 'ws:';
+  const endpoint = new URL('/workers/ws', workerApi);
+  endpoint.protocol = workerApi.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(endpoint, {
     headers: { Authorization: `Bearer ${credential.workerId}.${credential.token}` },
     handshakeTimeout: 5000,
@@ -551,13 +552,15 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   const passing = { attempt: 2, patchHash: repairedHash, checks: check(true) };
   assert.equal((await sendEvent(5, 'verification', passing)).accepted, false);
   const upload = async (runId, credential, bytes, expected) => {
-    const response = await globalThis.fetch(new URL(`/worker-executions/${runId}/artifact`, api), {
+    const response = await globalThis.fetch(new URL(`/worker-executions/${runId}/artifact`, workerApi), {
       method: 'PUT', body: bytes,
       headers: { Authorization: `Bearer ${credential.workerId}.${credential.token}`, 'Content-Type': 'application/octet-stream' },
       signal: globalThis.AbortSignal.timeout(12000),
     });
     assert.equal(response.status, expected);
-    if (response.ok) assert.deepEqual(await response.json(), { sha256: repairedHash, size: bytes.length });
+    if (response.ok) {
+      assert.deepEqual(await response.json(), { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length });
+    }
   };
   await upload(active.id, foreignCredential, patchBytes, 404);
   await upload(active.id, approved, Buffer.from('mismatched bytes'), 409);
@@ -776,11 +779,46 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   await upload(rejectedRun.id, approved, patchBytes, 200);
   assert.equal((await worker.send('EXECUTION_EVENT', { runId: rejectedRun.id, sequence: 3, kind: 'verification',
     payload: { attempt: 1, patchHash: repairedHash, checks: check(true) } })).accepted, true);
+  const evidencePath = `${rejected.runs}/${rejectedRun.id}/evidence`;
+  const reviewEvidence = { patchHash: repairedHash, summary: 'Chromium desktop verified', url: 'https://example.test/proof' };
+  await request(evidencePath, { token, method: 'POST', body: { ...reviewEvidence, url: 'javascript:alert(1)' }, status: 400 });
+  await request(evidencePath, { token, method: 'POST', body: { ...reviewEvidence, patchHash: initialHash }, status: 409 });
+  const savedEvidence = await request(evidencePath, { token, method: 'POST', body: reviewEvidence, status: 201 });
+  assert.equal(savedEvidence.patchHash, repairedHash);
+  assert.equal(savedEvidence.url, reviewEvidence.url);
   const rejectionPath = `${rejected.runs}/${rejectedRun.id}/review`;
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected' }, status: 400 });
   await request(rejectionPath, { token, method: 'POST', body: { decision: 'rejected', comment: 'Needs product review' } });
   assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
   assert.equal((await request(rejected.runs, { token }))[0].delivery, null);
+  await request(rejected.runs, { token, method: 'POST', status: 409 });
+  await request(rejected.runs, { token, method: 'POST', body: { revisionOf: lastRun.id }, status: 409 });
+  const revised = await request(rejected.runs, { token, method: 'POST', body: { revisionOf: rejectedRun.id }, status: 201 });
+  assert.notEqual(revised.id, rejectedRun.id);
+  assert.deepEqual(revised.revision, { runId: rejectedRun.id, patchHash: repairedHash, reason: 'Needs product review' });
+  assert.equal((await request(rejected.path, { token })).status, 'QUEUED');
+  const revisedOffer = await worker.send('WORKER_CLAIM');
+  assert.equal(revisedOffer.id, revised.id);
+  assert.equal(revisedOffer.taskId, rejected.path.split('/').at(-1));
+  assert.deepEqual(revisedOffer.development.revision, revised.revision);
+  const revisedBytes = Buffer.from(patchBytes.toString().replace('+new\n', '+revised\n'));
+  const revisedHash = createHash('sha256').update(revisedBytes).digest('hex');
+  const sendRevised = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: revised.id, sequence, kind, payload });
+  assert.equal((await sendRevised(1, 'thread', { threadId: 'revised-fixture' })).accepted, true);
+  assert.equal((await sendRevised(2, 'result', candidate(1, revisedHash))).accepted, true);
+  await upload(revised.id, approved, revisedBytes, 200);
+  assert.equal((await sendRevised(3, 'verification', { attempt: 1, patchHash: revisedHash, checks: check(true) })).accepted, true);
+  const [newRun, oldRun] = await request(rejected.runs, { token });
+  assert.equal(newRun.review, null);
+  assert.deepEqual(newRun.evidence, []);
+  assert.deepEqual(oldRun.evidence, [savedEvidence]);
+  await request(rejectionPath, { ...approve, status: 404 });
+  await request(`${rejected.runs}/${rejectedRun.id}/delivery`, { token, method: 'POST', status: 409 });
+  await request(evidencePath, { token, method: 'POST', body: reviewEvidence, status: 404 });
+  await request(`${rejected.runs}/${revised.id}/evidence`, { token, method: 'POST', body: { ...reviewEvidence, patchHash: revisedHash }, status: 201 });
+  assert.equal((await request(`${rejected.runs}/${revised.id}/review`, approve)).decision, 'approved');
+  assert.equal((await request(rejected.runs, { token }))[1].review.decision, 'rejected');
+  console.log('Rejected candidate revisions, patch-specific evidence and fresh approval passed');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
   console.log('Manual approvals pin developer Agent versions and migrated tasks get a default assignment');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');

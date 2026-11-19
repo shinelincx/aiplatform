@@ -1,6 +1,7 @@
 import { workerDiskPressure, type CheckFailureReason, type CheckResult, type ExecutionEvent, type ExecutionRun,
-  type Project, type Task, type VerificationCheck, type WorkerReport } from '@ado/shared';
-import { changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa, reviewExecution, startExecution, stopExecution } from './actions';
+  type Project, type ReviewEvidence, type Task, type VerificationCheck, type WorkerReport } from '@ado/shared';
+import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
+  reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
 
@@ -87,6 +88,17 @@ function CheckResults({ checks }: { checks: CheckResult[] }) {
   </li>)}</ul>;
 }
 
+function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
+  if (!entries?.length) return null;
+  return <ul className="members">{entries.map((entry, i) => <li key={`${entry.recordedAt}-${i}`}>
+    <div><p className="description">{entry.summary}</p>
+      {entry.url && <p><a href={entry.url} rel="noreferrer">打开证据链接</a></p>}
+      <small>{entry.author} · 补丁 <code title={entry.patchHash}>{entry.patchHash.slice(0, 12)}</code></small>
+    </div>
+    <time dateTime={entry.recordedAt}>{new Date(entry.recordedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>
+  </li>)}</ul>;
+}
+
 export async function Executions({ project, task, checks, autoDraftPr, planned }: {
   project: Project; task: Task; checks: VerificationCheck[]; autoDraftPr: boolean; planned: boolean;
 }) {
@@ -110,8 +122,9 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   const checkingQa = latest?.qa?.state === 'queued' || latest?.qa?.state === 'running';
   const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
+  const revising = task.status === 'REJECTED' && latest?.review?.decision === 'rejected' && latest.report?.passed;
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
-    && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || (awaitingChecks && hasChecks));
+    && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || revising || (awaitingChecks && hasChecks));
   const candidates = workers.filter(({ status, capabilities }) =>
     status !== 'disabled' && Boolean(capabilities?.codexVersion)
     && (!hasChecks || capabilities?.verificationVersion === 1)
@@ -131,7 +144,8 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
     <h4 id="execution-heading">Codex 执行</h4>
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
     {canStart && <form action={startExecution} className="fields">
-      {identity}<WorkerChoice workers={candidates} /><button>{latest ? '重试执行' : '派发任务'}</button>
+      {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
+      <WorkerChoice workers={candidates} /><button>{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</button>
     </form>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
@@ -141,6 +155,10 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
       {owner && awaitingChecks && !hasChecks && <p className="muted">配置仓库检查计划后可重新派发。</p>}
       {latest.requestedWorkerId && <p>指定 Worker · {workerName(latest.requestedWorkerId)}</p>}
       {latest.workerId && <p>领取 Worker · {workerName(latest.workerId)}</p>}
+      {latest.revision && <div>
+        <p>修订来源 · 执行 {latest.revision.runId.slice(0, 8)} · 补丁 <code title={latest.revision.patchHash}>{latest.revision.patchHash.slice(0, 12)}</code></p>
+        <p className="description">{latest.revision.reason}</p>
+      </div>}
       {owner && project.status === 'active' && latest.status === 'queued' && <form action={changeExecutionWorker} className="fields">
         {identity}<input type="hidden" name="runId" value={latest.id} />
         <WorkerChoice key={latest.requestedWorkerId} workers={candidates} selected={latest.requestedWorkerId} />
@@ -176,6 +194,19 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
         </form>}
         {canManageQa && (checkingQa || latest.qa.state === 'failed') && <form action={stopExecution}>
           {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">取消任务</button>
+        </form>}
+      </div>}
+      {(Boolean(latest.evidence?.length) || (owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW'
+        && !latest.review && latest.artifact)) && <div>
+        <h5>复验证据</h5>
+        <EvidenceList entries={latest.evidence} />
+        {owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW' && !latest.review
+          && latest.artifact && (latest.evidence?.length ?? 0) < 10 && <form action={addExecutionEvidence} className="fields">
+          {identity}<input type="hidden" name="runId" value={latest.id} />
+          <input type="hidden" name="patchHash" value={latest.artifact.sha256} />
+          <label>复验结果<textarea name="summary" required maxLength={2000} /></label>
+          <label>证据链接（可选）<input type="url" name="url" maxLength={1000} /></label>
+          <button className="secondary">保存复验证据</button>
         </form>}
       </div>}
       {latest.review ? <div>
@@ -228,7 +259,12 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
       {runs.length > 1 && <details>
         <summary>较早的执行</summary>
         <ul className="members">{runs.slice(1).map((run) => <li key={run.id}>
-          <span>{stateLabels[run.status]}</span><time dateTime={run.createdAt}>{new Date(run.createdAt)
+          <div><span>执行 {run.id.slice(0, 8)} · {stateLabels[run.status]}</span>
+            {run.review && <p>{run.review.decision === 'rejected' ? '已驳回' : '已批准'} · {run.review.reviewer}</p>}
+            {run.review?.comment && <p className="description">{run.review.comment}</p>}
+            {run.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${run.id}`}>下载补丁 {run.artifact.sha256.slice(0, 12)}</a></p>}
+            <EvidenceList entries={run.evidence} />
+          </div><time dateTime={run.createdAt}>{new Date(run.createdAt)
             .toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>
         </li>)}</ul>
       </details>}
