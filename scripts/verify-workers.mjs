@@ -9,8 +9,7 @@ import { URL, fileURLToPath } from 'node:url';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
 const workerApi = new URL(process.env.ADO_VERIFY_WORKER_URL ?? api);
-const localWorkerHost = workerApi.protocol === 'https:' ? workerApi.hostname : '127.0.0.1';
-assert(localWorkerHost === '127.0.0.1' || localWorkerHost === 'localhost');
+const localWorkerHost = workerApi.protocol === 'https:' && workerApi.hostname === 'localhost' ? 'localhost' : '127.0.0.1';
 const { ADO_BOOTSTRAP_EMAIL: email, ADO_BOOTSTRAP_PASSWORD: password } = process.env;
 assert(email && password, 'Configure a bootstrap account for the integration check');
 

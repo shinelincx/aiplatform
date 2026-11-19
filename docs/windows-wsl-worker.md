@@ -39,6 +39,8 @@ worker="$HOME/.local/share/ado-workers/ado"
 
 在当前版本，Worker 注册凭证有效期为 8 小时。轮换前先确认当前任务已结束，停止对应启动任务，在同一项目更新凭证并编辑 `worker.env`，随后启动任务并确认新心跳。Worker 配置和凭证只保存在 WSL 私有目录。
 
+控制面使用私有 CA 签发 HTTPS 证书时，将可信 CA 的 PEM 证书保存为 `$worker/ca.crt`，然后启动或重启 Worker。启动脚本在 Node 运行前加载此文件，HTTPS 归档上传和 WSS 心跳使用同一信任链。 [Node.js 证书配置](https://nodejs.org/download/release/v24.7.0/docs/api/cli.html#node_extra_ca_certsfile)
+
 ## 3. Codex 认证和代理
 
 每个实例可用 ChatGPT 登录或设置 `ADO_CODEX_API_KEY`。ChatGPT 登录使用脚本指定的独立状态目录。浏览器登录回调不便时，先在对应 ChatGPT 账户或工作区启用设备代码登录，再使用 `--device-auth`。
