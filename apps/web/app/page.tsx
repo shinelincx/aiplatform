@@ -2,10 +2,11 @@ import { checkApiHealth, type Account, type Project, type ProjectMember, type Pr
 import Link from 'next/link';
 import { login, logout } from './actions';
 import { Agents } from './agents';
-import { read } from './api-client';
+import { read, readSection } from './api-client';
 import { Operations } from './operations';
 import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
 import { Repositories } from './repositories';
+import { DataPanel, SectionReadError } from './section-feedback';
 import { Tasks } from './tasks';
 import { Workers } from './workers';
 
@@ -51,11 +52,13 @@ export default async function Home({ searchParams }: {
   const admin = account?.systemRole === 'admin';
   const projects = account ? await read<Project[]>('/projects') : null;
   const selected = projects?.find((project) => project.id === query.project) ?? projects?.[0];
-  const [members, users, overview] = await Promise.all([
+  const [members, users, overviewResult] = await Promise.all([
     selected?.role === 'owner' ? read<ProjectMember[]>(`/projects/${selected.id}/members`) : null,
     admin ? read<Account[]>('/users') : null,
-    selected ? read<ProjectOverview>(`/projects/${selected.id}/operations/overview`) : null,
+    selected ? readSection<ProjectOverview>(`/projects/${selected.id}/operations/overview`,
+      (data) => Boolean(data.tasks && data.workers && data.executions && Array.isArray(data.alerts))) : null,
   ]);
+  const overview = overviewResult?.data;
 
   return (
     <>
@@ -90,14 +93,24 @@ export default async function Home({ searchParams }: {
             </div>
             <div className="workspace-panels">
               {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []}
-                overview={overview} taskId={query.task} live={!query.task && query.section !== 'operations'} />}
+                overview={overview ?? null} overviewFeedback={overviewResult?.issue &&
+                  <SectionReadError label="项目运行概览" issue={overviewResult.issue} />} taskId={query.task} live={!query.task && query.section !== 'operations'} />}
               {selected && query.section === 'operations' && <div className="inline-fields"><Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}#task-detail` : '#tasks-heading'}`}>返回项目工作台</Link></div>}
-              {selected && query.section === 'operations' && <Operations project={selected} />}
+              {selected && query.section === 'operations' && <DataPanel key={selected.id} id="operations"
+                headingId="operations-heading" title="项目用量与审计">
+                <Operations project={selected} />
+              </DataPanel>}
               {selected && <Tasks project={selected} selectedId={query.task} requirementResult={query.requirementResult} notice={query.notice} />}
-              {selected && <Repositories project={selected} installation={query.installation}
-                manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
-              {selected && <Agents project={selected} />}
-              {selected && <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
+              {selected && <DataPanel key={`repositories:${selected.id}:${query.installation ?? ''}`} headingId="repository-heading" title="GitHub 仓库">
+                <Repositories project={selected} installation={query.installation}
+                  manage={admin && selected.role === 'owner' && selected.status === 'active'} />
+              </DataPanel>}
+              {selected && <DataPanel key={`agents:${selected.id}`} id="agent-registry" headingId="agent-heading" title="Agent 与 Skill">
+                <Agents project={selected} />
+              </DataPanel>}
+              {selected && <DataPanel key={`workers:${selected.id}`} headingId="workers-heading" title="项目 Worker">
+                <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />
+              </DataPanel>}
               {admin && <CreateAccount users={users ?? []} />}
             </div>
             {selected && overview && <aside className="status-sidebar" aria-label="运行状态">

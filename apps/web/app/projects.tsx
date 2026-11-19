@@ -1,5 +1,6 @@
 import type { Account, Project, ProjectMember, ProjectOverview } from '@ado/shared';
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { archiveProject, changeMember, createProject, createUser, updateProject } from './actions';
 import { RefreshExecution } from './refresh-execution';
 
@@ -42,11 +43,12 @@ export function ProjectSidebar({ projects, selected, admin }: {
   );
 }
 
-export function ProjectDetails({ project, members, users, overview, taskId, live }: {
+export function ProjectDetails({ project, members, users, overview, overviewFeedback, taskId, live }: {
   project: Project;
   members: ProjectMember[];
   users: Account[];
   overview: ProjectOverview | null;
+  overviewFeedback?: ReactNode;
   taskId?: string;
   live: boolean;
 }) {
@@ -57,6 +59,7 @@ export function ProjectDetails({ project, members, users, overview, taskId, live
       <h2 id="project-heading">{project.name}</h2>
       <p className="muted">{project.code} · {project.status === 'active' ? '进行中' : '已归档'} · {roleNames[project.role]}</p>
       {project.description && <p className="description">{project.description}</p>}
+      {overviewFeedback}
       {overview && <>
         {live && project.status === 'active' && <RefreshExecution intervalMs={15000} />}
         <dl className="project-metrics">

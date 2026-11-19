@@ -1,6 +1,7 @@
 import { agentRoleLabels, type AgentRole, type Project, type ProjectOperations } from '@ado/shared';
 import { saveModelRate } from './actions';
-import { read } from './api-client';
+import { readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 
 const actions: Record<string, string> = {
   'project.created': '创建项目', 'project.updated': '更新项目', 'project.archived': '归档项目',
@@ -24,11 +25,11 @@ function displayRate(value: string) {
 }
 
 export async function Operations({ project }: { project: Project }) {
-  const operations = await read<ProjectOperations>(`/projects/${project.id}/operations`);
-  if (!operations) return null;
+  const { data: operations, issue } = await readSection<ProjectOperations>(`/projects/${project.id}/operations`,
+    (data) => Array.isArray(data.usage) && (data.audit === null || Array.isArray(data.audit)) && (data.rates === null || Array.isArray(data.rates)));
+  if (issue) return <SectionReadError label="项目用量与审计" issue={issue} />;
   return (
-    <section id="operations" className="panel" aria-labelledby="operations-heading">
-      <h2 id="operations-heading">项目用量与审计</h2>
+    <>
       <h3>已记录的模型用量</h3>
       {operations.usage.length ? <ul className="members">{operations.usage.map((usage) => (
         <li key={`${usage.role}/${usage.model}`}>
@@ -74,6 +75,6 @@ export async function Operations({ project }: { project: Project }) {
           </li>
         ))}</ol> : <p className="muted">暂无审计记录。</p>}
       </>}
-    </section>
+    </>
   );
 }

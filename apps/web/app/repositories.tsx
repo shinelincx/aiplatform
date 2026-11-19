@@ -1,6 +1,7 @@
 import type { GitHubInstallation, GitHubRepository, Project, RepositoryBinding } from '@ado/shared';
 import { bindRepository, updateRepositoryChecks } from './actions';
-import { read } from './api-client';
+import { readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 
 export async function Repositories({ project, manage, installation }: {
   project: Project;
@@ -8,19 +9,22 @@ export async function Repositories({ project, manage, installation }: {
   installation?: string;
 }) {
   const path = `/projects/${project.id}/repositories`;
-  const [bindings, result] = await Promise.all([
-    read<RepositoryBinding[]>(path),
-    manage ? read<{ configured: boolean; installations: GitHubInstallation[] }>(`${path}/installations`)
-      .catch(() => null) : null,
+  const [bindingsResult, installationsResult] = await Promise.all([
+    readSection<RepositoryBinding[]>(path, Array.isArray),
+    manage ? readSection<{ configured: boolean; installations: GitHubInstallation[] }>(`${path}/installations`,
+      (data) => typeof data.configured === 'boolean' && Array.isArray(data.installations)) : null,
   ]);
+  const { data: bindings, issue } = bindingsResult;
+  const result = installationsResult?.data;
   const chosen = result?.installations.find(({ id }) => String(id) === installation) ?? result?.installations[0];
-  const candidates = chosen ? await read<GitHubRepository[]>(`${path}/installations/${chosen.id}`).catch(() => null) : null;
+  const candidatesResult = chosen
+    ? await readSection<GitHubRepository[]>(`${path}/installations/${chosen.id}`, Array.isArray) : null;
+  const candidates = candidatesResult?.data;
   const canConfigure = project.role === 'owner' && project.status === 'active';
 
   return (
-    <section className="panel" aria-labelledby="repository-heading">
-      <h2 id="repository-heading">GitHub 仓库</h2>
-      {bindings?.length ? <ul className="members">
+    <>
+      {issue ? <SectionReadError label="已绑定仓库" issue={issue} /> : bindings.length ? <ul className="members">
         {bindings.map(({ id, url, fullName, defaultBranch, checks, autoDraftPr }) => (
           <li key={id}>
             <div>
@@ -45,7 +49,7 @@ export async function Repositories({ project, manage, installation }: {
           </li>
         ))}
       </ul> : <p className="muted">尚未绑定仓库。</p>}
-      {manage && !result && <p role="status">无法读取 GitHub App 授权，请检查配置。</p>}
+      {installationsResult?.issue && <SectionReadError label="GitHub App 授权" issue={installationsResult.issue} />}
       {manage && result && !result.configured && <p className="muted">配置并安装 GitHub App 后可选择仓库。</p>}
       {result?.configured && result.installations.length === 0 && <p className="muted">GitHub App 暂无有效安装。</p>}
       {chosen && <>
@@ -56,7 +60,7 @@ export async function Repositories({ project, manage, installation }: {
           </select>
           <button className="secondary">查看仓库</button>
         </form>
-        {candidates?.length ? (
+        {candidatesResult?.issue ? <SectionReadError label="已授权仓库" issue={candidatesResult.issue} /> : candidates?.length ? (
           <form className="fields repository-form" action={bindRepository} key={chosen.id}>
             <input type="hidden" name="projectId" value={project.id} />
             <input type="hidden" name="installationId" value={chosen.id} />
@@ -66,8 +70,8 @@ export async function Repositories({ project, manage, installation }: {
             <label>任务默认分支<input name="defaultBranch" maxLength={255} placeholder="留空使用 GitHub 默认分支" /></label>
             <button>保存绑定</button>
           </form>
-        ) : <p role="status">{candidates ? '此安装没有可用仓库。' : '无法查询已授权仓库。'}</p>}
+        ) : <p className="muted">此安装没有可用仓库。</p>}
       </>}
-    </section>
+    </>
   );
 }

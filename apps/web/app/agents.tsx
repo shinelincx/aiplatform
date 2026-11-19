@@ -1,18 +1,20 @@
 import { agentRoleLabels, isPlanningFailureCategory, planningFailureMessages, type AgentPlan, type AgentRegistry, type Project } from '@ado/shared';
 import { retryAgentPlan, updateAgent, updateSkill } from './actions';
-import { read } from './api-client';
+import { readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 import { RefreshExecution } from './refresh-execution';
 
 export async function Agents({ project }: { project: Project }) {
-  const registry = await read<AgentRegistry>(`/projects/${project.id}/agent-registry`);
-  if (!registry) return null;
+  const { data: registry, issue } = await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
+    (data) => Array.isArray(data.agents) && Array.isArray(data.skills));
+  if (issue) return <SectionReadError label="Agent 与 Skill" issue={issue} />;
   const { agents, skills } = registry;
   const manage = project.role === 'owner' && project.status === 'active';
   const projectInput = <input type="hidden" name="projectId" value={project.id} />;
   return (
-    <section id="agent-registry" className="panel" aria-labelledby="agent-heading">
-      <h2 id="agent-heading">Agent 与 Skill</h2>
+    <>
       {!registry.modelConfigured && <p className="muted">规划 API 密钥尚未配置。</p>}
+      {agents.length === 0 && skills.length === 0 && <p className="muted">暂无 Agent 或 Skill。</p>}
       {agents.map((agent) => {
         const active = agent.versions.find(({ version }) => version === agent.activeVersion)!;
         const roleInput = <>{projectInput}<input type="hidden" name="role" value={agent.role} /></>;
@@ -86,7 +88,7 @@ export async function Agents({ project }: { project: Project }) {
           <button>创建 Skill</button>
         </form>
       </details>}
-    </section>
+    </>
   );
 }
 
