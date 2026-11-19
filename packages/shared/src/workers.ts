@@ -2,6 +2,7 @@ export const workerProtocolVersion = 1;
 export const workerHeartbeatMs = 15_000;
 export const workerOfflineMs = 3 * workerHeartbeatMs;
 export const workerMaxPayloadBytes = 512 * 1024;
+export const workerCredentialLifetimeHours = [8, 168, 720] as const;
 
 export const workerMessageTypes = [
   'WORKER_REGISTER', 'REGISTER_ACK', 'WORKER_HEARTBEAT', 'HEARTBEAT_ACK',
@@ -78,6 +79,7 @@ export interface WorkerReport {
   name: string;
   status: 'unregistered' | 'online' | 'disconnected' | 'disabled';
   lastHeartbeatAt: string | null;
+  credentialExpiresAt: string;
   capabilities: WorkerCapabilities | null;
 }
 

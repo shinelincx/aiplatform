@@ -46,12 +46,16 @@ const first = await project('WORKERS');
 const second = await project('ISOLATED');
 const collection = `/projects/${first.id}/workers`;
 const secondPath = `/projects/${second.id}/workers`;
+await request(collection, { token: admin, method: 'POST', body: { name: 'Invalid lifetime', lifetimeHours: 721 }, status: 400 });
 const credential = await request(collection, { token: admin, method: 'POST', body: { name: 'Integration Worker' }, status: 201 });
 const lookup = async () => {
   const [report] = await request(collection, { token: admin });
   return report;
 };
-assert.equal((await lookup()).status, 'unregistered');
+const unregistered = await lookup();
+assert.equal(unregistered.status, 'unregistered');
+assert.equal(unregistered.credentialExpiresAt, credential.expiresAt);
+assert(Math.abs(Date.parse(credential.expiresAt) - Date.now() - 8 * 60 * 60_000) < 60_000);
 assert.deepEqual(await request(secondPath, { token: admin }), []);
 await request(`${secondPath}/${credential.workerId}/credential`, { token: admin, method: 'POST', status: 404 });
 
@@ -128,9 +132,15 @@ try {
   await request(`${secondPath}/${credential.workerId}`, { token: admin, method: 'DELETE', status: 204 });
   assert.deepEqual(await request(secondPath, { token: admin }), []);
 
-  const renewed = await request(`${collection}/${credential.workerId}/credential`, { token: admin, method: 'POST' });
+  const credentialPath = `${collection}/${credential.workerId}/credential`;
+  await request(credentialPath, { token: admin, method: 'POST', body: { lifetimeHours: '720' }, status: 400 });
+  assert.equal((await lookup()).status, 'online');
+  const renewed = await request(credentialPath, { token: admin, method: 'POST', body: { lifetimeHours: 720 } });
   assert.notEqual(renewed.token, credential.token);
-  assert.equal((await lookup()).status, 'disconnected');
+  assert(Math.abs(Date.parse(renewed.expiresAt) - Date.now() - 720 * 60 * 60_000) < 60_000);
+  const disconnected = await lookup();
+  assert.equal(disconnected.status, 'disconnected');
+  assert.equal(disconnected.credentialExpiresAt, renewed.expiresAt);
   for (const connection of sessions) connection.destroy();
   assert.equal(await awaitExit(agent), 1);
   const next = run(renewed);
@@ -139,7 +149,7 @@ try {
   for (const connection of sessions) connection.destroy();
   assert.equal(await awaitExit(next), 1);
   assert.equal((await lookup()).status, 'disabled');
-  console.log(`Worker registration, heartbeat, reconnect, project access, rotation and disable passed on ${process.platform}`);
+  console.log(`Worker registration, heartbeat, reconnect, project access, credential validity and rotation, and disable passed on ${process.platform}`);
 } finally {
   for (const child of agents) child.kill();
   for (const connection of sessions) connection.destroy();

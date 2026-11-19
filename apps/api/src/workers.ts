@@ -4,14 +4,13 @@ import {
 } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { isWorkerId, workerOfflineMs, type Account, type WorkerCapabilities, type WorkerCredential,
+import { isWorkerId, workerCredentialLifetimeHours, workerOfflineMs, type Account, type WorkerCapabilities, type WorkerCredential,
   type WorkerHeartbeat, type WorkerReport, type WorkerResources } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 
-const credentialLifetimeMs = 8 * 60 * 60 * 1000;
 const hasActiveProject = `EXISTS (
   SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id
   WHERE wp.worker_id = w.id AND p.status = 'active'
@@ -30,6 +29,13 @@ export const workerCanVerify = `(jsonb_array_length(r.check_plan) = 0 OR (
 
 function credentialHash(token: string) {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function credentialExpiry(lifetime: unknown) {
+  const hours = lifetime === undefined ? workerCredentialLifetimeHours[0]
+    : workerCredentialLifetimeHours.find((option) => option === lifetime);
+  if (hours === undefined) throw new BadRequestException('Invalid Worker credential lifetime');
+  return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
 }
 
 export function parseWorkerCredentials(authorization?: string) {
@@ -98,6 +104,7 @@ export class WorkersService {
     await this.projects.access(actor.id, projectId);
     const { rows } = await this.db.pool.query<WorkerReport>(
       `SELECT w.id, w.name, w.capabilities, w.last_heartbeat_at AS "lastHeartbeatAt",
+         w.credential_expires_at AS "credentialExpiresAt",
          CASE
            WHEN w.disabled THEN 'disabled'
            WHEN w.last_heartbeat_at IS NULL THEN 'unregistered'
@@ -111,9 +118,10 @@ export class WorkersService {
   }
 
   async create(actor: Account, projectId: string, body: unknown): Promise<WorkerCredential> {
-    const name = textInput(objectInput(body).name, 'name', 100);
+    const input = objectInput(body);
+    const name = textInput(input.name, 'name', 100);
+    const expiresAt = credentialExpiry(input.lifetimeHours);
     const token = randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + credentialLifetimeMs).toISOString();
     return this.db.transaction(async (client) => {
       await this.authorize(actor, projectId, client);
       const { rows: [worker] } = await client.query<{ id: string }>(
@@ -126,9 +134,9 @@ export class WorkersService {
     });
   }
 
-  async rotate(actor: Account, projectId: string, workerId: string): Promise<WorkerCredential> {
+  async rotate(actor: Account, projectId: string, workerId: string, body: unknown): Promise<WorkerCredential> {
+    const expiresAt = credentialExpiry(objectInput(body ?? {}).lifetimeHours);
     const token = randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + credentialLifetimeMs).toISOString();
     await this.db.transaction(async (client) => {
       await this.authorize(actor, projectId, client);
       const result = await client.query(
@@ -237,8 +245,8 @@ export class WorkersController {
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
   rotate(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string,
-    @Param('workerId', ParseUUIDPipe) workerId: string) {
-    return this.workers.rotate(actor, id, workerId);
+    @Param('workerId', ParseUUIDPipe) workerId: string, @Body() body: unknown) {
+    return this.workers.rotate(actor, id, workerId, body);
   }
 
   @Put(':workerId')

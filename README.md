@@ -57,7 +57,7 @@ npm run build:shared
 npm run dev -w @ado/worker
 ```
 
-默认 API 地址为 `http://127.0.0.1:3101`，可用 `API_BASE_URL` 覆盖。远程 Worker 使用 HTTPS 或 WSS 地址，由提供 TLS 的代理转发 `/workers/ws`。注册后可在项目工作台看到平台、架构和在线状态。凭证有效期为 8 小时，更新凭证会使旧凭证失效。项目所有者可撤回该项目的授权。
+默认 API 地址为 `http://127.0.0.1:3101`，可用 `API_BASE_URL` 覆盖。远程 Worker 使用 HTTPS 或 WSS 地址，由提供 TLS 的代理转发 `/workers/ws`。项目工作台显示平台、架构、在线状态、最后心跳和凭证到期时间。凭证默认有效 8 小时，项目所有者可在签发或更新时选择 7 天或 30 天。更新凭证会使旧凭证失效，项目所有者可撤回授权。
 
 ## Agent 规划与角色配置
 

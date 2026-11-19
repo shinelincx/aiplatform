@@ -360,11 +360,13 @@ export async function changeWorkerAccess(_: WorkerAccessState, form: FormData): 
   const collection = `${endpoint}/workers`;
   const operation = form.get('operation');
   const workerId = form.get('workerId');
+  const lifetime = form.get('lifetimeHours');
+  const lifetimeHours = lifetime === null ? undefined : Number(lifetime);
   let response: Response | null;
   if (operation === 'create') {
-    response = await execute(collection, { method: 'POST', body: JSON.stringify({ name: form.get('name') }) });
+    response = await execute(collection, { method: 'POST', body: JSON.stringify({ name: form.get('name'), lifetimeHours }) });
   } else if (isWorkerId(workerId) && operation === 'rotate') {
-    response = await execute(`${collection}/${workerId}/credential`, { method: 'POST' });
+    response = await execute(`${collection}/${workerId}/credential`, { method: 'POST', body: JSON.stringify({ lifetimeHours }) });
   } else if (isWorkerId(workerId) && (operation === 'grant' || operation === 'revoke')) {
     response = await execute(`${collection}/${workerId}`, { method: operation === 'grant' ? 'PUT' : 'DELETE' });
   } else {

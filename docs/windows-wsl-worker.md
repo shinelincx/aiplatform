@@ -37,7 +37,7 @@ worker="$HOME/.local/share/ado-workers/ado"
 
 在目标项目的「项目 Worker」中生成注册凭证，用编辑器填写 `$worker/worker.env` 中的 `ADO_WORKER_ID`、`ADO_WORKER_TOKEN` 和 `API_BASE_URL`。该文件权限为 `600`。本机 Docker 控制面运行在同一 WSL 发行版时，可从 WSL 验证 `http://127.0.0.1:3101/health`。远程控制面使用其 HTTPS 地址。控制面须已启动并允许 Worker 与 `/workers/ws` 建立连接。
 
-在当前版本，Worker 注册凭证有效期为 8 小时。轮换前先确认当前任务已结束，停止对应启动任务，在同一项目更新凭证并编辑 `worker.env`，随后启动任务并确认新心跳。Worker 配置和凭证只保存在 WSL 私有目录。
+Worker 注册凭证默认有效 8 小时。跨夜运行或计划跨天重启时，可在签发时选择 7 天或 30 天，并在「项目 Worker」查看到期时间。轮换前先确认当前任务已结束，停止对应启动任务，在同一项目更新凭证并编辑 `worker.env`，随后启动任务并确认新心跳。Worker 配置和凭证只保存在 WSL 私有目录。
 
 控制面使用私有 CA 签发 HTTPS 证书时，将可信 CA 的 PEM 证书保存为 `$worker/ca.crt`，然后启动或重启 Worker。启动脚本在 Node 运行前加载此文件，HTTPS 归档上传和 WSS 心跳使用同一信任链。 [Node.js 证书配置](https://nodejs.org/download/release/v24.7.0/docs/api/cli.html#node_extra_ca_certsfile)
 
