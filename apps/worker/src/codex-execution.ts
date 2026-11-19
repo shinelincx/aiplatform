@@ -23,6 +23,7 @@ interface Runtime {
   root: string;
   binary: string;
   env: Record<string, string>;
+  codexEnv: Record<string, string>;
   apiKey?: string;
   npmCacheRoot?: string;
   mavenCacheRoot?: string;
@@ -64,10 +65,15 @@ export async function configureExecution(): Promise<Runtime | undefined> {
     HOME: homedir(),
     CODEX_HOME: stateDir,
   };
+  const proxy = process.env.ADO_CODEX_HTTPS_PROXY?.trim();
+  if (proxy && !['http:', 'https:'].includes(URL.parse(proxy)?.protocol ?? '')) {
+    throw new Error('ADO_CODEX_HTTPS_PROXY must be an HTTP or HTTPS proxy URL');
+  }
+  const codexEnv = proxy ? { ...env, HTTPS_PROXY: proxy } : env;
   const { stdout } = await exec(checkedBinary, ['--version'], { env, timeout: 5000 });
   if (stdout.trim() !== `codex-cli ${codexVersion}`) throw new Error(`Worker requires Codex CLI ${codexVersion}`);
   const runtime: Runtime = {
-    root: checkedRoot, binary: checkedBinary, env, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
+    root: checkedRoot, binary: checkedBinary, env, codexEnv, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
   };
   const probe = await mkdtemp(join(checkedRoot, '.sandbox-check-'));
   try {
@@ -89,7 +95,7 @@ export async function configureExecution(): Promise<Runtime | undefined> {
 export async function verifyCodexLogin(runtime: Runtime) {
   if (runtime.apiKey) return;
   try {
-    await exec(runtime.binary, ['login', 'status'], { env: runtime.env, timeout: 5000, maxBuffer: 4096 });
+    await exec(runtime.binary, ['login', 'status'], { env: runtime.codexEnv, timeout: 5000, maxBuffer: 4096 });
   } catch {
     throw new Error('Sign in within the dedicated Codex state directory or set ADO_CODEX_API_KEY');
   }
@@ -216,7 +222,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     const profile = isolatedProfile(worktree, gitDir, runtime.binary);
     const codex = new Codex({
       codexPathOverride: runtime.binary,
-      env: runtime.env,
+      env: runtime.codexEnv,
       apiKey: runtime.apiKey,
       configOverrides: profile,
     });
