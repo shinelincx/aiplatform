@@ -187,7 +187,7 @@ export class TasksService {
       }
       if (to === 'CANCELLED' || to === 'PLANNING') {
         const cancelled = await client.query(
-          `UPDATE task_agent_plans SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL, error = NULL,
+          `UPDATE task_agent_plans SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL, error = NULL, failure_category = NULL,
            updated_at = now() WHERE project_id = $1 AND task_id = $2 AND state <> 'cancelled'`,
           [projectId, id]);
         if (cancelled.rowCount) await this.event(client, task, 'agent.plan_cancelled', { actorId: actor.id });

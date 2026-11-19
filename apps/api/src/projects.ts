@@ -102,7 +102,7 @@ export class ProjectsService {
       await client.query(
         `WITH cancelled AS (
           UPDATE task_agent_plans SET state = 'cancelled', lease_id = NULL, lease_expires_at = NULL,
-            error = NULL, updated_at = now()
+            error = NULL, failure_category = NULL, updated_at = now()
           WHERE project_id = $1 AND state IN ('queued','running','failed') RETURNING project_id, task_id
          )
          INSERT INTO task_events (project_id, task_id, event_type, payload)

@@ -1,4 +1,4 @@
-import { agentRoleLabels, type AgentPlan, type AgentRegistry, type Project } from '@ado/shared';
+import { agentRoleLabels, isPlanningFailureCategory, planningFailureMessages, type AgentPlan, type AgentRegistry, type Project } from '@ado/shared';
 import { retryAgentPlan, updateAgent, updateSkill } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
@@ -100,7 +100,12 @@ const fieldLabels: Record<string, string> = {
   steps: '实施步骤', risks: '风险', testApproach: '验证思路',
 };
 
-export function PlanProgress({ projectId, plan, canRetry }: { projectId: string; plan: AgentPlan; canRetry: boolean }) {
+export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
+  projectId: string; plan: AgentPlan; canRetry: boolean; showDiagnosis: boolean;
+}) {
+  const diagnosis = showDiagnosis && plan.state === 'failed' && plan.error === 'planning_step_failed'
+    ? planningFailureMessages[isPlanningFailureCategory(plan.failureCategory) ? plan.failureCategory : 'unknown']
+    : null;
   return (
     <section aria-labelledby="agent-plan-heading">
       <h4 id="agent-plan-heading">Agent 规划</h4>
@@ -114,6 +119,7 @@ export function PlanProgress({ projectId, plan, canRetry }: { projectId: string;
       </>}
       <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
       {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
+      {diagnosis && <p><strong>{diagnosis.label}</strong> · {diagnosis.hint}</p>}
       {plan.state === 'failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}
       {plan.state === 'failed' && canRetry && <form action={retryAgentPlan}>
         <input type="hidden" name="projectId" value={projectId} />

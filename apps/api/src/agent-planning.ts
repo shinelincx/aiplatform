@@ -3,18 +3,18 @@ import {
   type OnApplicationBootstrap, type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { developerRoles, isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
-  type ArchitecturePlan, type ModelUsage, type ProductPlan, type ProjectRequirement } from '@ado/shared';
+import { developerRoles, isPlanningFailureCategory, isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
+  type ArchitecturePlan, type ModelUsage, type PlanningFailureCategory, type ProductPlan, type ProjectRequirement } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
-import { PLANNING_MODEL, validatePlanningOutput, type PlanningModel } from './planning-model';
+import { PLANNING_MODEL, PlanningFailure, validatePlanningOutput, type PlanningModel } from './planning-model';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
 
-const planFields = `task_id AS "taskId", project_id AS "projectId", state, input, assignments, steps, error,
+const planFields = `task_id AS "taskId", project_id AS "projectId", state, input, assignments, steps, error, failure_category AS "failureCategory",
   lease_id AS "leaseId"`;
 
 interface PlanRecord {
@@ -25,12 +25,15 @@ interface PlanRecord {
   assignments: Partial<Record<AgentRole, AgentAssignment>>;
   steps: AgentPlan['steps'];
   error: string | null;
+  failureCategory: string | null;
   leaseId: string | null;
 }
 
-function publicPlan(row: PlanRecord): AgentPlan {
+function publicPlan(row: PlanRecord, showDiagnosis = false): AgentPlan {
   return {
     taskId: row.taskId, state: row.state, stage: planningRoles[row.steps.length] ?? null, steps: row.steps, error: row.error,
+    ...(showDiagnosis && row.state === 'failed' && isPlanningFailureCategory(row.failureCategory)
+      && { failureCategory: row.failureCategory }),
     ...(row.input.requirement && { requirement: row.input.requirement }),
   };
 }
@@ -52,8 +55,8 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
   onApplicationBootstrap() {
     if (!this.model.available()) return;
     this.timer = setInterval(() => {
-      if (!this.busy) void this.runNext().catch((error: unknown) => {
-        this.logger.error('Planning queue could not be processed', error instanceof Error ? error.stack : undefined);
+      if (!this.busy) void this.runNext().catch(() => {
+        this.logger.error('Planning queue could not be processed');
       });
     }, 1500).unref();
   }
@@ -115,10 +118,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
   }
 
   async get(actor: Account, projectId: string, taskId: string) {
-    await this.tasks.get(actor, projectId, taskId);
+    const project = await this.projects.access(actor.id, projectId);
+    await this.tasks.find(projectId, taskId);
     const { rows: [row] } = await this.db.pool.query<PlanRecord>(
       `SELECT ${planFields} FROM task_agent_plans WHERE project_id = $1 AND task_id = $2`, [projectId, taskId]);
-    return { plan: row ? publicPlan(row) : null };
+    return { plan: row ? publicPlan(row, project.role === 'owner') : null };
   }
 
   async retry(actor: Account, projectId: string, taskId: string) {
@@ -128,7 +132,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       if (task.status !== 'PLANNING' || task.archivedAt) throw new ConflictException('Task is no longer in planning');
       if (!this.model.available()) throw new ServiceUnavailableException('Planning provider is unconfigured');
       const { rows: [row] } = await client.query<PlanRecord>(
-        `UPDATE task_agent_plans SET state = 'queued', error = NULL, updated_at = now()
+        `UPDATE task_agent_plans SET state = 'queued', error = NULL, failure_category = NULL, updated_at = now()
          WHERE project_id = $1 AND task_id = $2 AND state = 'failed' RETURNING ${planFields}`, [projectId, taskId]);
       if (!row) throw new ConflictException('There is no failed plan for this task');
       await this.tasks.event(client, task, 'agent.plan_retried', { actorId: actor.id, stage: planningRoles[row.steps.length] });
@@ -150,7 +154,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
            lease_expires_at = now() + interval '2 minutes', updated_at = now()
          FROM next WHERE a.task_id = next.task_id
          RETURNING a.task_id AS "taskId", a.project_id AS "projectId", a.state, a.input, a.assignments,
-           a.steps, a.error, a.lease_id AS "leaseId"`);
+           a.steps, a.error, a.failure_category AS "failureCategory", a.lease_id AS "leaseId"`);
       if (!row) return false;
 
       const role = planningRoles[row.steps.length];
@@ -167,10 +171,12 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         });
         usage = response.usage;
         const output = validatePlanningOutput(role, response.output);
-        if ('developer' in output && !developers.includes(output.developer)) throw new Error('Developer role is disabled');
+        if ('developer' in output && !developers.includes(output.developer)) {
+          throw new PlanningFailure('invalid_structured_output');
+        }
         step = { role, version: agent.version, model: agent.model, output };
-      } catch {
-        await this.settle(row, null, usage);
+      } catch (error) {
+        await this.settle(row, null, usage, error instanceof PlanningFailure ? error.category : 'unknown');
         return true;
       }
       await this.settle(row, step, usage);
@@ -180,7 +186,8 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
     }
   }
 
-  private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null, usage?: ModelUsage) {
+  private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null, usage?: ModelUsage,
+    category?: PlanningFailureCategory) {
     await this.db.transaction(async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [row.projectId]);
@@ -197,7 +204,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       }
       if (!step) {
         const error = 'planning_step_failed';
-        await this.saveProgress(client, row, 'failed', row.steps, error);
+        await this.saveProgress(client, row, 'failed', row.steps, error, category);
         await this.tasks.event(client, task, 'agent.plan_failed', { role: planningRoles[row.steps.length], error });
         return;
       }
@@ -223,11 +230,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
   }
 
   private async saveProgress(client: PoolClient, row: PlanRecord, state: AgentPlan['state'],
-    steps: AgentPlan['steps'], error: string | null) {
+    steps: AgentPlan['steps'], error: string | null, category: PlanningFailureCategory | null = null) {
     await client.query(
-      `UPDATE task_agent_plans SET state = $2, steps = $3, error = $4,
+      `UPDATE task_agent_plans SET state = $2, steps = $3, error = $4, failure_category = $5,
        lease_id = NULL, lease_expires_at = NULL, updated_at = now() WHERE task_id = $1`,
-      [row.taskId, state, JSON.stringify(steps), error]);
+      [row.taskId, state, JSON.stringify(steps), error, category]);
   }
 }
 

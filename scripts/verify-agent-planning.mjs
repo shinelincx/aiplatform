@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash, randomBytes } from 'node:crypto';
 import process from 'node:process';
+import { mock } from 'node:test';
 import { URL } from 'node:url';
+import { inspect } from 'node:util';
+import { planningFailureMessages } from '@ado/shared';
+import { Logger } from '@nestjs/common';
 import { AgentPlanningService } from '../apps/api/src/agent-planning.ts';
 import { AgentRegistryService } from '../apps/api/src/agent-registry.ts';
 import { ArtifactStore } from '../apps/api/src/artifacts.ts';
@@ -13,6 +17,7 @@ import { ExecutionQaService } from '../apps/api/src/execution-qa.ts';
 import { ExecutionsService } from '../apps/api/src/executions.ts';
 import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { GitHubApp } from '../apps/api/src/github.ts';
+import { openAIPlanningModel } from '../apps/api/src/planning-model.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
 
@@ -348,7 +353,132 @@ try {
   assert.deepEqual(plan.steps, []);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
-  process.stdout.write('Approved requirements, Agent handoff, QA, project usage, rate estimates and audit verified.\n');
+  const providerPlanning = new AgentPlanningService(db, projects, tasks, registry, openAIPlanningModel);
+  const credentialsMarker = 'fixture-provider-key-sensitive';
+  const providerBodyMarker = 'fixture-provider-error-body-sensitive';
+  const rawRequestMarker = 'fixture-provider-raw-request-sensitive';
+  const promptMarker = 'fixture-provider-prompt-sensitive';
+  const markers = [credentialsMarker, providerBodyMarker, rawRequestMarker, promptMarker];
+  const providerRequest = 'Exercise planning diagnostics';
+  const originalFetch = globalThis.fetch;
+  const logMethods = ['error', 'warn', 'log', 'debug', 'verbose', 'fatal'].map((method) => mock.method(Logger.prototype, method));
+  process.env.ADO_AGENT_API_KEY = credentialsMarker;
+  process.env.ADO_AGENT_MODEL = 'fixture-model';
+  const assertSafe = (value) => {
+    const serialized = JSON.stringify(value);
+    for (const marker of markers) assert(!serialized.includes(marker));
+  };
+  const showTask = async (taskId, sessionToken = token) => {
+    const page = await globalThis.fetch(new URL(`/?project=${first.id}&task=${taskId}`, web), {
+      headers: { Cookie: `ado_session=${sessionToken}` }, signal: globalThis.AbortSignal.timeout(30_000),
+    });
+    assert.equal(page.status, 200);
+    return page.text();
+  };
+  try {
+    const cases = [
+      ['timeout', 'network'], [401, 'credentials_or_permissions'], [403, 'credentials_or_permissions'],
+      [404, 'model_unavailable'], [429, 'rate_limited'], [503, 'server_error'], [418, 'unknown'],
+      ['schema', 'invalid_structured_output'], ['json', 'invalid_structured_output'],
+    ];
+    for (const [failure, category] of cases) {
+      let calls = 0;
+      globalThis.fetch = async (url, options) => {
+        if (String(url) !== 'https://api.openai.com/v1/responses') return originalFetch(url, options);
+        calls++;
+        assert.equal(options.headers.Authorization, `Bearer ${credentialsMarker}`);
+        const body = JSON.parse(options.body);
+        assert.equal(body.store, false);
+        assert(body.instructions.includes(promptMarker));
+        assert(JSON.parse(body.input).request.includes(rawRequestMarker));
+        const echoed = [providerBodyMarker, options.headers.Authorization, body.input, body.instructions].join(' ');
+        if (failure === 'timeout') throw new globalThis.DOMException(echoed, 'TimeoutError');
+        if (failure === 'json' || failure === 'schema') {
+          const text = failure === 'json' ? echoed : JSON.stringify({ objective: echoed, constraints: null });
+          return globalThis.Response.json({
+            status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }],
+          });
+        }
+        return globalThis.Response.json({ error: { message: echoed, code: 'model_not_found' } }, { status: failure });
+      };
+      const diagnostic = await providerPlanning.start(account, first.id, { repositoryId: repo.id, request: providerRequest });
+      // Markers in the invocation context must remain in the preexisting private fields.
+      await db.pool.query(
+        `UPDATE task_agent_plans
+         SET input = jsonb_set(input, '{request}', to_jsonb($2::text)),
+             assignments = jsonb_set(assignments, '{PROJECT_DIRECTOR,instructions}', to_jsonb($3::text))
+         WHERE task_id = $1`, [diagnostic.taskId, rawRequestMarker, promptMarker],
+      );
+      assert.equal(await providerPlanning.runNext(), true);
+      assert.equal(await providerPlanning.runNext(), false, 'Failed plans require an explicit retry');
+      assert.equal(calls, 1);
+      const detailPath = `${prefix}/tasks/${diagnostic.taskId}`;
+      const diagnosisPath = `${detailPath}/agent-plan`;
+      const { plan: detail } = await request(diagnosisPath, { token });
+      assert.deepEqual(detail, {
+        taskId: diagnostic.taskId, state: 'failed', stage: 'PROJECT_DIRECTOR', steps: [],
+        error: 'planning_step_failed', failureCategory: category,
+      });
+      assert.equal((await request(detailPath, { token })).status, 'PLANNING');
+      const { rows: [saved] } = await db.pool.query(
+        'SELECT error, failure_category, steps, lease_id, lease_expires_at FROM task_agent_plans WHERE task_id = $1',
+        [diagnostic.taskId],
+      );
+      assert.deepEqual(saved, {
+        error: 'planning_step_failed', failure_category: category, steps: [], lease_id: null, lease_expires_at: null,
+      });
+      const events = await request(`${detailPath}/events`, { token });
+      assert.deepEqual(events.map(({ eventType }) => eventType), ['task.created', 'agent.plan_queued', 'agent.plan_failed']);
+      assert.deepEqual(events.at(-1).payload, { role: 'PROJECT_DIRECTOR', error: 'planning_step_failed' });
+      const { audit } = await request(operationsPath, { token });
+      assert(audit.some(({ action, resourceId }) => action === 'agent.plan_failed' && resourceId === diagnostic.taskId));
+      const page = await showTask(diagnostic.taskId);
+      const { label, hint } = planningFailureMessages[category];
+      assert(page.includes(label) && page.includes(hint));
+      assertSafe({ saved, detail, events, audit, page });
+
+      if (failure === 403) {
+        const { plan: viewerPlan } = await request(diagnosisPath, { token: viewerToken });
+        assert.equal(viewerPlan.state, 'failed');
+        assert.equal(viewerPlan.failureCategory, undefined);
+        assert(!(await showTask(diagnostic.taskId, viewerToken)).includes(hint));
+        await request(`/projects/${second.id}/tasks/${diagnostic.taskId}/agent-plan`, { token: viewerToken, status: 404 });
+        for (const legacy of [null, 'fixture-unrecognized-category']) {
+          await db.pool.query('UPDATE task_agent_plans SET failure_category = $2 WHERE task_id = $1',
+            [diagnostic.taskId, legacy]);
+          assert.equal((await request(diagnosisPath, { token })).plan.failureCategory, undefined);
+          const legacyPage = await showTask(diagnostic.taskId);
+          assert(legacyPage.includes(planningFailureMessages.unknown.hint));
+          assert(!legacyPage.includes('fixture-unrecognized-category'));
+        }
+      }
+      if (failure === 429) {
+        await request(`${diagnosisPath}/retry`, { token: viewerToken, method: 'POST', status: 403 });
+        const retry = await providerPlanning.retry(account, first.id, diagnostic.taskId);
+        assert.equal(retry.state, 'queued');
+        assert.equal(retry.error, null);
+        assert.equal(retry.failureCategory, undefined);
+        const { rows: [retried] } = await db.pool.query('SELECT failure_category FROM task_agent_plans WHERE task_id = $1',
+          [diagnostic.taskId]);
+        assert.equal(retried.failure_category, null);
+        assert.equal(await providerPlanning.runNext(), true);
+        assert.equal(calls, 2);
+        assert.equal((await request(diagnosisPath, { token })).plan.failureCategory, category);
+        const retryEvents = await request(`${detailPath}/events`, { token });
+        assert.deepEqual(retryEvents.slice(-2).map(({ eventType }) => eventType), ['agent.plan_retried', 'agent.plan_failed']);
+        assertSafe(retryEvents);
+      }
+    }
+    assertSafe(inspect(logMethods.flatMap(({ mock: loggerMock }) => loggerMock.calls.map(({ arguments: args }) => args)),
+      { depth: null, maxArrayLength: null, maxStringLength: null }));
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.ADO_AGENT_API_KEY;
+    delete process.env.ADO_AGENT_MODEL;
+    mock.restoreAll();
+  }
+
+  process.stdout.write('Approved requirements, Agent handoff, QA, project usage, rate estimates, audit and planning diagnostics verified.\n');
 } finally {
   await db.onModuleDestroy();
 }
