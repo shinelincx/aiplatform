@@ -4,6 +4,7 @@ import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshD
   reviewExecution, startExecution, stopExecution } from './actions';
 import { read } from './api-client';
 import { RefreshExecution } from './refresh-execution';
+import { SubmitButton } from './task-feedback';
 
 const stateLabels: Record<ExecutionRun['status'], string> = {
   queued: '等待 Worker', running: '执行中', succeeded: '变更已生成，待测试',
@@ -145,7 +146,7 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
     {canStart && <form action={startExecution} className="fields">
       {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
-      <WorkerChoice workers={candidates} /><button>{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</button>
+      <WorkerChoice workers={candidates} /><SubmitButton pendingLabel="正在请求派发…">{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</SubmitButton>
     </form>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
@@ -218,8 +219,8 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
           {autoDraftPr && latest.artifact && <p>批准变更后将自动发布分支并创建草稿 PR。</p>}
           <label>审核意见<textarea name="comment" maxLength={1500} placeholder="驳回时请填写原因" /></label>
           <div className="inline-fields">
-            <button name="decision" value="approved">批准变更</button>
-            <button name="decision" value="rejected" className="secondary">驳回变更</button>
+            <SubmitButton name="decision" value="approved" pendingLabel="正在提交…">批准变更</SubmitButton>
+            <SubmitButton name="decision" value="rejected" className="secondary" pendingLabel="正在提交…">驳回变更</SubmitButton>
           </div>
         </form>}
       {latest.delivery && <div>

@@ -1,9 +1,17 @@
 'use client';
 
+import { workerCredentialLifetimeHours } from '@ado/shared';
 import { useActionState } from 'react';
 import { changeWorkerAccess, type WorkerAccessState } from './actions';
 
 const idle: WorkerAccessState = {};
+const lifetimeLabels = { 8: '8 小时', 168: '7 天', 720: '30 天' } as const;
+
+function CredentialLifetime() {
+  return <label>凭证有效期<select name="lifetimeHours">
+    {workerCredentialLifetimeHours.map((hours) => <option key={hours} value={hours}>{lifetimeLabels[hours]}</option>)}
+  </select></label>;
+}
 
 export function WorkerAccess({ projectId, workers }: {
   projectId: string;
@@ -18,6 +26,7 @@ export function WorkerAccess({ projectId, workers }: {
           <input type="hidden" name="projectId" value={projectId} />
           <input type="hidden" name="operation" value="create" />
           <label>Worker 名称<input name="name" maxLength={100} required /></label>
+          <CredentialLifetime />
           <button disabled={pending}>生成注册凭证</button>
         </form>
       </details>
@@ -28,6 +37,7 @@ export function WorkerAccess({ projectId, workers }: {
           <label>Worker<select name="workerId">
             {workers.map(({ id, name }) => <option key={id} value={id}>{name} · {id.slice(0, 8)}</option>)}
           </select></label>
+          <CredentialLifetime />
           <div className="inline-fields">
             <button disabled={pending} name="operation" value="rotate">更新注册凭证</button>
             <button disabled={pending} name="operation" value="revoke" className="secondary">撤回项目权限</button>

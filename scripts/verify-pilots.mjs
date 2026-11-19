@@ -6,8 +6,10 @@ import { URL } from 'node:url';
 import { verifyWorkflow } from './pilot-workflow-evidence.mjs';
 
 const args = process.argv.slice(2);
-const preflight = args[0] === '--preflight';
-const [fitbestCode, adoCode, ...extra] = preflight ? [] : args;
+const staging = args[0] === '--staging';
+const modeArgs = staging ? args.slice(1) : args;
+const preflight = modeArgs[0] === '--preflight';
+const [fitbestCode, adoCode, ...extra] = preflight ? [] : modeArgs;
 const pilots = [
   { projectCode: 'FITBEST', repository: 'shinelincx/fitbest', taskCode: fitbestCode },
   { projectCode: 'ADO', repository: 'shinelincx/aiplatform', taskCode: adoCode },
@@ -65,8 +67,9 @@ async function verifyPull(repository, delivery) {
   return matches ? pull : null;
 }
 
-async function verifyTask(pilot, path, taskCode, repositoryId) {
+async function verifyTask(pilot, path, taskCode, repositoryId, workers, workerIds) {
   const label = `${pilot.projectCode}/${taskCode}`;
+  const issueCount = issues.length;
   const task = (await request(`${path}/tasks`)).find(({ code }) => code === taskCode);
   if (!check(task, `${label} 找不到任务`)) return;
   const taskPath = `${path}/tasks/${task.id}`;
@@ -75,12 +78,15 @@ async function verifyTask(pilot, path, taskCode, repositoryId) {
   ]);
   const plan = planResponse.plan;
   check(task.repositoryId === repositoryId, `${label} 任务未使用指定仓库`);
-  check(task.status === 'COMPLETED', `${label} 任务状态为 ${task.status}`);
+  const acceptedStatuses = staging ? ['REVIEW', 'MERGED', 'COMPLETED'] : ['COMPLETED'];
+  check(acceptedStatuses.includes(task.status), `${label} 任务状态为 ${task.status}`);
   check(task.developer?.version > 0 && task.acceptanceCriteria.length > 0, `${label} 缺少责任 Agent 或验收标准`);
   check(plan?.state === 'completed'
     && plan.steps.map(({ role }) => role).join(',') === 'PROJECT_DIRECTOR,PRODUCT_MANAGER,ARCHITECT',
   `${label} 缺少已完成的 Agent 规划`);
-  if (pilot.projectCode === 'FITBEST') check(plan?.requirement?.id && plan.requirement.referenceUrl, `${label} 缺少已批准需求出处`);
+  if (staging || pilot.projectCode === 'FITBEST') {
+    check(plan?.requirement?.id && plan.requirement.referenceUrl, `${label} 缺少已批准需求出处`);
+  }
   check(history.some(({ eventType, payload }) => eventType === 'task.status_changed' && payload.to === 'READY' && payload.actorId),
     `${label} 缺少人工批准任务记录`);
 
@@ -103,6 +109,21 @@ async function verifyTask(pilot, path, taskCode, repositoryId) {
     const patch = await request(`${runPath}/artifact`, { binary: true });
     check(patch.length === run.artifact.size && createHash('sha256').update(patch).digest('hex') === run.artifact.sha256,
       `${label} 受测补丁校验失败`);
+  }
+
+  if (staging) {
+    const worker = workers.find(({ id }) => id === run.workerId);
+    if (check(worker?.status === 'online' && worker.capabilities?.codexVersion && worker.lastHeartbeatAt,
+      `${label} 执行该任务的 Codex Worker 当前没有可用心跳`)) workerIds.add(worker.id);
+    check(run.checkPlan?.length > 0 && run.checkPlan.length === report?.checks.length
+      && run.checkPlan.every(({ name }, index) => name === report.checks[index].name), `${label} 通过的检查与派发时保存的检查计划不一致`);
+    check(run.evidence?.some(({ patchHash, summary, author }) => patchHash === report?.patchHash && summary && author)
+      && history.some(({ eventType, payload }) => eventType === 'task.review_evidence_added'
+        && payload.runId === run.id && payload.actorId && payload.patchHash === report?.patchHash), `${label} 缺少当前补丁的人工复验证据`);
+    check(history.some(({ eventType, payload }) => eventType === 'task.execution_reviewed'
+      && payload.runId === run.id && payload.actorId && payload.decision === 'approved'), `${label} 缺少本轮候选的人工审批事件`);
+    if (issues.length === issueCount) process.stdout.write(`${label} · ${worker.name} · SHA-256 ${report.patchHash}\n`);
+    return;
   }
 
   const delivery = run.delivery;
@@ -133,7 +154,8 @@ async function inspectInstallation(pilot, path, binding) {
     if (!check(installations.length > 0, `${label} 的 GitHub App 暂无有效安装`) || !binding) return;
     const installation = installations.find(({ id }) => String(id) === binding.installationId);
     if (!check(installation, `${label} 绑定的 GitHub App 安装失效或已暂停`)) return;
-    check(installation.canPublish === true, `${label} GitHub App 安装缺少 Contents: Write 或 Pull requests: Write 权限`);
+    if (staging) check(installation.canReadContents === true, `${label} GitHub App 安装缺少 Contents: Read 权限`);
+    else check(installation.canPublish === true, `${label} GitHub App 安装缺少 Contents: Write 或 Pull requests: Write 权限`);
     const accessible = await request(`${path}/repositories/installations/${installation.id}`);
     check(accessible.some((repo) => String(repo.id) === binding.githubId && repo.fullName.toLowerCase() === pilot.repository),
       `${label} 的 GitHub App 安装无法访问已绑定仓库`);
@@ -150,8 +172,10 @@ async function inspectPilot(pilot, projects, workerIds) {
   const binding = bindings.find(({ fullName }) => fullName.toLowerCase() === pilot.repository.toLowerCase());
   check(binding, `${pilot.projectCode} 尚未绑定 ${pilot.repository}`);
   if (pilot.taskCode) {
-    for (const worker of workers) if (worker.capabilities?.codexVersion) workerIds.add(worker.id);
-    await verifyTask(pilot, path, pilot.taskCode, binding?.id);
+    if (!staging) {
+      for (const worker of workers) if (worker.capabilities?.codexVersion) workerIds.add(worker.id);
+    }
+    await verifyTask(pilot, path, pilot.taskCode, binding?.id, workers, workerIds);
     return;
   }
 
@@ -159,7 +183,8 @@ async function inspectPilot(pilot, projects, workerIds) {
   const owner = check(project.role === 'owner', `${pilot.projectCode} 须以项目所有者账号进行预检`);
   if (binding) {
     check(binding.checks.length > 0, `${pilot.projectCode} 仓库尚未配置自动检查计划`);
-    check(binding.autoDraftPr === true, `${pilot.projectCode} 仓库尚未启用自动草稿 PR`);
+    if (staging) check(binding.autoDraftPr === false, `${pilot.projectCode} 请关闭自动草稿 PR，再进行候选审批演练`);
+    else check(binding.autoDraftPr === true, `${pilot.projectCode} 仓库尚未启用自动草稿 PR`);
   }
   const [registry, sources] = await Promise.all([
     request(`${path}/agent-registry`), request(`${path}/requirements`),
@@ -180,13 +205,14 @@ async function inspectPilot(pilot, projects, workerIds) {
       `${pilot.projectCode} 在线 Worker 须支持自动检查、补丁归档${needsMaven ? '和 Maven' : ''}，并具备足够磁盘空间`);
   }
   for (const worker of eligible) workerIds.add(worker.id);
-  if (pilot.projectCode === 'FITBEST') check(sources.length > 0, 'FITBEST 尚未登记已批准的试点需求');
+  if (staging || pilot.projectCode === 'FITBEST') check(sources.length > 0, `${pilot.projectCode} 尚未登记已批准的试点需求`);
   if (!preflight) check(false, `${pilot.projectCode} 缺少待验证的试点任务编号`);
 }
 
 try {
-  assert(preflight ? args.length === 1 : extra.length === 0 && args.every((value) => !value.startsWith('--')),
-    '用法：node --env-file=.env scripts/verify-pilots.mjs [--preflight | Fitbest任务编号 ADO任务编号]');
+  assert(preflight ? modeArgs.length === 1 : extra.length === 0 && (!staging || Boolean(fitbestCode && adoCode))
+    && modeArgs.every((value) => !value.startsWith('--')),
+  '用法：node --env-file=.env scripts/verify-pilots.mjs [--staging] --preflight 或 [--staging] Fitbest任务编号 ADO任务编号');
   assert(email && password, '请配置 ADO_VERIFY_EMAIL 和 ADO_VERIFY_PASSWORD，或使用已有本地管理员配置');
   assert(api && !api.username && !api.password && (api.protocol === 'https:'
     || (api.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(api.hostname))),
@@ -197,13 +223,16 @@ try {
   for (const pilot of pilots) {
     await inspectPilot(pilot, projects, workerIds).catch((error) => issues.push(`${pilot.projectCode} ${error.message}`));
   }
-  check(workerIds.size >= 2, preflight ? '两个试点合计可用的在线 Codex 执行 Worker 少于两台' : '两个项目可见的 Codex 执行 Worker 少于两台');
+  check(workerIds.size >= 2, preflight || staging
+    ? '两个试点合计可用的在线 Codex 执行 Worker 少于两台' : '两个项目可见的 Codex 执行 Worker 少于两台');
   if (issues.length) {
     for (const issue of issues) process.stderr.write(`待验收 · ${issue}\n`);
     process.exitCode = 1;
   } else {
-    process.stdout.write(preflight ? 'Fitbest 和 ADO 试点的启动前配置检查通过。\n'
-      : '两个试点任务的规划、审批、执行、受测补丁、GitHub Actions 和合并证据均已核对。\n');
+    const message = preflight ? `Fitbest 和 ADO ${staging ? '预发布' : '试点'}的启动前配置检查通过。`
+      : staging ? '两个预发布任务的需求出处、人工审批、Codex 执行、检查计划、QA、归档补丁和人工复验证据均已核对。'
+        : '两个试点任务的规划、审批、执行、受测补丁、GitHub Actions 和合并证据均已核对。';
+    process.stdout.write(`${message}\n`);
   }
 } catch (error) {
   process.stderr.write(`${error.message}\n`);

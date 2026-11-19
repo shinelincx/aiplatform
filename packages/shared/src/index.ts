@@ -5,7 +5,7 @@ export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './ta
 export { agentRoleLabels, developerRoles, isPlanningFailureCategory, planningFailureMessages, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
   DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, SkillVersion } from './agents';
-export { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,
+export { decodeWorkerMessage, isWorkerId, workerCredentialLifetimeHours, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,
   workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,
   WorkerRecovery, WorkerReport, WorkerResources } from './workers';

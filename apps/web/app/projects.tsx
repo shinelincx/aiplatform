@@ -42,17 +42,18 @@ export function ProjectSidebar({ projects, selected, admin }: {
   );
 }
 
-export function ProjectDetails({ project, members, users, overview, live }: {
+export function ProjectDetails({ project, members, users, overview, taskId, live }: {
   project: Project;
   members: ProjectMember[];
   users: Account[];
   overview: ProjectOverview | null;
+  taskId?: string;
   live: boolean;
 }) {
   const canEdit = project.role === 'owner' && project.status === 'active';
   const assignable = users.filter((user) => user.status === 'active' && !members.some((member) => member.id === user.id));
   return (
-    <section className="panel" aria-labelledby="project-heading">
+    <section className="panel project-overview" aria-labelledby="project-heading">
       <h2 id="project-heading">{project.name}</h2>
       <p className="muted">{project.code} · {project.status === 'active' ? '进行中' : '已归档'} · {roleNames[project.role]}</p>
       {project.description && <p className="description">{project.description}</p>}
@@ -65,8 +66,6 @@ export function ProjectDetails({ project, members, users, overview, live }: {
           <div><dt>在线 Worker</dt><dd>{overview.workers.online} / {overview.workers.total}</dd>
             {overview.workers.diskPaused > 0 && <small>{overview.workers.diskPaused} 台因磁盘空间不足暂停领取</small>}
           </div>
-          <div><dt>执行队列</dt><dd>{overview.executions.queued} 项排队 · {overview.executions.running} 项运行</dd></div>
-          <div><dt>成功执行</dt><dd>{overview.executions.succeeded} / {overview.executions.total}</dd></div>
         </dl>
         {overview.alerts.length > 0 && <>
           <h3>需要处理</h3>
@@ -77,6 +76,9 @@ export function ProjectDetails({ project, members, users, overview, live }: {
           </nav>
         </>}
       </>}
+      <details className="project-settings"><summary>项目设置与运行信息</summary>
+      {overview && <p className="execution-summary">执行队列 · {overview.executions.queued} 项排队 · {overview.executions.running} 项运行 / 成功执行 · {overview.executions.succeeded} / {overview.executions.total}</p>}
+      <p><Link href={`/?project=${project.id}${taskId ? `&task=${encodeURIComponent(taskId)}` : ''}&section=operations#operations`}>项目用量与审计</Link></p>
       {canEdit && (
         <details>
           <summary>编辑项目</summary>
@@ -130,6 +132,7 @@ export function ProjectDetails({ project, members, users, overview, live }: {
           </form>
         </details>
       )}
+      </details>
     </section>
   );
 }

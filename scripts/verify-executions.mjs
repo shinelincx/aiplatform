@@ -59,6 +59,12 @@ async function postForm(url, form, cookie) {
   });
 }
 
+function findFormByButton(html, label) {
+  return Array.from(html.matchAll(/<form\b[^>]*>[\s\S]*?<\/form>/g), ([form]) => form)
+    .find((form) => Array.from(form.matchAll(/<button\b[^>]*>([\s\S]*?)<\/button>/g), ([, content]) => content)
+      .some((content) => content.replace(/<[^>]*>/g, '').trim() === label));
+}
+
 async function open(credential, execute = true, verify = false, archive = false, maven = false) {
   const endpoint = new URL('/workers/ws', workerApi);
   endpoint.protocol = workerApi.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -162,7 +168,7 @@ try {
   assert.equal(rendered.status, 200);
   const workbench = await rendered.text();
   assert(workbench.includes('责任 Agent') && workbench.includes('前端工程师'));
-  const formHtml = workbench.match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*派发任务<\/button><\/form>/)?.[0];
+  const formHtml = findFormByButton(workbench, '派发任务');
   const action = formHtml?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
   assert(action, 'Expected approved task dispatch form');
   assert(formHtml.includes(approved.workerId), 'Expected a project Worker in the dispatch form');
@@ -579,7 +585,7 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   assert.match(downloaded.headers.get('content-disposition'), /attachment/);
   assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), patchBytes);
   const pendingReview = await globalThis.fetch(reviewPage, { headers: { Cookie: cookie } });
-  const approvalForm = (await pendingReview.text()).match(/<form[^>]*>(?:(?!<\/form>)[\s\S])*批准变更<\/button>(?:(?!<\/form>)[\s\S])*<\/form>/)?.[0];
+  const approvalForm = findFormByButton(await pendingReview.text(), '批准变更');
   const approvalAction = approvalForm?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
   assert(approvalAction, 'Expected a human review form after checks passed');
   const approveForm = new globalThis.FormData();

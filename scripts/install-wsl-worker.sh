@@ -73,6 +73,7 @@ ADO_WORKER_TOKEN=
 # ADO_CODEX_HTTPS_PROXY=http://proxy.example:7897
 # ADO_NPM_CACHE_ROOT=/absolute/path/to/cache/npm
 # ADO_MAVEN_CACHE_ROOT=/absolute/path/to/cache/maven
+# ADO_WORKER_EXECUTION_TIMEOUT_MINUTES=12
 ENV
 fi
 [[ -f $instance/worker.env && ! -L $instance/worker.env ]] || {
@@ -92,7 +93,7 @@ export ADO_EXECUTION_ROOT="$instance/jobs"
 export ADO_CODEX_STATE_DIR="$instance/codex"
 export ADO_CODEX_BIN="$PWD/$binary_rel"
 unset API_BASE_URL ADO_WORKER_ID ADO_WORKER_TOKEN ADO_CODEX_API_KEY ADO_CODEX_HTTPS_PROXY \
-  ADO_NPM_CACHE_ROOT ADO_MAVEN_CACHE_ROOT ADO_MIN_FREE_DISK_MIB
+  ADO_NPM_CACHE_ROOT ADO_MAVEN_CACHE_ROOT ADO_MIN_FREE_DISK_MIB ADO_WORKER_EXECUTION_TIMEOUT_MINUTES
 case ${1:-start} in
   start)
     exec >>"$instance/worker.log" 2>&1

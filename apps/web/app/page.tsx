@@ -31,7 +31,6 @@ const issues: Record<string, string> = {
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
   'worker-assignment': '无法分配 Worker，请检查任务是否仍在排队，以及 Worker 的项目授权和执行能力。',
-  requirement: '无法保存需求来源，请核对 HTTPS 链接、标题和批准内容摘录。',
   'model-rate': '无法保存费率，请核对模型标识和每百万 token 的非负美元金额。',
   'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
   'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
@@ -40,7 +39,7 @@ const issues: Record<string, string> = {
 };
 
 export default async function Home({ searchParams }: {
-  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string }>;
+  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string; requirementResult?: string }>;
 }) {
   const query = await searchParams;
   const [connection, accountResult] = await Promise.allSettled([
@@ -60,41 +59,54 @@ export default async function Home({ searchParams }: {
 
   return (
     <>
-      <header>
-        <strong>ADO</strong><span>研发管理平台</span>
+      <header className="app-header">
+        <div className="brand"><strong>ADO</strong><span>研发管理平台</span></div>
+        {account && selected && <nav className="top-nav" aria-label="工作台导航">
+          <a href="#project-heading">项目</a>
+          <a href="#tasks-heading">任务</a>
+          <a href="#tasks-heading">审批</a>
+          <a href="#agent-heading">Agent</a>
+          <a href="#workers-heading">Worker</a>
+        </nav>}
         {account && <form className="header-session" action={logout}>
           <span>{account.name}</span><button className="secondary">退出</button>
         </form>}
       </header>
       <main className={account ? 'workspace' : undefined}>
-        <div className="heading">
+        {!account && <div className="heading">
           <h1>{account ? '项目工作台' : '登录研发平台'}</h1>
           <p className="connection" data-offline={!reachable}>
             控制面 API · {reachable ? '连接正常' : '连接失败'}
           </p>
-        </div>
+        </div>}
         {query.issue && Object.hasOwn(issues, query.issue) && <p role="alert" className="feedback">{issues[query.issue]}</p>}
         {query.notice === 'user-created' && account && <p role="status">账号已创建。</p>}
         {query.notice === 'checks-saved' && account && <p role="status">检查与交付设置已保存。</p>}
         {account ? (
           <div className="workspace-grid">
-            <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
+            <div className="workspace-sidebar">
+              <div className="workspace-title"><h1>项目工作台</h1><p className="connection" data-offline={!reachable}>控制面 API · {reachable ? '连接正常' : '连接失败'}</p></div>
+              <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
+            </div>
             <div className="workspace-panels">
               {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []}
-                overview={overview} live={!query.task && query.section !== 'operations'} />}
-              {selected && <div className="inline-fields">
-                {query.section === 'operations'
-                  ? <Link href={`/?project=${selected.id}`}>返回项目工作台</Link>
-                  : <Link href={`/?project=${selected.id}&section=operations#operations`}>项目用量与审计</Link>}
-              </div>}
+                overview={overview} taskId={query.task} live={!query.task && query.section !== 'operations'} />}
+              {selected && query.section === 'operations' && <div className="inline-fields"><Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}#task-detail` : '#tasks-heading'}`}>返回项目工作台</Link></div>}
               {selected && query.section === 'operations' && <Operations project={selected} />}
+              {selected && <Tasks project={selected} selectedId={query.task} requirementResult={query.requirementResult} notice={query.notice} />}
               {selected && <Repositories project={selected} installation={query.installation}
                 manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
-              {selected && <Tasks project={selected} selectedId={query.task} />}
               {selected && <Agents project={selected} />}
               {selected && <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
               {admin && <CreateAccount users={users ?? []} />}
             </div>
+            {selected && overview && <aside className="status-sidebar" aria-label="运行状态">
+              <h2>运行状态</h2>
+              <section><h3>任务</h3><dl><div><dt>进行中</dt><dd>{overview.tasks.open} 项</dd></div><div><dt>已完成</dt><dd>{overview.tasks.completed} 项</dd></div></dl></section>
+              <section><h3>审批</h3><dl><div><dt>待审批方案</dt><dd>{overview.tasks.approval} 项</dd></div></dl></section>
+              <section><h3>Agent</h3><dl><div><dt>已启用</dt><dd>{overview.agentsEnabled} 个</dd></div></dl></section>
+              <section><h3>Worker</h3><dl><div><dt>在线</dt><dd>{overview.workers.online} / {overview.workers.total}</dd></div></dl></section>
+            </aside>}
           </div>
         ) : (
           <form className="panel fields login" action={login}>

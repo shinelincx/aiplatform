@@ -101,6 +101,7 @@ export class GitHubApp {
         if (item.account && !item.suspended_at) {
           results.push({
             id: item.id, account: item.account.login,
+            canReadContents: item.permissions?.contents === 'read' || item.permissions?.contents === 'write',
             canPublish: item.permissions?.contents === 'write' && item.permissions?.pull_requests === 'write',
           });
         }

@@ -22,6 +22,7 @@ class ExecutionFailure extends Error {
 interface Runtime {
   root: string;
   binary: string;
+  executionTimeoutMs: number;
   env: Record<string, string>;
   codexEnv: Record<string, string>;
   apiKey?: string;
@@ -40,6 +41,10 @@ export async function configureExecution(): Promise<Runtime | undefined> {
   }
   if (!root || !binary || !state || ![root, binary, state].every(isAbsolute)) {
     throw new Error('Set absolute ADO_EXECUTION_ROOT, ADO_CODEX_BIN and ADO_CODEX_STATE_DIR paths');
+  }
+  const timeoutMinutes = Number(process.env.ADO_WORKER_EXECUTION_TIMEOUT_MINUTES ?? '12');
+  if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 45) {
+    throw new Error('ADO_WORKER_EXECUTION_TIMEOUT_MINUTES must be a whole number from 1 to 45');
   }
   const [checkedRoot, checkedBinary, stateDir] = await Promise.all([realpath(root), realpath(binary), realpath(state)]);
   const contains = (parent: string, path: string) =>
@@ -73,7 +78,8 @@ export async function configureExecution(): Promise<Runtime | undefined> {
   const { stdout } = await exec(checkedBinary, ['--version'], { env, timeout: 5000 });
   if (stdout.trim() !== `codex-cli ${codexVersion}`) throw new Error(`Worker requires Codex CLI ${codexVersion}`);
   const runtime: Runtime = {
-    root: checkedRoot, binary: checkedBinary, env, codexEnv, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
+    root: checkedRoot, binary: checkedBinary, executionTimeoutMs: timeoutMinutes * 60_000,
+    env, codexEnv, apiKey: process.env.ADO_CODEX_API_KEY, npmCacheRoot, mavenCacheRoot,
   };
   const probe = await mkdtemp(join(checkedRoot, '.sandbox-check-'));
   try {
@@ -205,7 +211,7 @@ export function summarizeItem(event: ThreadEvent, detailed: boolean) {
 }
 
 export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, report: Report, cancellation: AbortSignal) {
-  const timeout = AbortSignal.timeout(12 * 60_000);
+  const timeout = AbortSignal.timeout(runtime.executionTimeoutMs);
   const signal = AbortSignal.any([cancellation, timeout]);
   try {
     await rejectCustomConfig(runtime.env.CODEX_HOME);

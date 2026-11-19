@@ -33,6 +33,22 @@ docker compose -p ado-staging up -d --build --wait
 
 按 [Windows + WSL2 Worker 安装与运行手册](windows-wsl-worker.md) 创建预发布专用实例。在预发布项目生成注册凭证，把 `API_BASE_URL` 设置为 HTTPS 网关地址。若使用私有 CA，将 CA 证书保存为实例目录下的 `ca.crt`。从独立 Worker 主机接入后，在工作台确认两个项目各自的注册、心跳、Codex 能力和项目授权。分别派发一项已人工审批的业务任务，记录需求链接、Worker 心跳、离线检查结果、补丁哈希和人工复验证据。
 
+跨主机验收时，从 Worker 主机运行下节的 HTTPS 探针。记录控制面和 Worker 的主机标识以及重启前后的心跳时间。任务执行完成后，在审批当前候选前录入与补丁哈希对应的人工复验证据。只演练到候选审批时，在预发布的仓库绑定中关闭自动草稿 PR。
+
+在预发布控制面主机上，用两个项目的管理员账号运行预检。只演练到候选审批时，GitHub App 安装只需读取两个目标仓库的 Contents 权限。预检检查只读签出权限、自动草稿 PR 已关闭、已登记的需求、规划模型、离线检查计划以及符合条件的两台 Worker。 [GitHub App 安装权限](https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app)
+
+```bash
+node --env-file=.env.staging scripts/verify-pilots.mjs --staging --preflight
+```
+
+试运行完成后，依次传入 Fitbest 和 ADO 的任务编号以核对结果。
+
+```bash
+node --env-file=.env.staging scripts/verify-pilots.mjs --staging FITBEST_TASK_CODE ADO_TASK_CODE
+```
+
+脚本检查两项需求出处、人工审批、两台不同的在线执行 Worker、离线检查计划、QA 和归档补丁。它下载归档校验 SHA-256，并核对人工证据是否记录在当前候选上。API 默认通过预发布环境的 `API_PORT` 在本机访问，可用 `ADO_VERIFY_API_URL` 指定地址。查看正式交付的 GitHub 证据时，使用 README 中的试点验收命令。
+
 CI 的 `compose` 作业通过 HTTPS 网关验证 Secure Cookie、Worker 注册与重连、领任务、事件回传、补丁上传、人工审核、探测失败和备份恢复。本机可用下面的命令复验 Worker 协议。`scripts/verify-workers.mjs` 通过回环 TCP 转发器测试断线重连，证书须包含测试使用的回环地址。Node 在进程启动时加载 CA。
 
 ```bash
