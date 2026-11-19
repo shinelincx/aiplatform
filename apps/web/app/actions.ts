@@ -168,23 +168,31 @@ export async function startAgentPlan(form: FormData) {
 }
 
 export async function registerRequirement(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { endpoint } = projectPath(form);
+  const { query } = taskPath(form);
   const response = await execute(`${endpoint}/requirements`, {
     method: 'POST', body: JSON.stringify({
       title: form.get('title'), referenceUrl: form.get('referenceUrl'), excerpt: form.get('excerpt'),
     }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'requirement')}#task-requirements`);
-  redirect(`${query}#task-requirements`);
+  if (!response?.ok) {
+    const result = issue(response, response && response.status >= 500 ? 'offline' : 'requirement');
+    redirect(`${query}&requirementResult=${result}#task-requirements`);
+  }
+  redirect(`${query}&requirementResult=registered#task-requirements`);
 }
 
 export async function retireRequirement(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { endpoint } = projectPath(form);
+  const { query } = taskPath(form);
   const id = form.get('requirementId');
-  if (!isWorkerId(id)) redirect(`${query}&issue=requirement#task-requirements`);
+  if (!isWorkerId(id)) redirect(`${query}&requirementResult=requirement#task-requirements`);
   const response = await execute(`${endpoint}/requirements/${id}`, { method: 'DELETE' });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'requirement')}#task-requirements`);
-  redirect(`${query}#task-requirements`);
+  if (!response?.ok) {
+    const result = issue(response, response && response.status >= 500 ? 'offline' : 'requirement');
+    redirect(`${query}&requirementResult=${result}#task-requirements`);
+  }
+  redirect(`${query}&requirementResult=retired#task-requirements`);
 }
 
 export async function retryAgentPlan(form: FormData) {
@@ -253,7 +261,7 @@ export async function saveTask(form: FormData) {
   });
   if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
   const task = await response.json() as { id: string };
-  redirect(`${id ? query : `${query}&task=${task.id}`}#task-detail`);
+  redirect(`${id ? query : `${query}&task=${task.id}&notice=task-created`}#task-detail`);
 }
 
 export async function transitionTask(form: FormData) {
@@ -263,7 +271,7 @@ export async function transitionTask(form: FormData) {
     method: 'POST', body: JSON.stringify({ status: form.get('status'), developerRole: form.get('developerRole') || null }),
   });
   if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
-  redirect(`${query}#task-detail`);
+  redirect(`${query}&notice=task-transitioned#task-detail`);
 }
 
 export async function archiveTask(form: FormData) {
@@ -284,7 +292,7 @@ export async function startExecution(form: FormData) {
   const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId, revisionOf }) });
   if (!response?.ok && revisionOf) redirect(`${query}&issue=revision#task-detail`);
   if (!response?.ok) redirect(`${query}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
-  redirect(`${query}#task-detail`);
+  redirect(`${query}&notice=execution-requested#task-detail`);
 }
 
 export async function changeExecutionWorker(form: FormData) {
@@ -315,7 +323,7 @@ export async function reviewExecution(form: FormData) {
     method: 'POST', body: JSON.stringify({ decision: form.get('decision'), comment: form.get('comment') }),
   });
   if (!response?.ok) redirect(`${query}&issue=${issue(response, 'review')}#task-detail`);
-  redirect(`${query}#task-detail`);
+  redirect(`${query}&notice=execution-reviewed#task-detail`);
 }
 
 export async function addExecutionEvidence(form: FormData) {
