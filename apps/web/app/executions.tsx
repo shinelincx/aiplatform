@@ -2,7 +2,8 @@ import { workerDiskPressure, type CheckFailureReason, type CheckResult, type Exe
   type Project, type ReviewEvidence, type Task, type VerificationCheck, type WorkerReport } from '@ado/shared';
 import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
   reviewExecution, startExecution, stopExecution } from './actions';
-import { read } from './api-client';
+import { read, readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 import { RefreshExecution } from './refresh-execution';
 import { SubmitButton } from './task-feedback';
 
@@ -67,12 +68,12 @@ const deliveryErrors: Record<string, string> = {
   github_failed: 'GitHub 发布或 PR 创建失败，请检查安装权限后重试。',
 };
 
-function WorkerChoice({ workers, selected }: { workers: WorkerReport[]; selected?: string | null }) {
+function WorkerChoice({ workers, selected }: { workers?: WorkerReport[]; selected?: string | null }) {
   return <label>执行 Worker<select name="workerId" defaultValue={selected ?? ''}>
     <option value="">自动分配</option>
-    {selected && !workers.some(({ id }) => id === selected) &&
-      <option value={selected}>当前指定 Worker 不可用</option>}
-    {workers.map(({ id, name, status, capabilities }) => (
+    {selected && !workers?.some(({ id }) => id === selected) &&
+      <option value={selected}>{workers ? '当前指定 Worker 不可用' : '当前指定 Worker（列表未加载）'}</option>}
+    {workers?.map(({ id, name, status, capabilities }) => (
       <option key={id} value={id}>{name} · {status !== 'online' ? '离线'
         : capabilities && workerDiskPressure(capabilities) ? '磁盘空间不足' : '在线'}</option>
     ))}
@@ -105,10 +106,10 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
 }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
   const [runsResult, workersResult] = await Promise.all([
-    read<ExecutionRun[]>(url), read<WorkerReport[]>(`/projects/${project.id}/workers`),
+    read<ExecutionRun[]>(url), readSection<WorkerReport[]>(`/projects/${project.id}/workers`, Array.isArray),
   ]);
   const runs = runsResult ?? [];
-  const workers = workersResult ?? [];
+  const workers = workersResult.data ?? [];
   const latest = runs[0];
   const scheduledChecks = latest?.status === 'queued' ? latest.checkPlan ?? checks : checks;
   const hasChecks = scheduledChecks.length > 0;
@@ -126,12 +127,12 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   const revising = task.status === 'REJECTED' && latest?.review?.decision === 'rejected' && latest.report?.passed;
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
     && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || revising || (awaitingChecks && hasChecks));
-  const candidates = workers.filter(({ status, capabilities }) =>
+  const candidates = workersResult.data?.filter(({ status, capabilities }) =>
     status !== 'disabled' && Boolean(capabilities?.codexVersion)
     && (!hasChecks || capabilities?.verificationVersion === 1)
     && (!needsMaven || capabilities?.mavenVerification === true)
     && (!hasChecks || (!autoDraftPr && !planned) || capabilities?.artifactVersion === 1));
-  const waitingForMaven = latest?.status === 'queued' && needsMaven
+  const waitingForMaven = candidates && latest?.status === 'queued' && needsMaven
     && !candidates.some(({ id, status, capabilities }) =>
       status === 'online' && capabilities && !workerDiskPressure(capabilities)
       && (!latest.requestedWorkerId || latest.requestedWorkerId === id));
@@ -144,6 +145,7 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   return <section aria-labelledby="execution-heading" className="repository-form">
     <h4 id="execution-heading">Codex 执行</h4>
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
+    {workersResult.issue && <SectionReadError label="执行 Worker 列表" issue={workersResult.issue} />}
     {canStart && <form action={startExecution} className="fields">
       {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
       <WorkerChoice workers={candidates} /><SubmitButton pendingLabel="正在请求派发…">{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</SubmitButton>

@@ -1,5 +1,6 @@
 import { workerDiskPressure, type Project, type WorkerReport } from '@ado/shared';
-import { read } from './api-client';
+import { readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 import { WorkerAccess } from './worker-access';
 
 const statusText: Record<WorkerReport['status'], string> = {
@@ -15,10 +16,11 @@ function formatTimestamp(value: string) {
 }
 
 export async function Workers({ project, manage }: { project: Project; manage: boolean }) {
-  const workers = await read<WorkerReport[]>(`/projects/${project.id}/workers`) ?? [];
+  const { data: workers, issue } = await readSection<WorkerReport[]>(`/projects/${project.id}/workers`,
+    Array.isArray);
+  if (issue) return <SectionReadError label="项目 Worker" issue={issue} />;
   return (
-    <section className="panel" aria-labelledby="workers-heading">
-      <h2 id="workers-heading">项目 Worker</h2>
+    <>
       {workers.length ? (
         <ul className="members">
           {workers.map(({ id, name, status, capabilities, lastHeartbeatAt, credentialExpiresAt }) => (
@@ -42,6 +44,6 @@ export async function Workers({ project, manage }: { project: Project; manage: b
         </ul>
       ) : <p className="muted">项目尚无 Worker。</p>}
       {manage && <WorkerAccess key={project.id} projectId={project.id} workers={workers.filter(({ status }) => status !== 'disabled')} />}
-    </section>
+    </>
   );
 }

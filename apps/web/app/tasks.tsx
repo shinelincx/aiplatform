@@ -4,8 +4,9 @@ import { agentRoleLabels, canTransitionTask, developerRoles, taskPriorities, typ
   type AgentPlan, type AgentRegistry, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
 import { archiveTask, saveTask, transitionTask } from './actions';
 import { PlanProgress } from './agents';
-import { read } from './api-client';
+import { read, readSection } from './api-client';
 import { Executions } from './executions';
+import { SectionReadError } from './section-feedback';
 import { ActionFeedback, SubmitButton, TaskDetailFocus } from './task-feedback';
 import { TaskRequirements } from './task-requirements';
 
@@ -36,7 +37,7 @@ function TaskForm({ projectId, task, tasks, repositories }: {
   projectId: string;
   task?: TaskDetail;
   tasks: Task[];
-  repositories: RepositoryBinding[];
+  repositories?: RepositoryBinding[];
 }) {
   const choices = tasks.filter(({ id }) => id !== task?.id);
   return (
@@ -52,7 +53,8 @@ function TaskForm({ projectId, task, tasks, repositories }: {
       </select></label>
       <label>仓库<select name="repositoryId" defaultValue={task?.repositoryId ?? ''}>
         <option value="">暂未选择</option>
-        {repositories.map(({ id, fullName }) => <option key={id} value={id}>{fullName}</option>)}
+        {!repositories && task?.repositoryId && <option value={task.repositoryId}>保留当前仓库</option>}
+        {repositories?.map(({ id, fullName }) => <option key={id} value={id}>{fullName}</option>)}
       </select></label>
       {choices.length > 0 && <>
         <label>父任务<select name="parentTaskId" defaultValue={task?.parentTaskId ?? ''}>
@@ -86,18 +88,20 @@ export async function Tasks({ project, selectedId, requirementResult, notice }: 
   const tasks = taskList ?? [];
   const selected = tasks.find(({ id }) => selectedId === id);
   const canWrite = project.status === 'active' && project.role !== 'viewer';
-  const [task, events, repositories, planning] = await Promise.all([
+  const [task, events, repositoryResult, planning] = await Promise.all([
     selected ? read<TaskDetail>(`${path}/${selected.id}`).catch(() => null) : null,
     selected ? read<TaskEvent[]>(`${path}/${selected.id}/events`).catch(() => null) : null,
-    canWrite ? read<RepositoryBinding[]>(`/projects/${project.id}/repositories`).catch(() => null) : null,
+    canWrite ? readSection<RepositoryBinding[]>(`/projects/${project.id}/repositories`, Array.isArray) : null,
     selected ? read<{ plan: AgentPlan | null }>(`${path}/${selected.id}/agent-plan`).catch(() => null) : null,
   ]);
   const manageRequirements = project.role === 'owner' && project.status === 'active';
   const plan = planning?.plan;
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
   const chooseDeveloper = manageRequirements && task?.status === 'WAITING_APPROVAL' && plan?.state !== 'completed';
-  const registry = chooseDeveloper ? await read<AgentRegistry>(`/projects/${project.id}/agent-registry`) : null;
-  const developers = developerRoles.filter((role) => registry?.agents.some((agent) => agent.role === role && agent.enabled));
+  const registry = chooseDeveloper ? await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
+    (data) => Array.isArray(data.agents)) : null;
+  const developers = developerRoles.filter((role) => registry?.data?.agents.some((agent) => agent.role === role && agent.enabled));
+  const repositories = repositoryResult?.data;
   const boundRepository = repositories?.find(({ id }) => id === task?.repositoryId);
   const taskLink = (id: string) => `/?project=${project.id}&task=${id}#task-detail`;
   const labels = new Map(tasks.map(({ id, code }) => [id, code]));
@@ -113,9 +117,9 @@ export async function Tasks({ project, selectedId, requirementResult, notice }: 
         : tasks.length === 0 ? <p className="muted">项目尚无研发任务。</p>
         : <p className="muted">{tasks.filter(({ archivedAt }) => !archivedAt).length} 项未归档 · {tasks.filter(({ status }) => status === 'COMPLETED').length} 项已完成</p>}
       {selectedId && !task && <p className="feedback" role="alert">无法读取任务详情，请返回任务列表后重试。</p>}
-      {canWrite && !repositories && <p className="feedback" role="alert">无法读取目标仓库，请刷新后重试。</p>}
+      {repositoryResult?.issue && <SectionReadError label="任务目标仓库" issue={repositoryResult.issue} />}
       {canWrite && <details className="create-task"><summary>创建研发任务</summary>
-        <TaskForm projectId={project.id} tasks={tasks} repositories={repositories ?? []} />
+        <TaskForm projectId={project.id} tasks={tasks} repositories={repositories} />
       </details>}
       <nav aria-label="项目任务">
         {tasks.map((item) => (
@@ -149,7 +153,7 @@ export async function Tasks({ project, selectedId, requirementResult, notice }: 
           canRetry={canWrite && task.status === 'PLANNING'} />}
         {canWrite && !task.archivedAt && <>
           {!managedPlan && editable.includes(task.status) && <details><summary>编辑任务</summary>
-            <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories ?? []} />
+            <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories} />
           </details>}
           {canManageStates.includes(task.status) && <div className="inline-fields">
             {taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
@@ -161,7 +165,9 @@ export async function Tasks({ project, selectedId, requirementResult, notice }: 
                   developers.length ? <label>责任 Agent<select name="developerRole" defaultValue={developers.includes('BACKEND_DEVELOPER')
                     ? 'BACKEND_DEVELOPER' : developers[0]}>
                     {developers.map((role) => <option key={role} value={role}>{agentRoleLabels[role]}</option>)}
-                  </select></label> : <p>请先启用开发 Agent。</p>
+                  </select></label> : registry?.issue
+                    ? <SectionReadError label="可选开发 Agent" issue={registry.issue} />
+                    : <p>请先启用开发 Agent。</p>
                 )}
                 <SubmitButton pendingLabel="正在提交…" name="status" value={status} disabled={status === 'READY' && chooseDeveloper && !developers.length}>{label}</SubmitButton>
               </form>
