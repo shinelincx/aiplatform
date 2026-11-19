@@ -39,6 +39,8 @@ worker="$HOME/.local/share/ado-workers/ado"
 
 Worker 注册凭证默认有效 8 小时。跨夜运行或计划跨天重启时，可在签发时选择 7 天或 30 天，并在「项目 Worker」查看到期时间。轮换前先确认当前任务已结束，停止对应启动任务，在同一项目更新凭证并编辑 `worker.env`，随后启动任务并确认新心跳。Worker 配置和凭证只保存在 WSL 私有目录。
 
+单次任务默认限时 12 分钟，涵盖签出、Codex 和离线检查。长任务可在专用实例的 `worker.env` 设置 `ADO_WORKER_EXECUTION_TIMEOUT_MINUTES`，取值为 1 到 45 的整数。确认实例空闲后重启生效。
+
 控制面使用私有 CA 签发 HTTPS 证书时，将可信 CA 的 PEM 证书保存为 `$worker/ca.crt`，然后启动或重启 Worker。启动脚本在 Node 运行前加载此文件，HTTPS 归档上传和 WSS 心跳使用同一信任链。 [Node.js 证书配置](https://nodejs.org/download/release/v24.7.0/docs/api/cli.html#node_extra_ca_certsfile)
 
 ## 3. Codex 认证和代理
