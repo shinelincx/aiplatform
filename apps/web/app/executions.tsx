@@ -14,6 +14,7 @@ const stateLabels: Record<ExecutionRun['status'], string> = {
 const eventLabels: Record<string, string> = {
   checkout: '准备 Git 工作区', inference: '调用 Codex', collecting: '收集变更',
   source_unavailable: '无法检出仓库', sandbox_rejected: '环境隔离检查未通过',
+  revision_source_unavailable: '无法恢复前序补丁，请检查归档完整性和仓库基线',
   codex_failed: 'Codex 执行失败', no_changes: 'Codex 未生成代码变更',
   worker_timeout: 'Worker 执行超时', worker_error: 'Worker 处理失败',
   worker_restarted: 'Worker 重启时执行尚未完成',
@@ -24,6 +25,9 @@ const eventLabels: Record<string, string> = {
   agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更', mcp_tool_call: 'MCP 工具调用',
 };
 function label(event: ExecutionEvent) {
+  if (event.kind === 'progress' && event.payload.stage === 'revision') {
+    return event.payload.outcome === 'applied' ? '前序补丁已校验并应用' : '前序补丁未能恢复';
+  }
   if (event.kind === 'thread') return 'Codex 线程已创建';
   if (event.kind === 'result') return '变更结果已入库';
   if (event.kind === 'verification') return `第 ${event.payload.attempt} 次检查 · ${event.payload.passed ? '通过' : '未通过'}`;
@@ -125,11 +129,13 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
   const revising = task.status === 'REJECTED' && latest?.review?.decision === 'rejected' && latest.report?.passed;
+  const needsRevisionArtifact = revising || (task.status !== 'READY' && latest?.revision);
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
     && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || revising || (awaitingChecks && hasChecks));
   const candidates = workersResult.data?.filter(({ status, capabilities }) =>
     status !== 'disabled' && Boolean(capabilities?.codexVersion)
     && (!hasChecks || capabilities?.verificationVersion === 1)
+    && (!needsRevisionArtifact || capabilities?.revisionArtifactVersion === 1)
     && (!needsMaven || capabilities?.mavenVerification === true)
     && (!hasChecks || (!autoDraftPr && !planned) || capabilities?.artifactVersion === 1));
   const waitingForMaven = candidates && latest?.status === 'queued' && needsMaven

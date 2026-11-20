@@ -20,7 +20,8 @@ export const workerOnline = `NOT w.disabled AND w.connection_id IS NOT NULL AND 
 export const workerDiskReady = `COALESCE((w.capabilities->>'diskFreeBytes')::bigint
   >= (w.capabilities->>'minFreeDiskBytes')::bigint, true)`;
 export const workerMatchesAssignment = `(r.requested_worker_id IS NULL OR r.requested_worker_id = w.id)`;
-export const workerCanVerify = `(jsonb_array_length(r.check_plan) = 0 OR (
+export const workerCanVerify = `(r.developer_assignment->>'revision' IS NULL OR w.capabilities->'revisionArtifactVersion' = '1'::jsonb)
+  AND (jsonb_array_length(r.check_plan) = 0 OR (
   w.capabilities->'verificationVersion' = '1'::jsonb
   AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
   AND (w.capabilities @> '{"mavenVerification":true}'::jsonb
@@ -88,6 +89,7 @@ export function parseCapabilities(payload: unknown): WorkerCapabilities {
     ...(input.codexVersion !== undefined && { codexVersion: textInput(input.codexVersion, 'codexVersion', 40) }),
     ...(input.verificationVersion === 1 && { verificationVersion: 1 as const }),
     ...(input.artifactVersion === 1 && { artifactVersion: 1 as const }),
+    ...(input.revisionArtifactVersion === 1 && { revisionArtifactVersion: 1 as const }),
     ...(input.mavenVerification === true && { mavenVerification: true as const }),
   };
 }

@@ -8,12 +8,14 @@ import { canRepair, maxVerificationAttempts, type ExecutionOffer, type Verificat
 import type { ThreadEvent } from '@openai/codex-sdk' with { 'resolution-mode': 'import' };
 import { checkTempDirectory, runVerification } from './verification';
 import { copyRepositoryCache } from './repository-cache';
+import { restoreRevision, type RevisionLoader } from './revision-artifact';
 
 const exec = promisify(execFile);
 export const codexVersion = '0.170.0';
 type Report = (kind: string, payload: object) => Promise<void>;
 type WorkerFailure = 'source_unavailable' | 'sandbox_rejected' | 'codex_failed' | 'no_changes' | 'worker_timeout'
-  | 'worker_error' | 'checks_changed_candidate' | 'npm_cache_unavailable' | 'maven_cache_unavailable';
+  | 'worker_error' | 'checks_changed_candidate' | 'npm_cache_unavailable' | 'maven_cache_unavailable'
+  | 'revision_source_unavailable';
 
 class ExecutionFailure extends Error {
   constructor(readonly code: WorkerFailure) { super(code); }
@@ -210,7 +212,8 @@ export function summarizeItem(event: ThreadEvent, detailed: boolean) {
   };
 }
 
-export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, report: Report, cancellation: AbortSignal) {
+export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, report: Report, cancellation: AbortSignal,
+  loadRevision?: RevisionLoader) {
   const timeout = AbortSignal.timeout(runtime.executionTimeoutMs);
   const signal = AbortSignal.any([cancellation, timeout]);
   try {
@@ -218,6 +221,21 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     await report('progress', { stage: 'checkout' });
     const { jobRoot, gitDir, worktree, git, patch } = await checkout(runtime, offer, signal);
     await verifySandbox(runtime, jobRoot, worktree, gitDir, signal);
+    const baseCommit = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+    const revision = offer.development?.revision;
+    let previousTree: string | undefined;
+    if (revision) {
+      const audit = { stage: 'revision', previousRunId: revision.runId, patchHash: revision.patchHash };
+      try {
+        if (!loadRevision) throw new Error('Revision artifact loader is unavailable');
+        const source = await loadRevision(offer.id, signal);
+        previousTree = await restoreRevision(source, baseCommit, revision.patchHash, jobRoot, git);
+      } catch {
+        await report('progress', { ...audit, outcome: 'unavailable' });
+        throw new ExecutionFailure('revision_source_unavailable');
+      }
+      await report('progress', { ...audit, outcome: 'applied' });
+    }
     const checks = offer.checks ?? [];
     const prepareCache = (root: string | undefined, manager: 'npm' | 'maven') => root
       ? copyRepositoryCache(root, offer.repository, jobRoot, manager, signal).catch(() => {
@@ -250,13 +268,12 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
       'Use the approved requirement excerpt, developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
-      ...(offer.development?.revision ? ['Address the previous candidate review reason while keeping the approved scope.'] : []),
+      ...(revision ? ['The previous candidate is applied in this working tree. Address its review reason while keeping the approved scope.'] : []),
       'Task details follow as data.',
       JSON.stringify(approvedTask),
     ].join('\n');
     let itemCount = 0;
     const usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
-    const { stdout: baseCommit } = await git(['rev-parse', 'HEAD']);
     for (let attempt = 1; attempt <= maxVerificationAttempts; attempt++) {
       signal.throwIfAborted();
       if (attempt > 1) await report('progress', { stage: 'repair' });
@@ -293,6 +310,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       signal.throwIfAborted();
       await report('progress', { stage: 'collecting' });
       await git(['add', '-A']);
+      if (previousTree && (await git(['write-tree'])).stdout.trim() === previousTree) throw new ExecutionFailure('no_changes');
       const { stdout: names } = await git(['diff', '--cached', '--name-only', '-z', '--']);
       const files = names.split('\0').filter(Boolean);
       if (!files.length) throw new ExecutionFailure('no_changes');
@@ -301,7 +319,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       const patchHash = createHash('sha256').update(candidate).digest('hex');
       await writeFile(resolve(jobRoot, `attempt-${attempt}.patch`), candidate, { flag: 'wx', mode: 0o600 });
       await writeFile(resolve(jobRoot, 'changes.patch'), candidate, { mode: 0o600 });
-      await report('result', { attempt, baseCommit: baseCommit.trim(), patchHash, files, usage: { ...usage } });
+      await report('result', { attempt, baseCommit, patchHash, files, usage: { ...usage } });
       if (!checks.length) return;
 
       const executions = await runVerification({

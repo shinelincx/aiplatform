@@ -7,8 +7,9 @@ import { promisify } from 'node:util';
 import { WebSocket } from 'ws';
 import { decodeWorkerMessage, isWorkerId, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes, workerProtocolVersion,
   type WorkerCapabilities, type WorkerEnvelope, type WorkerHeartbeat, type WorkerMessageType, type WorkerResources } from '@ado/shared';
-import { codexVersion, configureExecution, verifyCodexLogin } from './codex-execution';
+import { codexVersion, configureExecution, executeCodex, verifyCodexLogin } from './codex-execution';
 import { WorkerJobs } from './jobs';
+import { fetchRevisionArtifact } from './revision-artifact';
 
 const exec = promisify(execFile);
 const acknowledgementTimeoutMs = 10_000;
@@ -187,23 +188,29 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
   const sample = () => sampleResources(runtime?.root ?? process.cwd(), minFreeDiskBytes);
   if (runtime && !capabilities.gitVersion) throw new Error('Codex execution requires Git');
   if (runtime) await verifyCodexLogin(runtime);
-  const jobs = runtime ? new WorkerJobs(runtime, workerId, async (runId, bytes, cancellation) => {
-    const url = new URL(`/worker-executions/${runId}/artifact`, endpoint);
+  const authorization = `Bearer ${workerId}.${token}`;
+  const artifactUrl = (runId: string, name: 'artifact' | 'revision-artifact') => {
+    const url = new URL(`/worker-executions/${runId}/${name}`, endpoint);
     url.protocol = endpoint.protocol === 'wss:' ? 'https:' : 'http:';
-    const response = await fetch(url, {
+    return url;
+  };
+  const jobs = runtime ? new WorkerJobs(runtime, workerId, async (runId, bytes, cancellation) => {
+    const response = await fetch(artifactUrl(runId, 'artifact'), {
       method: 'PUT', body: bytes,
-      headers: { Authorization: `Bearer ${workerId}.${token}`, 'Content-Type': 'application/octet-stream' },
+      headers: { Authorization: authorization, 'Content-Type': 'application/octet-stream' },
       redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(12_000), cancellation]),
     });
     await response.body?.cancel();
     if (response.status >= 500) throw new Error('Artifact storage unavailable');
     return response.ok;
-  }) : undefined;
+  }, (configured, offer, report, cancellation) => executeCodex(configured, offer, report, cancellation,
+    (runId, signal) => fetchRevisionArtifact(artifactUrl(runId, 'revision-artifact'), authorization, signal))) : undefined;
   if (runtime && jobs) {
     await jobs.load();
     capabilities.codexVersion = codexVersion;
     capabilities.verificationVersion = 1;
     capabilities.artifactVersion = 1;
+    capabilities.revisionArtifactVersion = 1;
     if (runtime.supportsMaven) capabilities.mavenVerification = true;
   }
   let retryMs = 500;
