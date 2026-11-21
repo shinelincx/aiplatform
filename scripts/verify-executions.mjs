@@ -22,6 +22,7 @@ import { TasksService } from '../apps/api/src/tasks.ts';
 import { summarizeItem } from '../apps/worker/src/codex-execution.ts';
 import { WorkerJobs } from '../apps/worker/src/jobs.ts';
 import { copyRepositoryCache } from '../apps/worker/src/repository-cache.ts';
+import { fetchRevisionArtifact, restoreRevision } from '../apps/worker/src/revision-artifact.ts';
 import { runVerification } from '../apps/worker/src/verification.ts';
 
 const api = new URL(process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101');
@@ -65,7 +66,7 @@ function findFormByButton(html, label) {
       .some((content) => content.replace(/<[^>]*>/g, '').trim() === label));
 }
 
-async function open(credential, execute = true, verify = false, archive = false, maven = false) {
+async function open(credential, execute = true, verify = false, archive = false, maven = false, revisionArtifacts = false) {
   const endpoint = new URL('/workers/ws', workerApi);
   endpoint.protocol = workerApi.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(endpoint, {
@@ -90,6 +91,7 @@ async function open(credential, execute = true, verify = false, archive = false,
     ...(execute && { codexVersion: '0.170.0' }),
     ...(verify && { verificationVersion: 1 }),
     ...(archive && { artifactVersion: 1 }),
+    ...(revisionArtifacts && { revisionArtifactVersion: 1 }),
     ...(maven && { mavenVerification: true }),
   });
   const close = async () => {
@@ -799,7 +801,37 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   assert.equal((await request(rejected.runs, { token }))[0].delivery, null);
   await request(rejected.runs, { token, method: 'POST', status: 409 });
   await request(rejected.runs, { token, method: 'POST', body: { revisionOf: lastRun.id }, status: 409 });
-  const revised = await request(rejected.runs, { token, method: 'POST', body: { revisionOf: rejectedRun.id }, status: 201 });
+  const revision = { token, method: 'POST', body: { revisionOf: rejectedRun.id }, status: 201 };
+  await request(rejected.runs, { ...revision, status: 409 });
+  assert.equal((await request(rejected.path, { token })).status, 'REJECTED');
+  await worker.close();
+  worker = await open(approved, true, true, true, false, true);
+  const legacy = await open(nodeCredential, true, true, true);
+  await request(rejected.runs, { ...revision, body: { ...revision.body, workerId: nodeCredential.workerId }, status: 409 });
+  const revisionUrl = (id) => new URL(`/worker-executions/${id}/revision-artifact`, workerApi);
+  const authorization = (credential) => `Bearer ${credential.workerId}.${credential.token}`;
+  const deniedRevision = async (id, status, credential) => {
+    const response = await globalThis.fetch(revisionUrl(id), {
+      headers: credential ? { Authorization: authorization(credential) } : {},
+      signal: globalThis.AbortSignal.timeout(10_000),
+    });
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('X-ADO-Base-Commit'), null);
+    await response.body?.cancel();
+  };
+  const expiring = await request(rejected.runs, revision);
+  await deniedRevision(expiring.id, 401);
+  await deniedRevision(expiring.id, 404, approved);
+  assert.equal(await legacy.send('WORKER_CLAIM'), null);
+  assert.equal((await worker.send('WORKER_CLAIM')).id, expiring.id);
+  await db.query("UPDATE execution_runs SET lease_expires_at = now() - interval '1 second' WHERE id = $1", [expiring.id]);
+  await deniedRevision(expiring.id, 404, approved);
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if ((await request(rejected.path, { token })).status === 'TIMEOUT') break;
+    await delay(250);
+  }
+  assert.equal((await request(rejected.path, { token })).status, 'TIMEOUT');
+  const revised = await request(rejected.runs, { token, method: 'POST', status: 201 });
   assert.notEqual(revised.id, rejectedRun.id);
   assert.deepEqual(revised.revision, { runId: rejectedRun.id, patchHash: repairedHash, reason: 'Needs product review' });
   assert.equal((await request(rejected.path, { token })).status, 'QUEUED');
@@ -807,14 +839,59 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   assert.equal(revisedOffer.id, revised.id);
   assert.equal(revisedOffer.taskId, rejected.path.split('/').at(-1));
   assert.deepEqual(revisedOffer.development.revision, revised.revision);
+  await deniedRevision(rejectedRun.id, 404, approved);
+  await deniedRevision(revised.id, 404, nodeCredential);
+  await deniedRevision(revised.id, 404, foreignCredential);
+  await deniedRevision(revised.id, 404, { ...approved, token: randomBytes(32).toString('hex') });
+  await db.query('DELETE FROM worker_projects WHERE worker_id = $1 AND project_id = $2', [approved.workerId, first.id]);
+  await deniedRevision(revised.id, 404, approved);
+  await db.query('INSERT INTO worker_projects (worker_id, project_id) VALUES ($1, $2)', [approved.workerId, first.id]);
+  const setRevisionHash = (hash) => db.query(
+    `UPDATE execution_runs SET developer_assignment = jsonb_set(developer_assignment, '{revision,patchHash}', to_jsonb($2::text))
+     WHERE id = $1`, [revised.id, hash]);
+  await setRevisionHash(initialHash);
+  await deniedRevision(revised.id, 404, approved);
+  await setRevisionHash(repairedHash);
+  const { rows: [artifact] } = await db.query('SELECT object_key AS key, sha256, size FROM execution_artifacts WHERE run_id = $1', [rejectedRun.id]);
+  const setArtifactKey = (key) => db.query('UPDATE execution_artifacts SET object_key = $2 WHERE run_id = $1', [rejectedRun.id, key]);
+  await setArtifactKey(`${artifact.key}.missing`);
+  await deniedRevision(revised.id, 503, approved);
+  await setArtifactKey(artifact.key);
+  const store = new ArtifactStore();
+  await store.put(artifact, Buffer.alloc(artifact.size, 120));
+  try {
+    await deniedRevision(revised.id, 503, approved);
+  } finally {
+    await store.put(artifact, patchBytes);
+  }
+  const revisionSource = await fetchRevisionArtifact(revisionUrl(revised.id), authorization(approved), globalThis.AbortSignal.timeout(10_000));
+  assert.equal(revisionSource.baseCommit, baseline);
+  assert.deepEqual(revisionSource.bytes, patchBytes);
+  const revisionWorktree = join(workerJournal, 'revision-checkout');
+  git('worktree', 'add', '--detach', '--', revisionWorktree, baseline);
+  const revisionGit = async (args) => ({ stdout: git('-C', revisionWorktree, ...args) });
+  await assert.rejects(restoreRevision(revisionSource, '1'.repeat(40), repairedHash, workerJournal, revisionGit), /expected base or digest/);
+  await assert.rejects(restoreRevision(revisionSource, baseline, initialHash, workerJournal, revisionGit), /expected base or digest/);
+  assert.equal(readFileSync(join(revisionWorktree, 'index.ts'), 'utf8'), 'old\n');
+  await restoreRevision(revisionSource, baseline, repairedHash, workerJournal, revisionGit);
+  assert.equal(git('-C', revisionWorktree, 'rev-parse', 'HEAD').trim(), baseline);
+  assert.equal(readFileSync(join(revisionWorktree, 'index.ts'), 'utf8'), 'new\n');
   const revisedBytes = Buffer.from(patchBytes.toString().replace('+new\n', '+revised\n'));
   const revisedHash = createHash('sha256').update(revisedBytes).digest('hex');
   const sendRevised = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: revised.id, sequence, kind, payload });
-  assert.equal((await sendRevised(1, 'thread', { threadId: 'revised-fixture' })).accepted, true);
-  assert.equal((await sendRevised(2, 'result', candidate(1, revisedHash))).accepted, true);
+  const audit = { stage: 'revision', previousRunId: rejectedRun.id, patchHash: repairedHash, outcome: 'applied' };
+  assert.equal((await sendRevised(1, 'progress', { ...audit, patchHash: initialHash })).accepted, false);
+  assert.equal((await sendRevised(1, 'progress', { ...audit, bytes: 'must not be persisted' })).accepted, true);
+  assert.equal((await sendRevised(2, 'thread', { threadId: 'revised-fixture' })).accepted, true);
+  assert.equal((await sendRevised(3, 'result', candidate(1, revisedHash))).accepted, true);
   await upload(revised.id, approved, revisedBytes, 200);
-  assert.equal((await sendRevised(3, 'verification', { attempt: 1, patchHash: revisedHash, checks: check(true) })).accepted, true);
-  const [newRun, oldRun] = await request(rejected.runs, { token });
+  assert.equal((await sendRevised(4, 'verification', { attempt: 1, patchHash: revisedHash, checks: check(true) })).accepted, true);
+  const [firstRevisionEvent] = await request(`${rejected.runs}/${revised.id}/events`, { token });
+  assert.deepEqual(firstRevisionEvent.payload, audit);
+  await deniedRevision(revised.id, 404, approved);
+  const [newRun, timedOutRevision, oldRun] = await request(rejected.runs, { token });
+  assert.equal(timedOutRevision.id, expiring.id);
+  assert.equal(timedOutRevision.status, 'timed_out');
   assert.equal(newRun.review, null);
   assert.deepEqual(newRun.evidence, []);
   assert.deepEqual(oldRun.evidence, [savedEvidence]);
@@ -823,8 +900,9 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   await request(evidencePath, { token, method: 'POST', body: reviewEvidence, status: 404 });
   await request(`${rejected.runs}/${revised.id}/evidence`, { token, method: 'POST', body: { ...reviewEvidence, patchHash: revisedHash }, status: 201 });
   assert.equal((await request(`${rejected.runs}/${revised.id}/review`, approve)).decision, 'approved');
-  assert.equal((await request(rejected.runs, { token }))[1].review.decision, 'rejected');
+  assert.equal((await request(rejected.runs, { token })).find(({ id }) => id === rejectedRun.id).review.decision, 'rejected');
   console.log('Rejected candidate revisions, patch-specific evidence and fresh approval passed');
+  console.log('Revision artifact access, legacy Worker rejection, integrity, base, and audit checks passed');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');
   console.log('Manual approvals pin developer Agent versions and migrated tasks get a default assignment');
   console.log('Worker restart, lost acknowledgement replay and checkpoint recovery passed');

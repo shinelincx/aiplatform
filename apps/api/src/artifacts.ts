@@ -1,11 +1,11 @@
 import {
   BadRequestException, ConflictException, Controller, Get, Header, Headers, Inject,
   Injectable, NotFoundException, Param, ParseUUIDPipe, PayloadTooLargeException,
-  Put, Req, ServiceUnavailableException, StreamableFile, UnauthorizedException, UseGuards,
+  Put, Req, Res, ServiceUnavailableException, StreamableFile, UnauthorizedException, UseGuards,
 } from '@nestjs/common';
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
-import type { IncomingMessage } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Pool, PoolClient } from 'pg';
 import { maxPatchBytes, type Account, type PatchArtifact } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -19,6 +19,7 @@ function sha256(value: Buffer) {
 
 type Artifact = PatchArtifact & { key: string };
 type Target = { projectId: string; hash: string | null };
+type RevisionArtifact = Artifact & { previousRunId: string; baseCommit: string };
 
 @Injectable()
 export class ArtifactStore {
@@ -146,6 +147,45 @@ export class ArtifactsService {
     if (!artifact) throw new NotFoundException('Patch artifact not found');
     return this.store.get(artifact);
   }
+
+  private async revisionSource(runId: string, worker: WorkerIdentity) {
+    const { rows: [artifact] } = await this.db.pool.query<RevisionArtifact>(
+      `SELECT a.sha256, a.size, a.object_key AS key, prior.id AS "previousRunId", result."baseCommit"
+       FROM execution_runs r
+       JOIN workers w ON w.id = r.worker_id
+       JOIN projects p ON p.id = r.project_id AND p.status = 'active'
+       JOIN worker_projects wp ON wp.worker_id = w.id AND wp.project_id = r.project_id
+       JOIN execution_runs prior ON prior.id::text = r.developer_assignment #>> '{revision,runId}'
+         AND prior.project_id = r.project_id AND prior.task_id = r.task_id AND prior.repository_id = r.repository_id
+       JOIN execution_reviews review ON review.run_id = prior.id AND review.decision = 'rejected'
+       JOIN execution_artifacts a ON a.run_id = prior.id AND a.sha256 = r.developer_assignment #>> '{revision,patchHash}'
+       JOIN LATERAL (
+         SELECT payload->>'baseCommit' AS "baseCommit" FROM execution_events
+         WHERE run_id = prior.id AND kind = 'result' AND payload->>'patchHash' = a.sha256
+         ORDER BY sequence DESC LIMIT 1
+       ) result ON true
+       WHERE r.id = $1 AND w.id = $2 AND w.credential_hash = $3 AND NOT w.disabled
+         AND w.credential_expires_at > now() AND w.capabilities->'revisionArtifactVersion' = '1'::jsonb
+         AND r.status = 'running' AND r.lease_expires_at > now() AND NOT r.cancel_requested
+         AND prior.status = 'succeeded' AND prior.verification_report->'passed' = 'true'::jsonb
+         AND prior.verification_report->>'patchHash' = a.sha256 AND a.sha256 ~ '^[0-9a-f]{64}$'
+         AND result."baseCommit" ~ '^[0-9a-f]{40}$' AND a.size BETWEEN 1 AND $4`,
+      [runId, worker.workerId, worker.hash, maxPatchBytes],
+    );
+    if (!artifact) throw new NotFoundException('Revision artifact not found');
+    return artifact;
+  }
+
+  async downloadRevision(runId: string, worker: WorkerIdentity) {
+    const artifact = await this.revisionSource(runId, worker);
+    const bytes = await this.store.get(artifact);
+    const current = await this.revisionSource(runId, worker);
+    if (current.previousRunId !== artifact.previousRunId || current.baseCommit !== artifact.baseCommit
+      || current.sha256 !== artifact.sha256 || current.size !== artifact.size || current.key !== artifact.key) {
+      throw new NotFoundException('Revision artifact not found');
+    }
+    return { bytes, baseCommit: artifact.baseCommit };
+  }
 }
 
 @Controller()
@@ -159,6 +199,18 @@ export class ArtifactsController {
     const actor = parseWorkerCredentials(authorization);
     if (!actor) throw new UnauthorizedException();
     return this.artifacts.upload(runId, actor, request);
+  }
+
+  @Get('worker-executions/:runId/revision-artifact')
+  @Header('Cache-Control', 'private, no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
+  async downloadRevision(@Param('runId', ParseUUIDPipe) runId: string, @Headers('authorization') authorization: string | undefined,
+    @Res({ passthrough: true }) response: ServerResponse) {
+    const worker = parseWorkerCredentials(authorization);
+    if (!worker) throw new UnauthorizedException();
+    const { bytes, baseCommit } = await this.artifacts.downloadRevision(runId, worker);
+    response.setHeader('X-ADO-Base-Commit', baseCommit);
+    return new StreamableFile(bytes, { type: 'application/octet-stream', length: bytes.length });
   }
 
   @Get('projects/:projectId/tasks/:taskId/executions/:runId/artifact')

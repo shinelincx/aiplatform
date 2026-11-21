@@ -31,7 +31,7 @@ export class OperationsService {
         SELECT id, task_code, title, status, updated_at, archived_at FROM tasks WHERE project_id = $1
       ), latest_run AS (
         SELECT DISTINCT ON (task_id) task_id, id, status, cancel_requested, requested_worker_id,
-          repository_id, check_plan, qa_assignment FROM execution_runs WHERE project_id = $1
+          repository_id, check_plan, qa_assignment, developer_assignment FROM execution_runs WHERE project_id = $1
         ORDER BY task_id, created_at DESC, id DESC
       ), alerts AS (
         SELECT t.id AS "taskId", t.task_code AS code, t.title, t.updated_at,

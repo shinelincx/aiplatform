@@ -26,7 +26,8 @@ const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId"
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
-  'worker_error', 'checks_changed_candidate', 'artifact_upload_failed', 'worker_restarted', 'npm_cache_unavailable', 'maven_cache_unavailable'];
+  'worker_error', 'checks_changed_candidate', 'artifact_upload_failed', 'worker_restarted', 'npm_cache_unavailable',
+  'maven_cache_unavailable', 'revision_source_unavailable'];
 
 function attemptInput(value: unknown) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxVerificationAttempts) {
@@ -87,6 +88,14 @@ function executionEvent(body: unknown) {
   }
   if (kind === 'progress') {
     const stage = input.stage;
+    if (stage === 'revision') {
+      const { previousRunId, patchHash, outcome } = input;
+      if (!isWorkerId(previousRunId) || typeof patchHash !== 'string' || !/^[0-9a-f]{64}$/.test(patchHash)
+        || (outcome !== 'applied' && outcome !== 'unavailable')) {
+        throw new BadRequestException('Invalid revision source event');
+      }
+      return { runId, sequence, kind: 'progress' as const, payload: { stage, previousRunId, patchHash, outcome } };
+    }
     if (stage !== 'checkout' && stage !== 'inference' && stage !== 'collecting' && stage !== 'repair') {
       throw new BadRequestException('Invalid execution stage');
     }
@@ -260,8 +269,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
         [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
       );
-      if (workerId) {
-        await this.assignWorker(client, projectId, run.id, workerId);
+      if (workerId || handoff.revision) {
+        await this.assignWorker(client, projectId, run.id, workerId, Boolean(handoff.revision));
         run.requestedWorkerId = workerId;
       }
       await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
@@ -273,16 +282,17 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null) {
-    if (workerId) {
+  private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null, revision: boolean) {
+    if (workerId || revision) {
       const eligible = await client.query(
         `SELECT 1 FROM workers w
          JOIN worker_projects wp ON wp.worker_id = w.id AND wp.project_id = $1
          JOIN execution_runs r ON r.project_id = wp.project_id AND r.id = $2
          JOIN repositories g ON g.id = r.repository_id
-         WHERE w.id = $3 AND NOT w.disabled AND w.credential_expires_at > now() AND w.capabilities ? 'codexVersion'
-           AND ${workerCanVerify}`, [projectId, runId, workerId]);
-      if (!eligible.rowCount) throw new ConflictException('Worker is not eligible for this execution');
+         WHERE ($3::uuid IS NULL OR w.id = $3) AND NOT w.disabled AND w.credential_expires_at > now()
+           AND w.capabilities ? 'codexVersion' AND ${workerCanVerify} LIMIT 1`, [projectId, runId, workerId]);
+      if (!eligible.rowCount) throw new ConflictException(revision
+        ? 'No eligible Worker supports reading revision artifacts' : 'Worker is not eligible for this execution');
     }
     await client.query('UPDATE execution_runs SET requested_worker_id = $2 WHERE id = $1', [runId, workerId]);
   }
@@ -292,13 +302,13 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const task = await this.tasks.find(projectId, taskId, client);
-      const { rows: [run] } = await client.query<Pick<ExecutionRun, 'status' | 'requestedWorkerId'>>(
-        `SELECT status, requested_worker_id AS "requestedWorkerId" FROM execution_runs
+      const { rows: [run] } = await client.query<Pick<ExecutionRun, 'status' | 'requestedWorkerId' | 'revision'>>(
+        `SELECT status, requested_worker_id AS "requestedWorkerId", developer_assignment->'revision' AS revision FROM execution_runs
          WHERE id = $1 AND project_id = $2 AND task_id = $3 FOR UPDATE`, [runId, projectId, taskId]);
       if (!run) throw new NotFoundException('Execution run not found');
       if (task.status !== 'QUEUED' || run.status !== 'queued') throw new ConflictException('Only a queued execution can be reassigned');
       if (run.requestedWorkerId === workerId) return;
-      await this.assignWorker(client, projectId, runId, workerId);
+      await this.assignWorker(client, projectId, runId, workerId, Boolean(run.revision));
       await this.tasks.event(client, task, 'task.worker_reassigned', { runId, actorId: actor.id, requestedWorkerId: workerId });
       await this.projects.audit(client, actor.id, projectId, 'execution.worker_reassigned', runId);
     });
@@ -538,6 +548,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         return { stop: true, accepted: false };
       }
       if (run.cancelRequested && event.kind !== 'cancelled') return { stop: true, accepted: false };
+      if (event.kind === 'progress' && event.payload.stage === 'revision'
+        && (event.payload.previousRunId !== run.revision?.runId || event.payload.patchHash !== run.revision?.patchHash)) {
+        return { stop: true, accepted: false };
+      }
       if (event.kind === 'thread' && run.threadId && run.threadId !== event.payload.threadId) {
         return { stop: true, accepted: false };
       }
