@@ -17,7 +17,7 @@ import { ExecutionQaService } from '../apps/api/src/execution-qa.ts';
 import { ExecutionsService } from '../apps/api/src/executions.ts';
 import { pushCandidate } from '../apps/api/src/git-delivery.ts';
 import { GitHubApp } from '../apps/api/src/github.ts';
-import { openAIPlanningModel } from '../apps/api/src/planning-model.ts';
+import { openAIPlanningModel, PlanningFailure } from '../apps/api/src/planning-model.ts';
 import { ProjectsService } from '../apps/api/src/projects.ts';
 import { TasksService } from '../apps/api/src/tasks.ts';
 
@@ -43,7 +43,7 @@ const qa = new ExecutionQaService(db, projects, tasks, new ArtifactStore(), {
   available: () => true,
   async generate(agent, input) {
     qaCalls.push({ agent, input });
-    if (qaCalls.length === 1) throw new Error('Fixture transient error');
+    if (qaCalls.length === 1) throw new PlanningFailure('credentials_or_permissions', 403);
     return modelReply(agent, {
       recommendation: 'ready', testCases: ['Check the empty state'], findings: ['The settings route renders the saved value'],
     });
@@ -272,6 +272,10 @@ try {
 
   assert.equal(await qa.runNext(), true);
   assert.equal((await request(`${taskPath}/executions`, { token }))[0].qa.state, 'failed');
+  assert.equal((await request(taskPath, { token })).status, 'TESTING');
+  const failureEvents = await request(`${taskPath}/events`, { token });
+  const qaFailure = failureEvents.find(({ eventType }) => eventType === 'agent.qa_failed');
+  assert.deepEqual(qaFailure?.payload, { runId: run.id, patchHash, error: 'credentials_or_permissions', httpStatus: 403 });
   assert.equal((await request(overviewPath, { token })).alerts[0].kind, 'qa');
   await request(`${runPath}/qa/retry`, { token: viewerToken, method: 'POST', status: 403 });
   await request(`${runPath}/qa/retry`, { token, method: 'POST', status: 503 });

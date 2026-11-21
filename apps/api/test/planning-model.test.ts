@@ -19,7 +19,9 @@ describe('planning provider failures', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
 
     const result = openAIPlanningModel.generate('PROJECT_DIRECTOR', agent, {});
-    await expect(result).rejects.toMatchObject({ category: 'credentials_or_permissions', message: 'credentials_or_permissions' });
+    await expect(result).rejects.toMatchObject({
+      category: 'credentials_or_permissions', message: 'credentials_or_permissions', httpStatus: 403,
+    });
     await expect(result).rejects.not.toHaveProperty('cause');
     expect(readBody).not.toHaveBeenCalled();
     expect(response.bodyUsed).toBe(false);
