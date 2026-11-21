@@ -2,12 +2,12 @@ import {
   ConflictException, Controller, HttpCode, Inject, Injectable, Logger, type OnApplicationBootstrap,
   type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
-import type { Account, AgentAssignment, ModelUsage, PatchArtifact, QaAssessment, RequirementContent, VerificationReport } from '@ado/shared';
+import type { Account, AgentAssignment, ModelUsage, PatchArtifact, PlanningFailureCategory, QaAssessment, RequirementContent, VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
-import { generateStructuredOutput, responsesConfigured, type AgentResponse } from './planning-model';
+import { generateStructuredOutput, PlanningFailure, responsesConfigured, type AgentResponse } from './planning-model';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
 
@@ -70,6 +70,8 @@ interface ClaimedQa {
   artifact: PatchArtifact & { key: string };
   requirement: RequirementContent | null;
 }
+
+type QaFailure = { error: PlanningFailureCategory | 'task_read_failed' | 'artifact_unavailable'; httpStatus?: number };
 
 @Injectable()
 export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -142,29 +144,33 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
       let assessment: QaAssessment | null = null;
       let partialPatch = false;
       let usage: ModelUsage | undefined;
+      let failure: QaFailure = { error: 'task_read_failed' };
       try {
         const task = await this.tasks.find(job.projectId, job.taskId);
+        failure = { error: 'artifact_unavailable' };
         const bytes = await this.storage.get(job.artifact);
         partialPatch = bytes.length > maxReviewBytes;
         const { title, description, acceptanceCriteria } = task;
+        failure = { error: 'unknown' };
         const response = await this.model.generate(job.agent, {
           task: { title, description, acceptanceCriteria }, baseCommit: job.baseCommit, verification: job.verification,
           patch: bytes.subarray(0, maxReviewBytes).toString('utf8'), partialPatch,
           ...(job.requirement && { approvedRequirement: job.requirement }),
         });
         usage = response.usage;
+        failure = { error: 'invalid_structured_output' };
         assessment = assessmentInput(response.output, partialPatch);
-      } catch {
-        // Missing evidence and provider failures are retryable, and do not unblock review.
+      } catch (error) {
+        if (error instanceof PlanningFailure) failure = { error: error.category, httpStatus: error.httpStatus };
       }
-      await this.settle(job, assessment, partialPatch, usage);
+      await this.settle(job, assessment, partialPatch, failure, usage);
       return true;
     } finally {
       this.busy = false;
     }
   }
 
-  private async settle(job: ClaimedQa, assessment: QaAssessment | null, partialPatch: boolean, usage?: ModelUsage) {
+  private async settle(job: ClaimedQa, assessment: QaAssessment | null, partialPatch: boolean, failure: QaFailure, usage?: ModelUsage) {
     await this.db.transaction(async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [job.projectId]);
@@ -180,7 +186,8 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
       const payload = { runId: job.runId, patchHash: job.artifact.sha256 };
       if (usage) await this.tasks.event(client, task, 'agent.model_usage', { runId: job.runId, role: job.agent.role, usage });
       await this.tasks.event(client, task, `agent.qa_${state}`, {
-        ...payload, ...(assessment && !cancelled && { recommendation: assessment.recommendation, version: job.agent.version }),
+        ...payload, ...(state === 'failed' && failure),
+        ...(assessment && !cancelled && { recommendation: assessment.recommendation, version: job.agent.version }),
       });
       if (state !== 'completed') return;
       await client.query("UPDATE tasks SET status = 'REVIEW', updated_at = now() WHERE project_id = $1 AND id = $2",

@@ -3,7 +3,7 @@ import { developerRoles, type AgentAssignment, type ArchitecturePlan, type Direc
 import { objectInput, textInput } from './input';
 
 export class PlanningFailure extends Error {
-  constructor(readonly category: PlanningFailureCategory) {
+  constructor(readonly category: PlanningFailureCategory, readonly httpStatus?: number) {
     super(category);
   }
 }
@@ -127,7 +127,7 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
   const response = await fetch('https://api.openai.com/v1/responses', options).catch((error: unknown) => {
     throw transportFailure(error);
   });
-  if (!response.ok) throw new PlanningFailure(requestFailure(response.status));
+  if (!response.ok) throw new PlanningFailure(requestFailure(response.status), response.status);
   const result: unknown = await response.json().catch((error: unknown) => {
     throw error instanceof SyntaxError ? new PlanningFailure('invalid_structured_output') : transportFailure(error);
   });
