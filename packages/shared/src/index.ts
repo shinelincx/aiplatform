@@ -19,6 +19,8 @@ export { independentCheckKinds, independentCheckStatuses, parseIndependentChecks
 export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckResult,
   QaAssessment, VerificationCheck, VerificationReport } from './verification';
 export type { ModelRate, ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
+export { knowledgeKinds, maxPlanKnowledgeVersions } from './knowledge';
+export type { DesignEvidence, KnowledgeEntry, KnowledgeKind, KnowledgeSnapshot, KnowledgeVersion } from './knowledge';
 
 export interface ApiHealth {
   service: 'ado-api';

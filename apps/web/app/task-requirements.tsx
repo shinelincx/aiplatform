@@ -1,6 +1,7 @@
-import type { Project, ProjectRequirement, RepositoryBinding } from '@ado/shared';
+import { maxPlanKnowledgeVersions, type KnowledgeEntry, type Project, type ProjectRequirement, type RepositoryBinding } from '@ado/shared';
 import { registerRequirement, retireRequirement, startAgentPlan } from './actions';
-import { api } from './api-client';
+import { api, readSection } from './api-client';
+import { SectionReadError } from './section-feedback';
 import { ActionFeedback, SubmitButton } from './task-feedback';
 
 const unavailable = '暂时无法读取需求来源，请稍后重试。';
@@ -44,7 +45,10 @@ export async function TaskRequirements({ project, taskId, result, repositories, 
   repositories: RepositoryBinding[];
   canWrite: boolean;
 }) {
-  const { sources, error } = await readRequirements(project.id);
+  const [{ sources, error }, knowledge] = await Promise.all([
+    readRequirements(project.id),
+    canWrite && repositories.length ? readSection<KnowledgeEntry[]>(`/projects/${project.id}/knowledge`, Array.isArray) : null,
+  ]);
   const manageRequirements = project.role === 'owner' && project.status === 'active';
   const retryUrl = `/?project=${project.id}${taskId ? `&task=${taskId}` : ''}&requirementResult=refresh#task-requirements`;
   const notice = result && Object.hasOwn(notices, result) ? notices[result] : undefined;
@@ -86,6 +90,17 @@ export async function TaskRequirements({ project, taskId, result, repositories, 
           <option value="">未选择</option>
           {sources?.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
         </select></label>}
+        {knowledge?.issue && <SectionReadError label="可用于规划的项目知识" issue={knowledge.issue} />}
+        {knowledge?.data?.some(item => item.activeVersionId) && <details>
+          <summary>选择项目知识（可选）</summary>
+          <fieldset>
+            <legend>最多选择 {maxPlanKnowledgeVersions} 个已启用的版本</legend>
+            {knowledge.data.filter(item => item.activeVersionId).map(item => <label key={item.id} className="checkbox">
+              <input type="checkbox" name="knowledgeVersionIds" value={item.activeVersionId ?? ''} />
+              {item.title} · v{item.version}
+            </label>)}
+          </fieldset>
+        </details>}
         <label>需求<textarea name="request" maxLength={8000} required /></label>
         <SubmitButton pendingLabel="正在提交…">开始规划</SubmitButton>
       </form>

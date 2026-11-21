@@ -163,12 +163,57 @@ export async function startAgentPlan(form: FormData) {
   const response = await execute(`${endpoint}/agent-plans`, {
     method: 'POST', body: JSON.stringify({
       request: form.get('request'), repositoryId: form.get('repositoryId'), requirementId: form.get('requirementId') || null,
+      knowledgeVersionIds: form.getAll('knowledgeVersionIds'),
     }),
   });
   if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config'
     : response?.status === 409 ? 'agent-plan' : issue(response, 'agent-plan')}`);
   const plan = await response.json() as AgentPlan;
   redirect(`${query}&task=${plan.taskId}#task-detail`);
+}
+
+export async function saveKnowledgeVersion(form: FormData) {
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const task = form.get('taskId');
+  const query = projectQuery + (isWorkerId(task) ? `&task=${task}` : '');
+  const entryId = form.get('entryId');
+  const repositoryId = form.get('evidenceRepositoryId');
+  const runId = form.get('evidenceRunId');
+  const path = isWorkerId(entryId) ? `/${entryId}/versions` : '';
+  const target = `${query}&section=knowledge&knowledgeHistory=1${path ? `&knowledgeEntry=${entryId}` : ''}`;
+  const response = await execute(`${endpoint}/knowledge${path}`, {
+    method: 'POST', body: JSON.stringify({
+      title: form.get('title'), kind: form.get('knowledgeKind'), excerpt: form.get('excerpt'),
+      sourceUrl: form.get('sourceUrl'), sourceRevision: form.get('sourceRevision'), versionNote: form.get('versionNote'),
+      ...(repositoryId && { designEvidence: { repositoryId, implementationCommit: form.get('implementationCommit'),
+        reportUrl: form.get('reportUrl'), ...(runId && { runId }) } }),
+    }),
+  });
+  if (!response?.ok) redirect(`${target}&knowledgeResult=${issue(response, 'invalid')}#project-knowledge`);
+  const created = await response.json() as { id: string; entryId: string };
+  revalidatePath('/');
+  redirect(`${query}&section=knowledge&knowledgeHistory=1&knowledgeEntry=${created.entryId}&knowledgeVersion=${created.id}&knowledgeResult=saved#project-knowledge`);
+}
+
+export async function updateKnowledgeVersion(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const task = form.get('taskId');
+  const entryId = form.get('entryId');
+  const versionId = form.get('versionId');
+  const operation = form.get('operation');
+  const origin = `${query}${isWorkerId(task) ? `&task=${task}` : ''}&section=knowledge&knowledgeHistory=1`;
+  if (!isWorkerId(entryId) || !isWorkerId(versionId)) redirect(`${origin}#project-knowledge`);
+  const target = `${origin}&knowledgeEntry=${entryId}&knowledgeVersion=${versionId}`;
+  const route = `${endpoint}/knowledge/${entryId}`;
+  const decision = operation === 'approved' || operation === 'rejected';
+  if (!decision && operation !== 'activate' && operation !== 'retire') redirect(`${target}#project-knowledge`);
+  const response = await execute(decision ? `${route}/versions/${versionId}/decision` : `${route}/active-version`, {
+    method: 'PUT', body: JSON.stringify(decision ? { decision: operation }
+      : operation === 'retire' ? { versionId: null, expectedVersionId: versionId } : { versionId }),
+  });
+  if (!response?.ok) redirect(`${target}&knowledgeResult=${issue(response, 'invalid')}#project-knowledge`);
+  revalidatePath('/');
+  redirect(`${target}&knowledgeResult=${operation}#project-knowledge`);
 }
 
 export async function registerRequirement(form: FormData) {

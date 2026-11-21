@@ -4,7 +4,8 @@ import {
 } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
 import { canTransitionTask, developerRoles, taskPriorities, type Account, type AgentAssignment, type ArchitecturePlan,
-  type DeveloperRole, type RequirementContent, type Task, type TaskDetail, type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
+  type DeveloperRole, type KnowledgeSnapshot, type RequirementContent, type Task, type TaskDetail,
+  type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
@@ -221,12 +222,13 @@ export class TasksService {
   async plannedDevelopment(client: PoolClient, task: Task) {
     const { rows: [planned] } = await client.query<{
       plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null; requirement: RequirementContent | null;
+      knowledge: KnowledgeSnapshot[] | null;
     }>(
       `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent,
          assignments->'QA_ENGINEER' AS qa,
          CASE WHEN input ? 'requirement' THEN jsonb_build_object(
            'title', input->'requirement'->>'title', 'excerpt', input->'requirement'->>'excerpt'
-         ) END AS requirement
+         ) END AS requirement, input->'knowledge' AS knowledge
        FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state = 'completed'`, [task.projectId, task.id]);
     if (planned && !planned.agent) throw new ConflictException('Approved developer assignment is missing');
     return planned;
