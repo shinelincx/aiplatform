@@ -132,7 +132,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
   async get(actor: Account, projectId: string, taskId: string) {
     const project = await this.projects.access(actor.id, projectId);
     await this.tasks.find(projectId, taskId);
-    const { rows: [row] } = await this.db.pool.query<PlanRecord>(
+    const { rows: [row] } = await this.db.projectQuery<PlanRecord>(projectId,
       `SELECT ${planFields} FROM task_agent_plans WHERE project_id = $1 AND task_id = $2`, [projectId, taskId]);
     return { plan: row ? publicPlan(row, project.role === 'owner') : null };
   }
@@ -156,17 +156,15 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
     if (this.busy) return false;
     this.busy = true;
     try {
-      const { rows: [row] } = await this.db.pool.query<PlanRecord>(
-        `WITH next AS (
-          SELECT a.task_id FROM task_agent_plans a JOIN projects p ON p.id = a.project_id
-          WHERE p.status = 'active' AND (a.state = 'queued' OR (a.state = 'running' AND a.lease_expires_at < now()))
-          ORDER BY a.updated_at LIMIT 1 FOR UPDATE OF a SKIP LOCKED
-         )
-         UPDATE task_agent_plans a SET state = 'running', lease_id = gen_random_uuid(),
-           lease_expires_at = now() + interval '2 minutes', updated_at = now()
-         FROM next WHERE a.task_id = next.task_id
-         RETURNING a.task_id AS "taskId", a.project_id AS "projectId", a.state, a.input, a.assignments,
-           a.steps, a.error, a.failure_category AS "failureCategory", a.lease_id AS "leaseId"`);
+      const row = await this.db.transaction(async (client) => {
+        const taskId = await this.db.nextProjectJob(client, 'planning_candidate');
+        if (!taskId) return null;
+        const { rows: [claimed] } = await client.query<PlanRecord>(
+          `UPDATE task_agent_plans SET state = 'running', lease_id = gen_random_uuid(),
+             lease_expires_at = now() + interval '2 minutes', updated_at = now()
+           WHERE task_id = $1 RETURNING ${planFields}`, [taskId]);
+        return claimed;
+      });
       if (!row) return false;
 
       const role = planningRoles[row.steps.length];
@@ -201,7 +199,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
 
   private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null, usage?: ModelUsage,
     category?: PlanningFailureCategory) {
-    await this.db.transaction(async (client) => {
+    await this.db.projectTransaction(row.projectId, async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [row.projectId]);
       const current = await client.query(

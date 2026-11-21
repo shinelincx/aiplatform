@@ -57,6 +57,10 @@ export class GitHubWebhookController {
         'INSERT INTO github_webhook_deliveries (id) VALUES ($1) ON CONFLICT DO NOTHING', [id],
       );
       if (!inserted.rowCount) return;
+      const { rows: [{ project }] } = await client.query<{ project: string | null }>(
+        'SELECT ado_private.webhook_project($1, $2) AS project', [repository, installation]);
+      if (!project) return;
+      await this.db.bindProject(client, project);
       const { rows } = await client.query<PublishedPull>(
         `SELECT ${publishedPullColumns}
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id

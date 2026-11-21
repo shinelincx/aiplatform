@@ -2,7 +2,7 @@ import {
   BadRequestException, Body, ConflictException, Controller, Get, HttpCode, Inject,
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, UseGuards,
 } from '@nestjs/common';
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import { canTransitionTask, developerRoles, taskPriorities, type Account, type AgentAssignment, type ArchitecturePlan,
   type DeveloperRole, type KnowledgeSnapshot, type RequirementContent, type Task, type TaskDetail,
   type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
@@ -61,14 +61,15 @@ export class TasksService {
 
   async list(actor: Account, projectId: string) {
     await this.projects.access(actor.id, projectId);
-    const { rows } = await this.db.pool.query<Task>(
+    const { rows } = await this.db.projectQuery<Task>(projectId,
       `SELECT ${taskColumns} FROM tasks WHERE project_id = $1
        ORDER BY archived_at NULLS FIRST, priority, created_at DESC`, [projectId],
     );
     return rows;
   }
 
-  async find(projectId: string, id: string, client: Pool | PoolClient = this.db.pool): Promise<TaskDetail> {
+  async find(projectId: string, id: string, client?: PoolClient): Promise<TaskDetail> {
+    if (!client) return this.db.projectTransaction(projectId, (scoped) => this.find(projectId, id, scoped));
     const { rows: [task] } = await client.query<TaskDetail>(
       `SELECT ${taskColumns}, ARRAY(SELECT d.depends_on_task_id FROM task_dependencies d
          WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.depends_on_task_id) AS dependencies
@@ -85,7 +86,7 @@ export class TasksService {
 
   async history(actor: Account, projectId: string, id: string) {
     await this.get(actor, projectId, id);
-    const { rows } = await this.db.pool.query<TaskEvent>(
+    const { rows } = await this.db.projectQuery<TaskEvent>(projectId,
       `SELECT id::text, event_type AS "eventType", payload, created_at AS "createdAt"
        FROM task_events WHERE project_id = $1 AND task_id = $2 ORDER BY task_events.id`, [projectId, id],
     );

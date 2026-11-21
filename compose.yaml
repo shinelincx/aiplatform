@@ -39,6 +39,21 @@ services:
       timeout: 3s
       retries: 20
 
+  migrate:
+    image: ado-platform-dev:local
+    pull_policy: never
+    command: [./node_modules/.bin/tsx, --tsconfig, apps/api/tsconfig.json, apps/api/src/migrate.ts]
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ado
+      PGUSER: ado
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ado-local-dev}
+      ADO_DATABASE_PASSWORD: ${ADO_DATABASE_PASSWORD:-ado-local-api-dev}
+    volumes: [./apps/api/src:/app/apps/api/src:ro]
+    depends_on:
+      postgres: { condition: service_healthy }
+
   api:
     build: .
     image: ado-platform-dev:local
@@ -47,8 +62,8 @@ services:
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: ado
-      PGUSER: ado
-      PGPASSWORD: ${POSTGRES_PASSWORD:-ado-local-dev}
+      PGUSER: ado_api
+      PGPASSWORD: ${ADO_DATABASE_PASSWORD:-ado-local-api-dev}
       ADO_BOOTSTRAP_EMAIL: ${ADO_BOOTSTRAP_EMAIL-}
       ADO_BOOTSTRAP_PASSWORD: ${ADO_BOOTSTRAP_PASSWORD-}
       ADO_AGENT_API_KEY: ${ADO_AGENT_API_KEY-}
@@ -66,7 +81,7 @@ services:
     volumes: [./apps/api/src:/app/apps/api/src:ro]
     ports: ["127.0.0.1:${API_PORT:-3101}:3101"]
     depends_on:
-      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
       storage: { condition: service_healthy }
     healthcheck:

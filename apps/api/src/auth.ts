@@ -112,6 +112,7 @@ export class AuthService implements OnApplicationBootstrap {
           `INSERT INTO users (email, name, password_hash, system_role) VALUES ($1, $2, $3, 'user')
            RETURNING ${accountColumns}`, [email, name, hash],
         );
+        await client.query("SELECT set_config('ado.audit_admin', $1, true)", [actor.id]);
         await client.query(
           `INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.created', $2)`,
           [actor.id, account.id],

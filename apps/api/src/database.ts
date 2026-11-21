@@ -1,5 +1,6 @@
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
-import { Pool, type PoolClient } from 'pg';
+import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { projectIsolation, runtimePermissions } from './project-isolation';
 
 const migrations = [
   `CREATE TABLE users (
@@ -325,46 +326,134 @@ const migrations = [
   ALTER TABLE project_knowledge ADD CONSTRAINT knowledge_active_version_scope
     FOREIGN KEY (project_id, id, active_version_id) REFERENCES project_knowledge_versions(project_id, entry_id, id);
   CREATE INDEX project_knowledge_versions_scope ON project_knowledge_versions (project_id, id);`,
+  projectIsolation,
 ];
 
-@Injectable()
-export class Database implements OnModuleInit, OnModuleDestroy {
-  readonly pool = new Pool({
+function connect(user: string) {
+  return new Pool({
     host: process.env.PGHOST ?? '127.0.0.1',
     port: Number(process.env.PGPORT ?? '15432'),
     database: process.env.PGDATABASE ?? 'ado',
-    user: process.env.PGUSER ?? 'ado',
+    user,
     password: process.env.PGPASSWORD,
     connectionTimeoutMillis: 5000,
   });
+}
 
-  async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+async function inTransaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  let broken = false;
+  try {
+    await client.query('BEGIN');
+    const result = await operation(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
     try {
-      await client.query('BEGIN');
-      const result = await operation(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
       await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    } catch {
+      broken = true;
     }
+    throw error;
+  } finally {
+    client.release(broken);
   }
+}
 
-  async onModuleInit() {
-    await this.transaction(async (client) => {
+export async function migrate(runtimePassword: string) {
+  if (runtimePassword.length < 12 || runtimePassword === process.env.PGPASSWORD) {
+    throw new Error('Configure a separate API database password of at least 12 characters');
+  }
+  const pool = connect(process.env.PGUSER ?? 'ado');
+  try {
+    await inTransaction(pool, async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(17430)');
       await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY)');
       const { rows } = await client.query<{ version: number }>('SELECT version FROM schema_migrations');
       const applied = new Set(rows.map(({ version }) => version));
+      if (rows.some(({ version }) => version > migrations.length)) throw new Error('Database schema is newer than this version');
       for (const [index, migration] of migrations.entries()) {
         if (applied.has(index + 1)) continue;
         await client.query(migration);
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [index + 1]);
       }
+      await client.query("SELECT set_config('ado.runtime_password', $1, true)", [runtimePassword]);
+      await client.query(`
+        DO $$
+        DECLARE runtime_oid oid;
+        BEGIN
+          SELECT oid INTO runtime_oid FROM pg_roles WHERE rolname = 'ado_api';
+          IF runtime_oid IS NULL THEN
+            CREATE ROLE ado_api NOLOGIN;
+          ELSIF EXISTS (SELECT 1 FROM pg_auth_members WHERE member = runtime_oid)
+            OR EXISTS (SELECT 1 FROM pg_shdepend WHERE refclassid = 'pg_authid'::regclass
+              AND refobjid = runtime_oid AND deptype = 'o') THEN
+            RAISE EXCEPTION 'ado_api must have no role memberships or object ownership';
+          END IF;
+          EXECUTE format('ALTER ROLE ado_api LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT
+            NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %L', current_setting('ado.runtime_password'));
+        END
+        $$;
+      `);
+      await client.query(runtimePermissions);
     });
+  } finally {
+    await pool.end();
+  }
+}
+
+@Injectable()
+export class Database implements OnModuleInit, OnModuleDestroy {
+  readonly pool = connect(process.env.PGUSER ?? 'ado_api');
+
+  transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    return inTransaction(this.pool, operation);
+  }
+
+  async bindProject(client: PoolClient, projectId: string) {
+    const bound = await client.query(
+      `SELECT set_config('ado.project_id', $1, true)
+       WHERE coalesce(current_setting('ado.project_id', true), '') IN ('', $1)`, [projectId.toLowerCase()]);
+    if (bound.rowCount !== 1) throw new Error('Project scope cannot change within a transaction');
+  }
+
+  projectTransaction<T>(projectId: string, operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    return this.transaction(async (client) => {
+      await this.bindProject(client, projectId);
+      return operation(client);
+    });
+  }
+
+  projectQuery<T extends QueryResultRow = QueryResultRow>(projectId: string, sql: string, parameters: unknown[] = []) {
+    return this.projectTransaction(projectId, (client) => client.query<T>(sql, parameters));
+  }
+
+  async bindWorkerRun(client: PoolClient, worker: { workerId: string; hash: string }, runId: string) {
+    const { rows: [{ project }] } = await client.query<{ project: string | null }>(
+      'SELECT ado_private.worker_run_project($1, $2, $3) AS project', [worker.workerId, worker.hash, runId]);
+    if (!project) return false;
+    await this.bindProject(client, project);
+    return true;
+  }
+
+  async nextProjectJob(client: PoolClient, source: 'planning_candidate' | 'qa_candidate' | 'delivery_candidate' | 'expired_execution') {
+    const { rows: [job] } = await client.query<{ id: string; project_id: string }>(`SELECT * FROM ado_private.${source}()`);
+    if (!job) return null;
+    await this.bindProject(client, job.project_id);
+    return job.id;
+  }
+
+  async onModuleInit() {
+    const { rows: [role] } = await this.pool.query<{ restricted: boolean; version: number }>(`
+      SELECT rolname = 'ado_api' AND NOT (rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb)
+        AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid)
+        AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relowner = r.oid) AS restricted,
+        (SELECT max(version) FROM public.schema_migrations) AS version
+      FROM pg_roles r WHERE rolname = current_user
+    `);
+    if (!role?.restricted || role.version !== migrations.length) {
+      throw new Error('Start the API with the restricted role after running the matching database migration');
+    }
   }
 
   onModuleDestroy() {

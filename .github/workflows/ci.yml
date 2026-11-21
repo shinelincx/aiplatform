@@ -28,6 +28,8 @@ jobs:
       COMPOSE_FILE: compose.yaml:compose.staging.yaml
       ADO_BOOTSTRAP_EMAIL: ci@example.test
       ADO_BOOTSTRAP_PASSWORD: ci-local-password-only
+      POSTGRES_PASSWORD: ci-local-database-owner-only
+      ADO_DATABASE_PASSWORD: ci-local-database-api-only
       GITHUB_WEBHOOK_SECRET: ci-local-webhook-only
     steps:
       - uses: actions/checkout@v6
@@ -56,10 +58,12 @@ jobs:
           docker compose cp "$CURL_CA_BUNDLE" api:/tmp/ado-ci-tls.crt
           docker compose exec -T api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt ADO_VERIFY_WORKER_URL=https://gateway \
             node scripts/verify-workers.mjs
-          docker compose exec -T api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt ADO_VERIFY_WORKER_URL=https://gateway \
+          docker compose exec -T -e ADO_VERIFY_MIGRATION_PASSWORD="$POSTGRES_PASSWORD" \
+            api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt ADO_VERIFY_WORKER_URL=https://gateway \
             ADO_VERIFY_WEB_URL=https://gateway npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-executions.mjs
           docker compose exec -T api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt \
             ADO_VERIFY_WEB_URL=https://gateway npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-agent-planning.mjs
+          docker compose exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-database-isolation.mjs
       - name: Verify staging outage detection and recovery
         run: |
           docker compose stop web
@@ -99,7 +103,8 @@ jobs:
           WEB_PORT=23100 API_PORT=23101 POSTGRES_PORT=25432 REDIS_PORT=26379 S3_PORT=29000 ADO_STAGING_PORT=23443 \
             bash scripts/compose-backup.sh restore ado-ci-restore "${RUNNER_TEMP}/ado-snapshot"
           bash scripts/probe-staging.sh https://127.0.0.1:23443
-          docker compose -p ado-ci-restore exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-recovery.mjs
+          docker compose -p ado-ci-restore exec -T -e ADO_VERIFY_MIGRATION_PASSWORD="$POSTGRES_PASSWORD" \
+            api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-recovery.mjs
       - if: failure()
         run: docker compose logs --no-color --tail 80
       - if: always()

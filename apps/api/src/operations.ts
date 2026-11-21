@@ -26,7 +26,7 @@ export class OperationsService {
 
   async overview(actor: Account, projectId: string): Promise<ProjectOverview> {
     const project = await this.projects.access(actor.id, projectId);
-    const { rows: [summary] } = await this.db.pool.query<ProjectOverview>(
+    const { rows: [summary] } = await this.db.projectQuery<ProjectOverview>(projectId,
       `WITH current_tasks AS (
         SELECT id, task_code, title, status, updated_at, archived_at FROM tasks WHERE project_id = $1
       ), latest_run AS (
@@ -79,7 +79,7 @@ export class OperationsService {
     const project = await this.projects.access(actor.id, projectId);
     const canManage = project.role === 'owner';
     const [usage, audit, rates] = await Promise.all([
-      this.db.pool.query<ModelUsageRow>(
+      this.db.projectQuery<ModelUsageRow>(projectId,
         `WITH usage_records AS (
           SELECT payload->>'role' AS role, payload->'usage'->>'model' AS model, payload->'usage' AS usage
           FROM task_events WHERE project_id = $1 AND event_type = 'agent.model_usage'
@@ -101,7 +101,7 @@ export class OperationsService {
              + t.outputs * r.output_usd) / 1000000, 12)::text END AS "estimatedUsd"
          FROM token_totals t LEFT JOIN project_model_rates r ON r.project_id = $1 AND r.model = t.model
          ORDER BY t.role, t.model`, [projectId]),
-      canManage ? this.db.pool.query<ProjectAuditEntry>(
+      canManage ? this.db.projectQuery<ProjectAuditEntry>(projectId,
         `SELECT id, action, actor, "resourceId", "createdAt", details FROM (
           SELECT a.id::text, a.action, u.name AS actor, a.resource_id AS "resourceId", a.created_at AS "createdAt", a.details
           FROM audit_logs a JOIN users u ON u.id = a.actor_id WHERE a.project_id = $1
@@ -116,7 +116,7 @@ export class OperationsService {
             OR (t.event_type = 'task.status_changed' AND t.payload ? 'workerId')
           )
          ) activity ORDER BY "createdAt" DESC, id DESC LIMIT 25`, [projectId]) : null,
-      canManage ? this.db.pool.query<ModelRate>(
+      canManage ? this.db.projectQuery<ModelRate>(projectId,
         `SELECT ${rateFields} FROM project_model_rates WHERE project_id = $1 ORDER BY model`, [projectId]) : null,
     ]);
     return { usage: usage.rows, audit: audit?.rows ?? null, rates: rates?.rows ?? null };

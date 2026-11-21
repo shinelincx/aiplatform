@@ -3,7 +3,7 @@ import {
   Post, ServiceUnavailableException, UseGuards, type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import { executionQualityGate, type Account, type ExecutionDelivery, type Task, type VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -134,27 +134,28 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
   async refreshPull(actor: Account, projectId: string, taskId: string, runId: string) {
     const access = { owner: true, active: true };
     await this.projects.access(actor.id, projectId, access);
-    const published = await this.findPublished(this.db.pool, projectId, taskId, runId);
+    const published = await this.findPublished(projectId, taskId, runId);
     if (published.pullState === 'merged') return;
     const snapshot = await this.github.readPull(Number(published.installationId), Number(published.externalId),
       published.repository, published.pullNumber);
     await this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, access, client);
-      const current = await this.findPublished(client, projectId, taskId, runId);
+      const current = await this.findPublished(projectId, taskId, runId, client);
       await this.recordPull(client, current, snapshot);
     });
   }
 
-  private async findPublished(client: Pool | PoolClient, projectId: string, taskId: string, runId: string) {
-    const { rows: [published] } = await client.query<PublishedPull & { repository: string; installationId: string; externalId: string }>(
-      `SELECT ${publishedPullColumns}, g.owner || '/' || g.repo_name AS repository,
+  private async findPublished(projectId: string, taskId: string, runId: string, client?: PoolClient) {
+    type Pull = PublishedPull & { repository: string; installationId: string; externalId: string };
+    const sql = `SELECT ${publishedPullColumns}, g.owner || '/' || g.repo_name AS repository,
          g.installation_id AS "installationId", g.github_repository_id AS "externalId"
        FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
        JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
        WHERE r.id = $1 AND r.project_id = $2 AND r.task_id = $3 AND d.state = 'published' AND d.pull_number IS NOT NULL
-       ${client === this.db.pool ? '' : 'FOR UPDATE OF d'}`,
-      [runId, projectId, taskId],
-    );
+       ${client ? 'FOR UPDATE OF d' : ''}`;
+    const values = [runId, projectId, taskId];
+    const { rows: [published] } = client ? await client.query<Pull>(sql, values)
+      : await this.db.projectQuery<Pull>(projectId, sql, values);
     if (!published) throw new NotFoundException('Published pull request not found');
     return published;
   }
@@ -219,6 +220,8 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     if (!this.github.configured) return null;
     const lease = randomUUID();
     return this.db.transaction(async (client) => {
+      const runId = await this.db.nextProjectJob(client, 'delivery_candidate');
+      if (!runId) return null;
       const { rows: [work] } = await client.query<Omit<Publication, 'lease'>>(
         `SELECT r.id AS "runId", r.project_id AS "projectId", r.task_id AS "taskId", r.created_at AS "createdAt",
            g.owner || '/' || g.repo_name AS repository, g.installation_id::text AS "installationId",
@@ -228,15 +231,12 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
            r.id = (SELECT latest.id FROM execution_runs latest WHERE latest.project_id=r.project_id AND latest.task_id=r.task_id
              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS current
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
-         JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'REVIEW'
          JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
-         JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
          JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = d.patch_hash
          JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result'
            AND payload->>'patchHash' = d.patch_hash ORDER BY sequence DESC LIMIT 1) e ON true
-         WHERE d.state = 'queued' OR (d.state = 'publishing' AND d.lease_expires_at < now())
-         ORDER BY d.updated_at, d.run_id LIMIT 1 FOR UPDATE OF d SKIP LOCKED`,
+         WHERE d.run_id = $1`, [runId],
       );
       if (!work) return null;
       const gate = executionQualityGate(work, work.patchHash);
@@ -273,7 +273,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
       }, signal);
       const pr = await this.github.draftPull(token, work.repository, work.branch, work.baseBranch, commit,
         `[${work.code}] ${work.title}`.slice(0, 240), pullBody(work));
-      await this.db.transaction(async (client) => {
+      await this.db.projectTransaction(work.projectId, async (client) => {
         const result = await client.query(
           `UPDATE execution_deliveries SET state = 'published', error = NULL, pull_number = $3, pull_url = $4,
              pull_state = $5, commit_sha = $6, github_updated_at = $7, lease_id = NULL, lease_expires_at = NULL,
@@ -288,7 +288,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       const code = error instanceof DeliveryError ? error.code : 'github_failed';
       if (!this.stopping.signal.aborted) {
-        await this.db.pool.query(
+        await this.db.projectQuery(work.projectId,
           `UPDATE execution_deliveries SET state = 'failed', error = $3, updated_at = now(),
              lease_id = NULL, lease_expires_at = NULL WHERE run_id = $1 AND lease_id = $2`,
           [work.runId, work.lease, code],

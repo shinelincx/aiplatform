@@ -6,7 +6,7 @@ import {
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import { maxPatchBytes, type Account, type PatchArtifact } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
@@ -81,7 +81,7 @@ export class ArtifactsService {
     @Inject(ArtifactStore) private readonly store: ArtifactStore,
   ) {}
 
-  private async target(runId: string, worker: WorkerIdentity, client: Pool | PoolClient) {
+  private async target(runId: string, worker: WorkerIdentity, client: PoolClient) {
     const { rows: [candidate] } = await client.query<Target>(
       `SELECT r.project_id AS "projectId",
          COALESCE(r.candidate_hash, r.verification_report->>'patchHash') AS hash
@@ -100,7 +100,10 @@ export class ArtifactsService {
   }
 
   async upload(runId: string, worker: WorkerIdentity, request: IncomingMessage) {
-    const candidate = await this.target(runId, worker, this.db.pool);
+    const candidate = await this.db.transaction(async (client) => {
+      if (!await this.db.bindWorkerRun(client, worker, runId)) throw new NotFoundException('Execution artifact target not found');
+      return this.target(runId, worker, client);
+    });
     if (request.headers['content-type'] !== 'application/octet-stream') {
       throw new BadRequestException('Expected a binary patch');
     }
@@ -123,7 +126,7 @@ export class ArtifactsService {
     const artifact = { sha256: hash, size, key: `projects/${candidate.projectId}/executions/${runId}/${hash}.patch` };
     await this.store.put(artifact, body);
 
-    return this.db.transaction(async (client) => {
+    return this.db.projectTransaction(candidate.projectId, async (client) => {
       await client.query('SELECT id FROM execution_runs WHERE id = $1 FOR UPDATE', [runId]);
       if ((await this.target(runId, worker, client)).hash !== hash) {
         throw new ConflictException('Candidate changed while the patch was uploaded');
@@ -138,7 +141,7 @@ export class ArtifactsService {
 
   async download(actor: Account, projectId: string, taskId: string, runId: string) {
     await this.tasks.get(actor, projectId, taskId);
-    const { rows: [artifact] } = await this.db.pool.query<Artifact>(
+    const { rows: [artifact] } = await this.db.projectQuery<Artifact>(projectId,
       `SELECT a.sha256, a.size, a.object_key AS key FROM execution_artifacts a
        JOIN execution_runs r ON r.id = a.run_id WHERE r.project_id = $1 AND r.task_id = $2 AND r.id = $3
          AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')`,
@@ -148,8 +151,12 @@ export class ArtifactsService {
     return this.store.get(artifact);
   }
 
-  private async revisionSource(runId: string, worker: WorkerIdentity) {
-    const { rows: [artifact] } = await this.db.pool.query<RevisionArtifact>(
+  private async revisionSource(runId: string, worker: WorkerIdentity, client?: PoolClient): Promise<RevisionArtifact> {
+    if (!client) return this.db.transaction(async (scoped) => {
+      if (!await this.db.bindWorkerRun(scoped, worker, runId)) throw new NotFoundException('Revision artifact not found');
+      return this.revisionSource(runId, worker, scoped);
+    });
+    const { rows: [artifact] } = await client.query<RevisionArtifact>(
       `SELECT a.sha256, a.size, a.object_key AS key, prior.id AS "previousRunId", result."baseCommit"
        FROM execution_runs r
        JOIN workers w ON w.id = r.worker_id
