@@ -1,4 +1,4 @@
-import type { ExecutionQa, ExecutionReview, VerificationCheck, VerificationReport } from './verification';
+import type { ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckResult, VerificationCheck, VerificationReport } from './verification';
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
 import type { RequirementContent } from './projects';
@@ -15,6 +15,7 @@ export interface ReviewEvidence {
   url?: string;
   author: string;
   recordedAt: string;
+  check?: IndependentCheckResult;
 }
 
 export interface DevelopmentHandoff {
@@ -55,12 +56,34 @@ export interface ExecutionRun {
   finishedAt: string | null;
   report: VerificationReport | null;
   checkPlan?: VerificationCheck[];
+  independentChecks?: IndependentCheck[];
   review: ExecutionReview | null;
   artifact: PatchArtifact | null;
   delivery: ExecutionDelivery | null;
   qa?: ExecutionQa | null;
   revision?: ExecutionRevision | null;
   evidence?: ReviewEvidence[];
+}
+
+export function executionQualityGate(
+  run: Pick<ExecutionRun, 'independentChecks' | 'checkPlan' | 'report' | 'evidence'>,
+  archiveHash?: string | null,
+) {
+  const required = run.independentChecks ?? [];
+  if (!required.length) return null;
+  const checkPlan = run.checkPlan ?? [];
+  const report = run.report;
+  const workerReady = Boolean(archiveHash && report?.patchHash === archiveHash && report.passed
+    && checkPlan.length > 0 && report.checks.length === checkPlan.length
+    && checkPlan.every(({ name }) => report.checks.some(result => result.name === name && result.status === 'passed' && result.exitCode === 0)));
+  const latest = new Map<string, IndependentCheckResult['status']>();
+  if (archiveHash) {
+    for (const entry of run.evidence ?? []) {
+      if (entry.patchHash === archiveHash && entry.check?.source === 'archive') latest.set(entry.check.name, entry.check.status);
+    }
+  }
+  const checks = required.map(item => ({ ...item, status: latest.get(item.name) ?? ('missing' as const) }));
+  return { workerReady, checks, ready: workerReady && checks.every(item => item.status === 'passed') };
 }
 
 export interface ExecutionEvent {

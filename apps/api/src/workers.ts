@@ -23,7 +23,8 @@ export const workerMatchesAssignment = `(r.requested_worker_id IS NULL OR r.requ
 export const workerCanVerify = `(r.developer_assignment->>'revision' IS NULL OR w.capabilities->'revisionArtifactVersion' = '1'::jsonb)
   AND (jsonb_array_length(r.check_plan) = 0 OR (
   w.capabilities->'verificationVersion' = '1'::jsonb
-  AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr) OR w.capabilities->'artifactVersion' = '1'::jsonb)
+  AND ((r.qa_assignment IS NULL AND NOT g.auto_draft_pr AND jsonb_array_length(r.independent_checks) = 0)
+    OR w.capabilities->'artifactVersion' = '1'::jsonb)
   AND (w.capabilities @> '{"mavenVerification":true}'::jsonb
     OR NOT jsonb_path_exists(r.check_plan, '$[*].argv[0] ? (@ == "mvn")'))
 ))`;

@@ -4,13 +4,14 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import type { Account, ExecutionDelivery, Task, VerificationReport } from '@ado/shared';
+import { executionQualityGate, type Account, type ExecutionDelivery, type Task, type VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { DeliveryError, pushCandidate } from './git-delivery';
 import { GitHubApp } from './github';
 import { ProjectsService } from './projects';
+import { qualityGateColumns, requireQualityGate, type QualityGateRun } from './quality-gate';
 import { TasksService } from './tasks';
 
 export const GIT_PUBLISH = Symbol('GIT_PUBLISH');
@@ -42,7 +43,7 @@ type PullSnapshot = {
   base?: { ref?: unknown };
 };
 
-type Publication = {
+type Publication = QualityGateRun & {
   runId: string;
   projectId: string;
   taskId: string;
@@ -58,6 +59,7 @@ type Publication = {
   createdAt: Date;
   code: string;
   title: string;
+  current: boolean;
   files: string[];
   checks: VerificationReport['checks'];
   lease: string;
@@ -69,6 +71,8 @@ function pullBody(work: Publication) {
     `ADO task ${format(work.code)} · Run ${format(work.runId)}`,
     '', '### Changed files', ...work.files.map((file) => `- ${format(file)}`),
     '', '### Verification', ...work.checks.map(({ name, status }) => `- ${format(name)} · ${status}`),
+    ...(work.independentChecks?.length ? ['', '### Independent verification',
+      ...work.independentChecks.map(({ name }) => `- ${format(name)} · passed`)] : []),
     '', `Tested patch SHA-256: ${format(work.patchHash)}`,
   ].join('\n');
 }
@@ -111,7 +115,17 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
         `SELECT ${deliveryColumns} FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
          WHERE r.id = $1 AND r.project_id = $2 AND r.task_id = $3`, [runId, projectId, taskId],
       );
-      if (existing && existing.state !== 'failed') return existing;
+      if (existing && existing.state !== 'failed') {
+        if (existing.state !== 'published') {
+          const { rows: [candidate] } = await client.query<QualityGateRun & { patchHash: string }>(
+            `SELECT ${qualityGateColumns}, d.patch_hash AS "patchHash"
+             FROM execution_runs r JOIN execution_deliveries d ON d.run_id = r.id
+             WHERE r.id = $1 AND r.project_id = $2 AND r.task_id = $3`, [runId, projectId, taskId],
+          );
+          if (candidate) requireQualityGate(candidate, candidate.patchHash);
+        }
+        return existing;
+      }
       if (task.status !== 'REVIEW') throw new ConflictException('Only an approved candidate in review can be published');
       return this.enqueueApproved(client, actor.id, task, runId, false);
     });
@@ -168,11 +182,11 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
 
   async enqueueApproved(client: PoolClient, actorId: string, task: Task, runId: string, automatic: boolean) {
     const { projectId, id: taskId } = task;
-    const { rows: [candidate] } = await client.query<{
+    const { rows: [candidate] } = await client.query<QualityGateRun & {
       repoId: string; baseBranch: string; baseCommit: string; patchHash: string;
     }>(
       `SELECT r.repository_id AS "repoId", COALESCE(r.source_branch, g.default_branch) AS "baseBranch",
-         e.payload->>'baseCommit' AS "baseCommit", a.sha256 AS "patchHash"
+         e.payload->>'baseCommit' AS "baseCommit", a.sha256 AS "patchHash", ${qualityGateColumns}
        FROM execution_runs r JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
        JOIN repositories g ON g.id = r.repository_id AND g.project_id = r.project_id
        JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = r.verification_report->>'patchHash'
@@ -187,6 +201,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     );
     if (!candidate && automatic) return null;
     if (!candidate) throw new ConflictException('Publish requires an approved, tested and archived patch');
+    requireQualityGate(candidate, candidate.patchHash);
     if (!automatic && !this.github.configured) throw new ServiceUnavailableException('GitHub App delivery is not configured');
     const { rows: [delivery] } = await client.query<ExecutionDelivery>(
       `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch, state)
@@ -209,7 +224,9 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
            g.owner || '/' || g.repo_name AS repository, g.installation_id::text AS "installationId",
            g.github_repository_id::text AS "externalId", d.branch, d.base_branch AS "baseBranch", d.base_commit AS "baseCommit",
            d.patch_hash AS "patchHash", a.object_key AS "objectKey", a.size, t.task_code AS code, t.title,
-           e.payload->'files' AS files, r.verification_report->'checks' AS checks
+           e.payload->'files' AS files, r.verification_report->'checks' AS checks, ${qualityGateColumns},
+           r.id = (SELECT latest.id FROM execution_runs latest WHERE latest.project_id=r.project_id AND latest.task_id=r.task_id
+             ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS current
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'REVIEW'
@@ -222,6 +239,14 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
          ORDER BY d.updated_at, d.run_id LIMIT 1 FOR UPDATE OF d SKIP LOCKED`,
       );
       if (!work) return null;
+      const gate = executionQualityGate(work, work.patchHash);
+      if (gate && (!gate.ready || !work.current)) {
+        await client.query(
+          `UPDATE execution_deliveries SET state = 'failed', error = 'quality_gate', lease_id = NULL,
+             lease_expires_at = NULL, updated_at = now() WHERE run_id = $1`, [work.runId],
+        );
+        return null;
+      }
       await client.query(
         `UPDATE execution_deliveries SET state = 'publishing', lease_id = $2,
            lease_expires_at = now() + interval '4 minutes', updated_at = now() WHERE run_id = $1`,

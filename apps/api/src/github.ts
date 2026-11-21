@@ -3,7 +3,7 @@ import {
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { sign } from 'node:crypto';
-import { parseCheckPlan, type Account, type GitHubInstallation, type GitHubRepository, type RepositoryBinding } from '@ado/shared';
+import { parseCheckPlan, parseIndependentChecks, type Account, type GitHubInstallation, type GitHubRepository, type RepositoryBinding } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
@@ -192,7 +192,7 @@ export class GitHubApp {
 
 const columns = `id, github_repository_id::text AS "githubId", owner || '/' || repo_name AS "fullName",
   repository_url AS url, default_branch AS "defaultBranch", installation_id::text AS "installationId",
-  check_plan AS checks, auto_draft_pr AS "autoDraftPr"`;
+  check_plan AS checks, auto_draft_pr AS "autoDraftPr", independent_checks AS "independentChecks"`;
 
 @Controller('projects/:id/repositories')
 @UseGuards(SessionGuard)
@@ -268,16 +268,30 @@ export class RepositoriesController {
     if (autoDraftPr !== undefined && typeof autoDraftPr !== 'boolean') {
       throw new BadRequestException('Invalid automatic draft PR setting');
     }
-    const checks = (() => {
-      try { return parseCheckPlan(input.checks); }
+    const { checks, independentChecks } = (() => {
+      try {
+        return {
+          checks: parseCheckPlan(input.checks),
+          independentChecks: input.independentChecks === undefined ? null : parseIndependentChecks(input.independentChecks),
+        };
+      }
       catch (error) { throw new BadRequestException(error instanceof Error ? error.message : 'Invalid check plan'); }
     })();
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, id, { owner: true, active: true }, client);
+      const { rows: [current] } = await client.query<Pick<RepositoryBinding, 'independentChecks'>>(
+        'SELECT independent_checks AS "independentChecks" FROM repositories WHERE project_id = $1 AND id = $2',
+        [id, repositoryId],
+      );
+      if (!current) throw new NotFoundException('Repository binding not found');
+      if (!checks.length && (independentChecks ?? current.independentChecks)?.length) {
+        throw new BadRequestException('Independent checks require at least one Worker check and an archived patch');
+      }
       const { rows: [binding] } = await client.query<RepositoryBinding>(
-        `UPDATE repositories SET check_plan = $3, auto_draft_pr = COALESCE($4, auto_draft_pr)
+        `UPDATE repositories SET check_plan = $3, auto_draft_pr = COALESCE($4, auto_draft_pr),
+           independent_checks = COALESCE($5, independent_checks)
          WHERE project_id = $1 AND id = $2 RETURNING ${columns}`,
-        [id, repositoryId, JSON.stringify(checks), autoDraftPr ?? null],
+        [id, repositoryId, JSON.stringify(checks), autoDraftPr ?? null, independentChecks && JSON.stringify(independentChecks)],
       );
       if (!binding) throw new NotFoundException('Repository binding not found');
       await this.projects.audit(client, actor.id, id, 'repository.checks_updated', repositoryId);

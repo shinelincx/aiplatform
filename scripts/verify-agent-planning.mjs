@@ -197,6 +197,8 @@ try {
   const queued = await directStart();
   assert.equal(queued.requirement.id, requirement.id);
   await request(`${requirementsPath}/${requirement.id}`, { token, method: 'DELETE', status: 204 });
+  assert((await request(operationsPath, { token })).audit.some(({ action, resourceId }) =>
+    action === 'requirement.retired' && resourceId === requirement.id));
   assert.deepEqual(await request(requirementsPath, { token }), []);
   await assert.rejects(directStart(), /not found/i);
   const taskPath = `${prefix}/tasks/${queued.taskId}`;
@@ -258,7 +260,8 @@ try {
   const planApproval = await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
   assert.deepEqual(planApproval.developer, { role: 'FRONTEND_DEVELOPER', version: 2, model: config.model });
   await request(`${prefix}/repositories/${repo.id}/checks`, {
-    token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }] },
+    token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }],
+      independentChecks: [{ name: 'browser', kind: 'browser' }] },
   });
   const run = await request(`${taskPath}/executions`, { token, method: 'POST', status: 201 });
   const credential = await request(`${prefix}/workers`, {
@@ -335,6 +338,11 @@ try {
   });
   const reviewHtml = await reviewedPage.text();
   assert(reviewHtml.includes('证据不足') && reviewHtml.includes('批准变更') && reviewHtml.includes('截至本轮'));
+  await request(`${runPath}/review`, { ...review, status: 409 });
+  await request(`${runPath}/evidence`, { token, method: 'POST', status: 201,
+    body: { patchHash, summary: 'Independent browser evidence for the full archive',
+      check: { name: 'browser', status: 'passed', source: 'archive', environment: 'Synthetic browser' } },
+  });
   assert.equal((await request(`${runPath}/review`, review)).decision, 'approved');
 
   const operations = await request(operationsPath, { token });
@@ -343,7 +351,7 @@ try {
     inputTokens: '40', cachedInputTokens: '10', outputTokens: '16', estimatedUsd: null });
   assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
   assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
-  for (const action of ['requirement.retired', 'task.approved', 'agent.step_completed', 'task.status_changed',
+  for (const action of ['task.approved', 'agent.step_completed', 'task.status_changed',
     'agent.qa_completed', 'execution.reviewed']) {
     assert(operations.audit.some((entry) => entry.action === action), `Missing ${action} in the project audit`);
   }

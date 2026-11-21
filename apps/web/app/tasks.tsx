@@ -28,6 +28,7 @@ const taskNotices = new Map([
   ['task-transitioned', '任务状态已更新。'],
   ['execution-requested', '已提交派发请求，请查看执行状态。'],
   ['execution-reviewed', '执行评审结果已提交。'],
+  ['execution-evidence-saved', '复验证据已保存。'],
 ]);
 
 const editable = ['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED'];
@@ -177,7 +178,8 @@ export async function Tasks({ project, selectedId, requirementResult, notice }: 
             <form action={archiveTask} className="repository-form">{taskIdentity}<button className="secondary">归档任务</button></form>}
         </>}
         <Executions project={project} task={task}
-          checks={boundRepository?.checks ?? []} autoDraftPr={boundRepository?.autoDraftPr === true}
+          checks={boundRepository?.checks ?? []} independentChecks={boundRepository?.independentChecks ?? []}
+          autoDraftPr={boundRepository?.autoDraftPr === true}
           planned={plan?.state === 'completed'} />
         <details>
           <summary>任务记录</summary>

@@ -292,6 +292,10 @@ const migrations = [
       WHERE agent.project_id = skill.project_id
         AND agent.skills @> jsonb_build_array(jsonb_build_object('id', skill.skill_id, 'version', skill.version))
     );`,
+  `ALTER TABLE repositories ADD COLUMN independent_checks jsonb NOT NULL DEFAULT '[]',
+    ADD CONSTRAINT repository_independent_checks_need_worker_checks
+      CHECK (jsonb_array_length(independent_checks) = 0 OR jsonb_array_length(check_plan) > 0);
+  ALTER TABLE execution_runs ADD COLUMN independent_checks jsonb NOT NULL DEFAULT '[]';`,
 ];
 
 @Injectable()
