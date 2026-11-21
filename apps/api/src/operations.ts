@@ -102,14 +102,14 @@ export class OperationsService {
          FROM token_totals t LEFT JOIN project_model_rates r ON r.project_id = $1 AND r.model = t.model
          ORDER BY t.role, t.model`, [projectId]),
       canManage ? this.db.pool.query<ProjectAuditEntry>(
-        `SELECT id, action, actor, "resourceId", "createdAt" FROM (
-          SELECT a.id::text, a.action, u.name AS actor, a.resource_id AS "resourceId", a.created_at AS "createdAt"
+        `SELECT id, action, actor, "resourceId", "createdAt", details FROM (
+          SELECT a.id::text, a.action, u.name AS actor, a.resource_id AS "resourceId", a.created_at AS "createdAt", a.details
           FROM audit_logs a JOIN users u ON u.id = a.actor_id WHERE a.project_id = $1
           UNION ALL
           SELECT 'task:' || t.id, t.event_type,
             COALESCE(w.name, t.payload->>'role',
               CASE WHEN t.event_type LIKE 'agent.qa_%' THEN 'QA_ENGINEER' ELSE 'Worker' END),
-            t.task_id, t.created_at
+            t.task_id, t.created_at, NULL::jsonb
           FROM task_events t LEFT JOIN workers w ON w.id = (t.payload->>'workerId')::uuid
           WHERE t.project_id = $1 AND (
             t.event_type IN ('agent.step_completed','agent.plan_failed','agent.qa_completed','agent.qa_failed')

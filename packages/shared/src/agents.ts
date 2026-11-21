@@ -17,9 +17,31 @@ export type DeveloperRole = (typeof developerRoles)[number];
 export const planningRoles = ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT'] as const;
 export type PlanningRole = (typeof planningRoles)[number];
 
+export interface SkillEvaluation {
+  result: 'passed' | 'failed';
+  evidence: string;
+  recordedBy: string;
+  recordedAt: string;
+}
+
+export interface SkillDecision {
+  decision: 'approved' | 'rejected';
+  decidedBy: string;
+  decidedAt: string;
+}
+
+export type SkillVersionStatus = 'pending_evaluation' | 'evaluation_failed' | 'awaiting_approval' | 'approved' | 'rejected' | 'legacy';
+
 export interface SkillVersion {
   version: number;
   instructions: string;
+  status: SkillVersionStatus;
+  evaluation: SkillEvaluation | null;
+  decision: SkillDecision | null;
+}
+
+export function isUsableSkillVersion(version: SkillVersion) {
+  return version.status === 'approved' || version.status === 'legacy';
 }
 
 export interface ProjectSkill {

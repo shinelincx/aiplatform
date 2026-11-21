@@ -7,6 +7,8 @@ const actions: Record<string, string> = {
   'project.created': '创建项目', 'project.updated': '更新项目', 'project.archived': '归档项目',
   'agent.version_published': '发布 Agent 版本', 'agent.settings_updated': '变更 Agent 配置',
   'skill.version_published': '发布 Skill 版本', 'skill.settings_updated': '变更 Skill 配置',
+  'skill.version_evaluated': '登记 Skill 评估', 'skill.version_approved': '批准 Skill 版本',
+  'skill.version_rejected': '驳回 Skill 版本',
   'task.approved': '批准任务方案', 'task.rejected': '驳回任务方案', 'execution.reviewed': '人工审核',
   'repository.checks_updated': '更新仓库检查与交付设置', 'delivery.queued': '提交发布请求',
   'execution.worker_reassigned': '调整 Worker 分配',
@@ -68,7 +70,10 @@ export async function Operations({ project }: { project: Project }) {
           <li key={entry.id}>
             <div>
               <span>{actions[entry.action] ?? entry.action} · {Object.hasOwn(agentRoleLabels, entry.actor)
-                ? agentRoleLabels[entry.actor as AgentRole] : entry.actor}</span>
+                ? agentRoleLabels[entry.actor as AgentRole] : entry.actor}
+                {entry.details?.role && ` · ${agentRoleLabels[entry.details.role]}`}
+                {entry.details?.version && ` · v${entry.details.version}`}
+                {entry.details?.enabled !== undefined && (entry.details.enabled ? ' · 启用' : ' · 停用')}</span>
               <small className="description">{entry.resourceId}</small>
             </div>
             <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>

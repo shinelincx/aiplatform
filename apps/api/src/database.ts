@@ -278,6 +278,20 @@ const migrations = [
   );`,
   `ALTER TABLE task_agent_plans ADD COLUMN failure_category text;`,
   `ALTER TABLE execution_runs ADD COLUMN review_evidence jsonb NOT NULL DEFAULT '[]';`,
+  `ALTER TABLE project_skill_versions
+    ADD COLUMN legacy_eligible boolean NOT NULL DEFAULT false,
+    ADD COLUMN evaluation jsonb,
+    ADD COLUMN decision jsonb;
+  ALTER TABLE audit_logs ADD COLUMN details jsonb;
+  UPDATE project_skill_versions AS skill
+    SET legacy_eligible = true
+    WHERE EXISTS (
+      SELECT 1 FROM project_agent_settings AS settings
+      JOIN project_agent_versions AS agent ON agent.project_id = settings.project_id
+        AND agent.role = settings.role AND agent.version = settings.active_version
+      WHERE agent.project_id = skill.project_id
+        AND agent.skills @> jsonb_build_array(jsonb_build_object('id', skill.skill_id, 'version', skill.version))
+    );`,
 ];
 
 @Injectable()

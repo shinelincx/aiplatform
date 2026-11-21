@@ -3,7 +3,7 @@ import {
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Put, UseGuards,
 } from '@nestjs/common';
 import type { Pool, PoolClient } from 'pg';
-import type { Account, Project, ProjectMember, ProjectRequirement } from '@ado/shared';
+import type { Account, Project, ProjectAuditEntry, ProjectMember, ProjectRequirement } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
@@ -198,10 +198,11 @@ export class ProjectsService {
     });
   }
 
-  async audit(client: PoolClient, actorId: string, projectId: string, action: string, resourceId: string) {
+  async audit(client: PoolClient, actorId: string, projectId: string, action: string, resourceId: string,
+    details?: NonNullable<ProjectAuditEntry['details']>) {
     await client.query(
-      'INSERT INTO audit_logs (actor_id, project_id, action, resource_id) VALUES ($1, $2, $3, $4)',
-      [actorId, projectId, action, resourceId],
+      'INSERT INTO audit_logs (actor_id, project_id, action, resource_id, details) VALUES ($1, $2, $3, $4, $5)',
+      [actorId, projectId, action, resourceId, details ?? null],
     );
   }
 }
