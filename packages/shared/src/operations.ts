@@ -32,6 +32,7 @@ export interface ProjectAuditEntry {
   actor: string;
   resourceId: string;
   createdAt: string;
+  details?: { version?: number; role?: AgentRole; enabled?: boolean } | null;
 }
 
 export interface ProjectOperations {

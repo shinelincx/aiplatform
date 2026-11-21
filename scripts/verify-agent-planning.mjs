@@ -100,6 +100,7 @@ try {
   const second = await project('AGENT-OTHER');
   const prefix = `/projects/${first.id}`;
   const overviewPath = `${prefix}/operations/overview`;
+  const operationsPath = `${prefix}/operations`;
   const requirementsPath = `${prefix}/requirements`;
   const registryPath = `${prefix}/agent-registry`;
   const developerPath = `${registryPath}/agents/FRONTEND_DEVELOPER`;
@@ -116,6 +117,8 @@ try {
   await request(requirementsPath, { token: viewerToken, method: 'POST', status: 403, body: requirementBody });
   await request(requirementsPath, { token, method: 'POST', status: 400, body: { ...requirementBody, referenceUrl: 'javascript:alert(1)' } });
   const requirement = await request(requirementsPath, { token, method: 'POST', status: 201, body: requirementBody });
+  assert((await request(operationsPath, { token })).audit.some(({ action, resourceId }) =>
+    action === 'requirement.approved' && resourceId === requirement.id));
   const foreignRequirement = await request(`/projects/${second.id}/requirements`, {
     token, method: 'POST', status: 201, body: { ...requirementBody, title: 'Other project requirement' },
   });
@@ -131,11 +134,42 @@ try {
     token, method: 'POST', status: 201, body: { instructions: 'Use the shared accessible UI components' },
   });
   assert.equal(skillV2.version, 2);
+  assert.equal(skillV2.status, 'pending_evaluation');
+  const evaluation = { token, method: 'PUT', body: { result: 'passed', evidence: 'Fixture accessibility checks passed' } };
+  const approval = { token, method: 'PUT', body: { decision: 'approved' } };
+  const v1Path = `${registryPath}/skills/${skill.id}/versions/1`;
+  const v2Path = `${registryPath}/skills/${skill.id}/versions/2`;
+  await request(`${v2Path}/decision`, { ...approval, status: 409 });
+  await request(`${v2Path}/evaluation`, { ...evaluation, token: viewerToken, status: 403 });
+  await request(`${v2Path}/decision`, { ...approval, token: viewerToken, status: 403 });
+  await request(`/projects/${second.id}/agent-registry/skills/${skill.id}/versions/2/decision`, { ...approval, status: 404 });
+  const failedEvaluation = await request(`${v1Path}/evaluation`, { ...evaluation,
+    body: { result: 'failed', evidence: 'Fixture accessibility check failed' } });
+  assert.equal(failedEvaluation.status, 'evaluation_failed');
+  await request(`${v1Path}/decision`, { ...approval, status: 409 });
+  assert.equal((await request(`${v1Path}/decision`, { ...approval, body: { decision: 'rejected' } })).status, 'rejected');
   const reference = { id: skill.id, version: skillV2.version };
   const config = { instructions: 'Cover empty states', model: 'fixture-codex', skills: [reference] };
   await request(`/projects/${second.id}/agent-registry/agents/FRONTEND_DEVELOPER/versions`, {
     token, method: 'POST', status: 404, body: config,
   });
+  await request(`${developerPath}/versions`, { token, method: 'POST', status: 409, body: config });
+  const [evaluated, evaluationRetry] = await Promise.all([
+    request(`${v2Path}/evaluation`, evaluation), request(`${v2Path}/evaluation`, evaluation),
+  ]);
+  assert.equal(evaluated.status, 'awaiting_approval');
+  assert.deepEqual(evaluationRetry, evaluated);
+  await request(`${developerPath}/versions`, { token, method: 'POST', status: 409, body: config });
+  const [approvedSkill, approvalRetry] = await Promise.all([
+    request(`${v2Path}/decision`, approval), request(`${v2Path}/decision`, approval),
+  ]);
+  assert.equal(approvedSkill.status, 'approved');
+  assert.deepEqual(approvalRetry, approvedSkill);
+  assert.equal(approvedSkill.evaluation.evidence, evaluation.body.evidence);
+  const approvalAudit = (await request(operationsPath, { token })).audit
+    .filter(({ action, resourceId }) => action === 'skill.version_approved' && resourceId === skill.id);
+  assert.equal(approvalAudit.length, 1);
+  assert.deepEqual(approvalAudit[0].details, { version: 2 });
   const published = await request(`${developerPath}/versions`, { token, method: 'POST', status: 201, body: config });
   assert.equal(published.version, 2);
   await request(`${registryPath}/agents/PRODUCT_MANAGER/versions`, {
@@ -241,7 +275,7 @@ try {
   assert.deepEqual(offer.development.plan, outputs.ARCHITECT);
   assert.equal(offer.development.agent.version, 2);
   assert.equal(offer.development.agent.model, config.model);
-  assert.equal(offer.development.agent.skills[0].instructions, skillV2.instructions);
+  assert.deepEqual(offer.development.agent.skills, [{ name: skill.name, version: skillV2.version, instructions: skillV2.instructions }]);
   assert.deepEqual(offer.development.requirement, approvedContent);
   assert.equal(offer.archivePatch, true);
   assert.equal(offer.development.qa, undefined);
@@ -303,14 +337,13 @@ try {
   assert(reviewHtml.includes('证据不足') && reviewHtml.includes('批准变更') && reviewHtml.includes('截至本轮'));
   assert.equal((await request(`${runPath}/review`, review)).decision, 'approved');
 
-  const operationsPath = `${prefix}/operations`;
   const operations = await request(operationsPath, { token });
   const pmUsage = operations.usage.find(({ role }) => role === 'PRODUCT_MANAGER');
   assert.deepEqual(pmUsage, { role: 'PRODUCT_MANAGER', model: 'fixture-pm-resolved',
     inputTokens: '40', cachedInputTokens: '10', outputTokens: '16', estimatedUsd: null });
   assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
   assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
-  for (const action of ['requirement.approved', 'requirement.retired', 'task.approved', 'agent.step_completed', 'task.status_changed',
+  for (const action of ['requirement.retired', 'task.approved', 'agent.step_completed', 'task.status_changed',
     'agent.qa_completed', 'execution.reviewed']) {
     assert(operations.audit.some((entry) => entry.action === action), `Missing ${action} in the project audit`);
   }

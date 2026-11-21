@@ -229,7 +229,7 @@ export async function updateAgent(form: FormData) {
   const response = await execute(`${endpoint}/agent-registry/agents/${role}${createVersion ? '/versions' : ''}`, {
     method: createVersion ? 'POST' : 'PUT', body: JSON.stringify(body),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'agent-settings')}`);
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'agent-skill-binding' : issue(response, 'agent-settings')}#agent-registry`);
   redirect(`${query}#agent-registry`);
 }
 
@@ -245,7 +245,31 @@ export async function updateSkill(form: FormData) {
     method: toggle ? 'PUT' : 'POST', body: JSON.stringify(body),
   });
   if (!response?.ok) redirect(`${query}&issue=${issue(response, 'agent-settings')}`);
-  redirect(`${query}#agent-registry`);
+  const saved = await response.json() as { id: string; version?: number; enabled: boolean };
+  const target = `${query}&skill=${saved.id}`;
+  const fragment = `#skill-${saved.id}`;
+  if (toggle) redirect(`${target}&skillResult=${saved.enabled ? 'enabled' : 'disabled'}${fragment}`);
+  redirect(`${target}&skillVersion=${saved.version}&skillResult=version-created${fragment}-v${saved.version}`);
+}
+
+export async function reviewSkillVersion(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const id = form.get('skillId');
+  const version = Number(form.get('version'));
+  const step = form.get('step');
+  if (!isWorkerId(id) || !Number.isSafeInteger(version) || version < 1 || version > 2147483647
+    || (step !== 'evaluation' && step !== 'decision')) redirect(`${query}#agent-registry`);
+  const decision = form.get('decision');
+  const body = step === 'evaluation' ? { result: form.get('result'), evidence: form.get('evidence') } : { decision };
+  const response = await execute(`${endpoint}/agent-registry/skills/${id}/versions/${version}/${step}`, {
+    method: 'PUT', body: JSON.stringify(body),
+  });
+  if (response?.status === 401 || response?.status === 403) {
+    redirect(`${query}&issue=${issue(response, 'agent-settings')}#agent-registry`);
+  }
+  const result = response?.ok ? (step === 'evaluation' ? 'evaluated' : decision === 'approved' ? 'approved' : 'rejected')
+    : response?.status === 409 ? 'review-conflict' : 'review-failed';
+  redirect(`${query}&skill=${id}&skillVersion=${version}&skillResult=${result}#skill-${id}-v${version}`);
 }
 
 export async function saveTask(form: FormData) {

@@ -36,11 +36,13 @@ const issues: Record<string, string> = {
   'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
   'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
   'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
+  'agent-skill-binding': '无法启用此配置。请确认项目未归档，所绑定的 Skill 版本可用。',
   'agent-qa': '无法重试 QA，请检查当前任务及检查报告。',
 };
 
 export default async function Home({ searchParams }: {
-  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string; requirementResult?: string }>;
+  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string;
+    requirementResult?: string; skill?: string; skillVersion?: string; skillResult?: string }>;
 }) {
   const query = await searchParams;
   const [connection, accountResult] = await Promise.allSettled([
@@ -106,7 +108,7 @@ export default async function Home({ searchParams }: {
                   manage={admin && selected.role === 'owner' && selected.status === 'active'} />
               </DataPanel>}
               {selected && <DataPanel key={`agents:${selected.id}`} id="agent-registry" headingId="agent-heading" title="Agent 与 Skill">
-                <Agents project={selected} />
+                <Agents project={selected} selectedSkill={query.skill} selectedVersion={query.skillVersion} skillResult={query.skillResult} />
               </DataPanel>}
               {selected && <DataPanel key={`workers:${selected.id}`} headingId="workers-heading" title="项目 Worker">
                 <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />
