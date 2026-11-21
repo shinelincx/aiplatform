@@ -296,6 +296,35 @@ const migrations = [
     ADD CONSTRAINT repository_independent_checks_need_worker_checks
       CHECK (jsonb_array_length(independent_checks) = 0 OR jsonb_array_length(check_plan) > 0);
   ALTER TABLE execution_runs ADD COLUMN independent_checks jsonb NOT NULL DEFAULT '[]';`,
+  `CREATE TABLE project_knowledge (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL REFERENCES projects(id),
+    kind text NOT NULL CHECK (kind IN ('project_document', 'design_rule')),
+    title text NOT NULL,
+    active_version_id uuid,
+    UNIQUE (project_id, id)
+  );
+  CREATE TABLE project_knowledge_versions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL,
+    entry_id uuid NOT NULL,
+    version integer NOT NULL CHECK (version > 0),
+    excerpt text NOT NULL,
+    source_url text NOT NULL,
+    source_revision text NOT NULL,
+    excerpt_hash char(64) NOT NULL,
+    version_note text NOT NULL DEFAULT '',
+    design_evidence jsonb,
+    decision text CHECK (decision IN ('approved','rejected')),
+    decided_by uuid REFERENCES users(id),
+    decided_at timestamptz,
+    FOREIGN KEY (project_id, entry_id) REFERENCES project_knowledge(project_id, id),
+    UNIQUE (project_id, entry_id, version),
+    UNIQUE (project_id, entry_id, id)
+  );
+  ALTER TABLE project_knowledge ADD CONSTRAINT knowledge_active_version_scope
+    FOREIGN KEY (project_id, id, active_version_id) REFERENCES project_knowledge_versions(project_id, entry_id, id);
+  CREATE INDEX project_knowledge_versions_scope ON project_knowledge_versions (project_id, id);`,
 ];
 
 @Injectable()

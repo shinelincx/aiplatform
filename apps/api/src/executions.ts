@@ -261,7 +261,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);
       const existing = (revising || prior?.development?.revision) ? prior?.development : null;
       const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
-        ...(planned?.requirement && { requirement: planned.requirement }) };
+        ...(planned?.requirement && { requirement: planned.requirement }), ...(planned?.knowledge && { knowledge: planned.knowledge }) };
       if (revising && prior?.patchHash && prior.comment) {
         handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
       }

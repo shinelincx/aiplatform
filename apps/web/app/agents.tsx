@@ -188,6 +188,15 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
           <small>登记人 · {plan.requirement.approvedBy}</small>
         </details>
       </>}
+        {Boolean(plan.knowledge?.length) && <details>
+          <summary>本次规划使用的项目知识</summary>
+          <ul>{plan.knowledge?.map(version => <li key={version.id}>
+            <a href={`/?project=${projectId}&task=${plan.taskId}&section=knowledge&knowledgeHistory=1&knowledgeEntry=${version.entryId}&knowledgeVersion=${version.id}#project-knowledge`}>
+              {version.title} · v{version.version}
+            </a>
+            <p className="description">{version.excerpt}</p>
+          </li>)}</ul>
+        </details>}
       <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
       {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
       {diagnosis && <p><strong>{diagnosis.label}</strong> · {diagnosis.hint}</p>}

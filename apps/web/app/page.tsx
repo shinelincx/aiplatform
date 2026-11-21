@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { login, logout } from './actions';
 import { Agents } from './agents';
 import { read, readSection } from './api-client';
+import { KnowledgePanel } from './knowledge';
 import { Operations } from './operations';
 import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
 import { Repositories } from './repositories';
@@ -43,7 +44,8 @@ const issues: Record<string, string> = {
 
 export default async function Home({ searchParams }: {
   searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string;
-    requirementResult?: string; skill?: string; skillVersion?: string; skillResult?: string }>;
+    requirementResult?: string; skill?: string; skillVersion?: string; skillResult?: string; knowledgeQuery?: string;
+    knowledgeKind?: string; knowledgeHistory?: string; knowledgeEntry?: string; knowledgeVersion?: string; knowledgeResult?: string }>;
 }) {
   const query = await searchParams;
   const [connection, accountResult] = await Promise.allSettled([
@@ -71,6 +73,7 @@ export default async function Home({ searchParams }: {
           <a href="#project-heading">项目</a>
           <a href="#tasks-heading">任务</a>
           <a href="#tasks-heading">审批</a>
+          <Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}` : ''}&section=knowledge#project-knowledge`}>项目知识</Link>
           <a href="#agent-heading">Agent</a>
           <a href="#workers-heading">Worker</a>
         </nav>}
@@ -104,6 +107,11 @@ export default async function Home({ searchParams }: {
                 <Operations project={selected} />
               </DataPanel>}
               {selected && <Tasks project={selected} selectedId={query.task} requirementResult={query.requirementResult} notice={query.notice} />}
+              {selected && query.section === 'knowledge' && <DataPanel key={`knowledge:${selected.id}`} id="project-knowledge"
+                headingId="knowledge-heading" title="项目知识">
+                <KnowledgePanel project={selected} taskId={query.task} search={query.knowledgeQuery} kind={query.knowledgeKind}
+                  history={query.knowledgeHistory} entryId={query.knowledgeEntry} versionId={query.knowledgeVersion} result={query.knowledgeResult} />
+              </DataPanel>}
               {selected && <DataPanel key={`repositories:${selected.id}:${query.installation ?? ''}`} headingId="repository-heading" title="GitHub 仓库">
                 <Repositories project={selected} installation={query.installation}
                   manage={admin && selected.role === 'owner' && selected.status === 'active'} />

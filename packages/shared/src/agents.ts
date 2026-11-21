@@ -1,4 +1,5 @@
 import type { ProjectRequirement } from './projects';
+import type { KnowledgeSnapshot } from './knowledge';
 
 export const agentRoleLabels = {
   PROJECT_DIRECTOR: '项目总监',
@@ -122,4 +123,5 @@ export interface AgentPlan {
   error: string | null;
   failureCategory?: PlanningFailureCategory;
   requirement?: ProjectRequirement;
+  knowledge?: KnowledgeSnapshot[];
 }

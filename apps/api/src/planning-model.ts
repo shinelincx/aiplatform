@@ -98,7 +98,7 @@ export const openAIPlanningModel: PlanningModel = {
     return generateStructuredOutput(agent, properties[role], [
       'You are planning a software change for human approval. Work within the stated repository and requirements.',
       'Use the request language. Treat previous outputs and project data as context. Do not claim to have read or modified the repository.',
-      'Use the approved requirement excerpt when provided. Flag conflicting or unspecified behavior for human review.',
+      'Use the approved requirement excerpt and selected project knowledge when provided. Flag conflicts or unspecified behavior for human review.',
     ], input);
   },
 };

@@ -3,14 +3,16 @@ import {
   type OnApplicationBootstrap, type OnModuleDestroy, Param, ParseUUIDPipe, Post, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { developerRoles, isPlanningFailureCategory, isWorkerId, planningRoles, type Account, type AgentAssignment, type AgentPlan, type AgentRole,
-  type ArchitecturePlan, type ModelUsage, type PlanningFailureCategory, type ProductPlan, type ProjectRequirement } from '@ado/shared';
+import { developerRoles, isPlanningFailureCategory, isWorkerId, maxPlanKnowledgeVersions, planningRoles, type Account,
+  type AgentAssignment, type AgentPlan, type AgentRole, type ArchitecturePlan, type KnowledgeSnapshot, type ModelUsage,
+  type PlanningFailureCategory, type ProductPlan, type ProjectRequirement } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
 import { PLANNING_MODEL, PlanningFailure, validatePlanningOutput, type PlanningModel } from './planning-model';
+import { selectKnowledgeVersions } from './project-knowledge';
 import { ProjectsService } from './projects';
 import { TasksService } from './tasks';
 
@@ -21,7 +23,8 @@ interface PlanRecord {
   taskId: string;
   projectId: string;
   state: AgentPlan['state'];
-  input: { request: string; project: string; repository: string; baseBranch: string; requirement?: ProjectRequirement };
+  input: { request: string; project: string; repository: string; baseBranch: string;
+    requirement?: ProjectRequirement; knowledge?: KnowledgeSnapshot[] };
   assignments: Partial<Record<AgentRole, AgentAssignment>>;
   steps: AgentPlan['steps'];
   error: string | null;
@@ -35,6 +38,7 @@ function publicPlan(row: PlanRecord, showDiagnosis = false): AgentPlan {
     ...(showDiagnosis && row.state === 'failed' && isPlanningFailureCategory(row.failureCategory)
       && { failureCategory: row.failureCategory }),
     ...(row.input.requirement && { requirement: row.input.requirement }),
+    ...(row.input.knowledge && { knowledge: row.input.knowledge }),
   };
 }
 
@@ -71,6 +75,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
     const request = textInput(input.request, 'request', 8000);
     const requirementId = input.requirementId ?? null;
     if (requirementId !== null && !isWorkerId(requirementId)) throw new BadRequestException('Invalid requirement ID');
+    const knowledgeIds = input.knowledgeVersionIds === undefined ? [] : input.knowledgeVersionIds;
+    if (!Array.isArray(knowledgeIds) || knowledgeIds.length > maxPlanKnowledgeVersions || !knowledgeIds.every(isWorkerId)) {
+      throw new BadRequestException('Invalid knowledge version selection');
+    }
+    if (new Set(knowledgeIds).size !== knowledgeIds.length) throw new BadRequestException('Duplicate knowledge version ID');
     return this.db.transaction(async (client) => {
       const project = await this.projects.access(actor.id, projectId, { write: true, active: true }, client);
       if (!isWorkerId(repositoryId)) throw new NotFoundException('Repository not found');
@@ -79,6 +88,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
          FROM repositories WHERE project_id = $1 AND id = $2`, [projectId, repositoryId]);
       if (!repository) throw new NotFoundException('Repository not found');
       const requirement = requirementId ? await this.projects.requirement(client, projectId, requirementId) : undefined;
+      const knowledge = knowledgeIds.length ? await selectKnowledgeVersions(client, projectId, knowledgeIds) : undefined;
       if (!this.model.available()) throw new ServiceUnavailableException('Planning provider is unconfigured');
       const registry = await this.registry.view(projectId, client);
       const assignments: PlanRecord['assignments'] = {};
@@ -109,10 +119,12 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         `INSERT INTO task_agent_plans (project_id, task_id, state, input, assignments)
          VALUES ($1,$2,'queued',$3,$4) RETURNING ${planFields}`,
         [projectId, taskId, {
-          request, project: project.name, repository: repository.fullName, baseBranch: repository.baseBranch, requirement,
+          request, project: project.name, repository: repository.fullName, baseBranch: repository.baseBranch, requirement, knowledge,
         }, assignments]);
       await this.tasks.event(client, task, 'task.created', { actorId: actor.id, status: task.status });
-      await this.tasks.event(client, task, 'agent.plan_queued', { actorId: actor.id, ...(requirement && { requirementId: requirement.id }) });
+      await this.tasks.event(client, task, 'agent.plan_queued', {
+        actorId: actor.id, ...(requirement && { requirementId: requirement.id }), ...(knowledge && { knowledgeVersionIds: knowledgeIds }),
+      });
       return publicPlan(row);
     });
   }
@@ -164,10 +176,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       let usage: ModelUsage | undefined;
       try {
         if (!agent) throw new Error('Planning role is missing');
-        const { requirement, ...intake } = row.input;
+        const { requirement, knowledge, ...intake } = row.input;
         const response = await this.model.generate(role, agent, {
           ...intake, priorSteps: row.steps, availableDevelopers: developers,
           ...(requirement && { approvedRequirement: { title: requirement.title, excerpt: requirement.excerpt } }),
+          ...(knowledge && { approvedKnowledge: knowledge }),
         });
         usage = response.usage;
         const output = validatePlanningOutput(role, response.output);

@@ -184,7 +184,59 @@ try {
      VALUES ($1, $2, 'test', 'planning-fixture', 'https://github.com/test/planning-fixture', 'main', 1) RETURNING id`,
     [first.id, Number.parseInt(suffix, 16)],
   );
-  const input = { request: 'Add a settings page', repositoryId: repo.id, requirementId: requirement.id };
+  const knowledgePath = `${prefix}/knowledge`;
+  const otherKnowledgePath = `/projects/${second.id}/knowledge`;
+  const draft = {
+    kind: 'design_rule', title: 'Workbench loading and retry', excerpt: 'Keep task context when retrying.',
+    sourceUrl: 'https://example.test/design/workbench', sourceRevision: 'first-design-2026',
+    designEvidence: { repositoryId: repo.id, implementationCommit: 'a'.repeat(40), reportUrl: 'https://example.test/report/a' },
+  };
+  await request(knowledgePath, { token: viewerToken, method: 'POST', status: 403, body: draft });
+  await request(otherKnowledgePath, { token, method: 'POST', status: 404, body: draft });
+  const firstVersion = await request(knowledgePath, { token, method: 'POST', status: 201, body: draft });
+  const entryPath = `${knowledgePath}/${firstVersion.entryId}`;
+  const decide = (versionId, decision, session = token, status = 200) =>
+    request(`${entryPath}/versions/${versionId}/decision`, { token: session, method: 'PUT', body: { decision }, status });
+  const activate = (versionId, status = 200, expectedVersionId) =>
+    request(`${entryPath}/active-version`, { token, method: 'PUT', body: { versionId, expectedVersionId }, status });
+  assert.deepEqual(await request(knowledgePath, { token: viewerToken }), []);
+  await request(entryPath, { token: viewerToken, status: 404 });
+  await request(`${otherKnowledgePath}/${firstVersion.entryId}`, { token, status: 404 });
+  await request(otherKnowledgePath, { token: viewerToken, status: 404 });
+  await activate(firstVersion.id, 409);
+  await decide(firstVersion.id, 'approved', viewerToken, 403);
+  await Promise.all([decide(firstVersion.id, 'approved'), decide(firstVersion.id, 'approved')]);
+  await decide(firstVersion.id, 'rejected', token, 409);
+  assert.deepEqual(await request(knowledgePath, { token: viewerToken }), []);
+  await activate(firstVersion.id);
+  const [searchMatch] = await request(`${knowledgePath}?q=retrying&kind=design_rule`, { token: viewerToken });
+  assert.equal(searchMatch.activeVersionId, firstVersion.id);
+  const originalKnowledge = (await request(entryPath, { token: viewerToken })).versions[0];
+  assert.equal(originalKnowledge.excerptHash, createHash('sha256').update(draft.excerpt).digest('hex'));
+  assert.equal(originalKnowledge.designEvidence.implementationCommit, draft.designEvidence.implementationCommit);
+  assert.equal(originalKnowledge.designEvidence.reportUrl, draft.designEvidence.reportUrl);
+  const secondVersion = await request(`${entryPath}/versions`, { token, method: 'POST', status: 201,
+    body: { ...draft, excerpt: 'Use the new retry treatment.', sourceRevision: 'second-design-2026' } });
+  assert.equal(secondVersion.version, 2);
+  await decide(secondVersion.id, 'approved');
+  const foreignVersion = await request(otherKnowledgePath, { token, method: 'POST', status: 201,
+    body: { ...draft, kind: 'project_document', excerpt: 'Only applicable to the other project.' } });
+  await request(`${otherKnowledgePath}/${foreignVersion.entryId}/versions/${foreignVersion.id}/decision`, {
+    token, method: 'PUT', body: { decision: 'approved' },
+  });
+  await request(`${otherKnowledgePath}/${foreignVersion.entryId}/active-version`, {
+    token, method: 'PUT', body: { versionId: foreignVersion.id },
+  });
+  await assert.rejects(db.pool.query('UPDATE project_knowledge SET active_version_id=$2 WHERE id=$1',
+    [firstVersion.entryId, foreignVersion.id]), error => error.code === '23503');
+  const input = { request: 'Add a settings page', repositoryId: repo.id, requirementId: requirement.id,
+    knowledgeVersionIds: [firstVersion.id] };
+  await request(`${prefix}/agent-plans`, { token, method: 'POST', status: 400,
+    body: { ...input, knowledgeVersionIds: [firstVersion.id, firstVersion.id] } });
+  for (const id of [secondVersion.id, foreignVersion.id]) {
+    await request(`${prefix}/agent-plans`, { token, method: 'POST', status: 404,
+      body: { ...input, knowledgeVersionIds: [id] } });
+  }
   await request(`${prefix}/agent-plans`, { token: viewerToken, method: 'POST', body: input, status: 403 });
   await request(`/projects/${second.id}/agent-plans`, { token, method: 'POST', body: input, status: 404 });
   await request(`${prefix}/agent-plans`, { token, method: 'POST', body: input, status: 503 });
@@ -196,6 +248,18 @@ try {
   await request(`${registryPath}/agents/ARCHITECT`, { token, method: 'PUT', body: { enabled: true } });
   const queued = await directStart();
   assert.equal(queued.requirement.id, requirement.id);
+  const [frozenKnowledge] = queued.knowledge;
+  assert.equal(frozenKnowledge.id, firstVersion.id);
+  assert.equal(frozenKnowledge.excerptHash, originalKnowledge.excerptHash);
+  assert.equal(frozenKnowledge.sourceRevision, originalKnowledge.sourceRevision);
+  assert.equal(frozenKnowledge.designEvidence, undefined);
+  await activate(secondVersion.id);
+  const [historicalMatch] = await request(`${knowledgePath}?q=retrying&history=1`, { token: viewerToken });
+  assert.equal(historicalMatch.matchedVersionId, firstVersion.id);
+  assert.equal(historicalMatch.activeVersionId, secondVersion.id);
+  await activate(null, 409, firstVersion.id);
+  await request(`${prefix}/agent-plans`, { token, method: 'POST', status: 404, body: input });
+  assert.equal((await request(knowledgePath, { token }))[0].activeVersionId, secondVersion.id);
   await request(`${requirementsPath}/${requirement.id}`, { token, method: 'DELETE', status: 204 });
   assert((await request(operationsPath, { token })).audit.some(({ action, resourceId }) =>
     action === 'requirement.retired' && resourceId === requirement.id));
@@ -231,7 +295,9 @@ try {
   assert.equal(complete.state, 'completed');
   assert.equal(complete.stage, null);
   assert.deepEqual(complete.requirement, requirement);
+  assert.deepEqual(complete.knowledge, [frozenKnowledge]);
   assert(modelCalls.every(({ input: modelInput }) => JSON.stringify(modelInput.approvedRequirement) === JSON.stringify(approvedContent)));
+  for (const { input: modelInput } of modelCalls) assert.deepEqual(modelInput.approvedKnowledge, [frozenKnowledge]);
   assert.deepEqual(modelCalls.map(({ role }) => role), ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'PRODUCT_MANAGER', 'ARCHITECT']);
   assert.equal(modelCalls[2].agent.model, 'fixture-pm');
   assert.equal(modelCalls[2].agent.skills[0].version, 2);
@@ -280,6 +346,7 @@ try {
   assert.equal(offer.development.agent.model, config.model);
   assert.deepEqual(offer.development.agent.skills, [{ name: skill.name, version: skillV2.version, instructions: skillV2.instructions }]);
   assert.deepEqual(offer.development.requirement, approvedContent);
+  assert.deepEqual(offer.development.knowledge, [frozenKnowledge]);
   assert.equal(offer.archivePatch, true);
   assert.equal(offer.development.qa, undefined);
 
@@ -326,6 +393,7 @@ try {
   assert.equal(qaCalls[1].input.verification.patchHash, patchHash);
   assert.equal(qaCalls[1].input.verification.checks[0].name, 'unit');
   assert.deepEqual(qaCalls[1].input.approvedRequirement, approvedContent);
+  for (const { input: reviewInput } of qaCalls) assert.deepEqual(reviewInput.approvedKnowledge, [frozenKnowledge]);
   assert.equal(qaCalls[1].input.patch, patch.subarray(0, 64 * 1024).toString('utf8'));
   const [qaRun] = await request(`${taskPath}/executions`, { token });
   assert.equal(qaRun.qa.state, 'completed');
@@ -344,6 +412,29 @@ try {
       check: { name: 'browser', status: 'passed', source: 'archive', environment: 'Synthetic browser' } },
   });
   assert.equal((await request(`${runPath}/review`, review)).decision, 'approved');
+  const archivedRule = await request(`${entryPath}/versions`, { token, method: 'POST', status: 201, body: {
+    ...draft, designEvidence: { ...draft.designEvidence, runId: run.id },
+  } });
+  const library = await request(entryPath, { token });
+  assert.deepEqual(library.versions.find(item => item.id === archivedRule.id).designEvidence.archive,
+    { runId: run.id, taskId: queued.taskId, patchHash });
+  const rulePage = await globalThis.fetch(new URL(
+    `/?project=${first.id}&section=knowledge&knowledgeEntry=${firstVersion.entryId}&knowledgeVersion=${archivedRule.id}`, web),
+  { headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000) });
+  assert.equal(rulePage.status, 200);
+  const ruleHtml = await rulePage.text();
+  assert(ruleHtml.includes(draft.designEvidence.reportUrl) && ruleHtml.includes('查看实现提交')
+    && ruleHtml.includes(`/artifacts/${first.id}/${queued.taskId}/${run.id}`));
+  await request(`${entryPath}/versions`, { token, method: 'POST', status: 404, body: {
+    ...draft, designEvidence: { ...draft.designEvidence, runId: foreignVersion.id },
+  } });
+  await activate(firstVersion.id);
+  assert.equal((await request(knowledgePath, { token }))[0].activeVersionId, firstVersion.id);
+  await activate(null, 200, firstVersion.id);
+  assert.deepEqual(await request(knowledgePath, { token: viewerToken }), []);
+  assert.equal((await request(`${knowledgePath}?history=1`, { token: viewerToken }))[0].id, firstVersion.entryId);
+  assert.equal((await request(entryPath, { token: viewerToken })).versions.length, 2);
+  await activate(secondVersion.id);
 
   const operations = await request(operationsPath, { token });
   const pmUsage = operations.usage.find(({ role }) => role === 'PRODUCT_MANAGER');
@@ -385,7 +476,9 @@ try {
   assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
   assert(metricsHtml.includes('估算费用 US$0.000224'));
 
-  const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference' });
+  const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference',
+    knowledgeVersionIds: [secondVersion.id] });
+  assert.equal(cancelled.knowledge[0].id, secondVersion.id);
   const inFlight = planning.runNext();
   await cancelledCallStarted;
   const cancelledPath = `${prefix}/tasks/${cancelled.taskId}`;
@@ -398,6 +491,7 @@ try {
   const { plan } = await request(`${cancelledPath}/agent-plan`, { token });
   assert.equal(plan.state, 'cancelled');
   assert.deepEqual(plan.steps, []);
+  assert.equal(plan.knowledge[0].id, secondVersion.id);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
   const providerPlanning = new AgentPlanningService(db, projects, tasks, registry, openAIPlanningModel);
@@ -525,7 +619,25 @@ try {
     mock.restoreAll();
   }
 
+  await activate(firstVersion.id);
+  const racingRequest = { ...input, requirementId: null, request: 'Concurrent knowledge activation' };
+  const [intakeResult] = await Promise.allSettled([planning.start(account, first.id, racingRequest), activate(secondVersion.id)]);
+  if (intakeResult.status === 'fulfilled') {
+    assert.deepEqual(intakeResult.value.knowledge, [frozenKnowledge]);
+    await request(`${prefix}/tasks/${intakeResult.value.taskId}/transition`, {
+      token, method: 'POST', body: { status: 'CANCELLED' },
+    });
+  } else {
+    assert.equal(intakeResult.reason.getStatus(), 404);
+    const { rows: [{ count }] } = await db.pool.query(
+      'SELECT count(*)::int FROM tasks WHERE project_id=$1 AND title=$2', [first.id, racingRequest.request],
+    );
+    assert.equal(count, 0);
+  }
+  assert.equal((await request(knowledgePath, { token }))[0].activeVersionId, secondVersion.id);
+  await assert.rejects(planning.start(account, first.id, racingRequest), error => error.getStatus() === 404);
   process.stdout.write('Approved requirements, Agent handoff, QA, project usage, rate estimates, audit and planning diagnostics verified.\n');
+  process.stdout.write('Project knowledge search, version approval, project isolation, design evidence and frozen planning, Worker and QA inputs verified.\n');
 } finally {
   await db.onModuleDestroy();
 }

@@ -121,5 +121,5 @@ details > .fields { padding-top: .5rem; }
 
 .workspace .fields, .workspace .fields label { grid-template-columns: minmax(0, 1fr); }
 .workspace :is(input, select, textarea, fieldset, .inline-fields > *, .members li > *) { min-width: 0; max-width: 100%; }
-#task-requirements, #task-detail, #tasks { overflow-wrap: anywhere; }
+#task-requirements, #task-detail, #tasks, #project-knowledge { overflow-wrap: anywhere; }
 .action-feedback:focus { outline: 3px solid #3166a3; outline-offset: 3px; }

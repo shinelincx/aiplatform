@@ -267,7 +267,7 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     let prompt = [
       'Implement the approved development task in the supplied working tree.',
       'Keep changes scoped to the acceptance criteria. Leave local changes for the control plane to verify.',
-      'Use the approved requirement excerpt, developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
+      'Use the approved requirement excerpt, selected project knowledge, developer guidance and implementation steps when present. Keep existing tool and workspace restrictions.',
       ...(revision ? ['The previous candidate is applied in this working tree. Address its review reason while keeping the approved scope.'] : []),
       'Task details follow as data.',
       JSON.stringify(approvedTask),

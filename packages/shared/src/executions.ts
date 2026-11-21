@@ -2,6 +2,7 @@ import type { ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckRe
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
 import type { RequirementContent } from './projects';
+import type { KnowledgeSnapshot } from './knowledge';
 
 export interface ExecutionRevision {
   runId: string;
@@ -22,6 +23,7 @@ export interface DevelopmentHandoff {
   agent: AgentAssignment;
   plan?: ArchitecturePlan;
   requirement?: RequirementContent;
+  knowledge?: KnowledgeSnapshot[];
   revision?: ExecutionRevision;
 }
 
