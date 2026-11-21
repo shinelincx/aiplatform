@@ -131,15 +131,19 @@ export async function updateRepositoryChecks(form: FormData) {
   const repositoryId = form.get('repositoryId');
   if (!isWorkerId(repositoryId)) redirect(query + '&issue=verification');
   let checks: unknown;
+  let independentChecks: unknown;
   try {
     checks = JSON.parse(String(form.get('checks') ?? ''));
+    const rawIndependent = form.get('independentChecks');
+    if (typeof rawIndependent === 'string') independentChecks = JSON.parse(rawIndependent);
   } catch {
     redirect(query + '&issue=verification');
   }
   const response = await execute(`${endpoint}/repositories/${repositoryId}/checks`, {
-    method: 'PATCH', body: JSON.stringify({ checks, autoDraftPr: form.get('autoDraftPr') === 'on' }),
+    method: 'PATCH', body: JSON.stringify({ checks, independentChecks, autoDraftPr: form.get('autoDraftPr') === 'on' }),
   });
   if (!response?.ok) redirect(`${query}&issue=${issue(response, 'verification')}`);
+  revalidatePath('/');
   redirect(`${query}&notice=checks-saved`);
 }
 
@@ -346,7 +350,7 @@ export async function reviewExecution(form: FormData) {
   const response = await execute(`${endpoint}/executions/${runId}/review`, {
     method: 'POST', body: JSON.stringify({ decision: form.get('decision'), comment: form.get('comment') }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'review')}#task-detail`);
+  if (!response?.ok) redirect(`${query}&issue=${await verificationIssue(response, 'review')}#task-detail`);
   redirect(`${query}&notice=execution-reviewed#task-detail`);
 }
 
@@ -354,11 +358,22 @@ export async function addExecutionEvidence(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   const runId = form.get('runId');
   if (!id || !isWorkerId(runId)) redirect(query);
+  const checkName = form.get('checkName');
   const response = await execute(`${endpoint}/executions/${runId}/evidence`, {
-    method: 'POST', body: JSON.stringify({ patchHash: form.get('patchHash'), summary: form.get('summary'), url: form.get('url') }),
+    method: 'POST', body: JSON.stringify({
+      patchHash: form.get('patchHash'), summary: form.get('summary'), url: form.get('url'),
+      ...(checkName && { check: { name: checkName, status: form.get('checkStatus'), environment: form.get('environment'), source: 'archive' } }),
+    }),
   });
-  if (!response?.ok) redirect(`${query}&issue=evidence#task-detail`);
-  redirect(`${query}#task-detail`);
+  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'evidence')}#task-detail`);
+  const saved = await response.json() as { recordedAt: string };
+  revalidatePath('/');
+  redirect(`${query}&notice=execution-evidence-saved&evidenceAt=${encodeURIComponent(saved.recordedAt)}#task-detail`);
+}
+
+async function verificationIssue(response: Response | null, fallback: string) {
+  const detail = response?.status === 409 ? await response.json().catch(() => null) : null;
+  return detail?.code === 'quality_gate' ? 'quality-gate' : issue(response, fallback);
 }
 
 export async function publishExecution(form: FormData) {
@@ -366,7 +381,7 @@ export async function publishExecution(form: FormData) {
   const runId = form.get('runId');
   if (!id || !isWorkerId(runId)) redirect(query);
   const response = await execute(`${endpoint}/executions/${runId}/delivery`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'github-delivery-config' : issue(response, 'delivery')}#task-detail`);
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'github-delivery-config' : await verificationIssue(response, 'delivery')}#task-detail`);
   redirect(`${query}#task-detail`);
 }
 

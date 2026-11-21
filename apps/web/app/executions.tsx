@@ -1,5 +1,6 @@
-import { workerDiskPressure, type CheckFailureReason, type CheckResult, type ExecutionEvent, type ExecutionRun,
-  type Project, type ReviewEvidence, type Task, type VerificationCheck, type WorkerReport } from '@ado/shared';
+import { executionQualityGate, independentCheckStatuses, workerDiskPressure, type CheckFailureReason, type CheckResult,
+  type ExecutionEvent, type ExecutionRun, type IndependentCheck, type Project, type ReviewEvidence, type Task,
+  type VerificationCheck, type WorkerReport } from '@ado/shared';
 import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
   reviewExecution, startExecution, stopExecution } from './actions';
 import { read, readSection } from './api-client';
@@ -65,6 +66,7 @@ const pullLabels = { open: '开放', closed: '已关闭', merged: '已合并', c
 const qaLabels = { queued: '等待 QA', running: 'QA 审查中', failed: 'QA 审查失败', completed: 'QA 已提交意见', cancelled: 'QA 已取消' };
 const qaRecommendations = { ready: '建议进入评审', changes_requested: '建议修改', insufficient_evidence: '证据不足' };
 const deliveryErrors: Record<string, string> = {
+  quality_gate: '此归档未满足必需检查，发布已停止。',
   base_changed: '测试基准已不属于发布目标分支，请重新执行。',
   patch_rejected: '补丁无法应用到原始基准。',
   branch_conflict: '执行分支已关联其他提交。',
@@ -98,6 +100,7 @@ function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
   if (!entries?.length) return null;
   return <ul className="members">{entries.map((entry, i) => <li key={`${entry.recordedAt}-${i}`}>
     <div><p className="description">{entry.summary}</p>
+      {entry.check && <p><strong>{entry.check.name} · {checkLabels[entry.check.status]}</strong> · {entry.check.environment}</p>}
       {entry.url && <p><a href={entry.url} rel="noreferrer">打开证据链接</a></p>}
       <small>{entry.author} · 补丁 <code title={entry.patchHash}>{entry.patchHash.slice(0, 12)}</code></small>
     </div>
@@ -105,8 +108,8 @@ function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
   </li>)}</ul>;
 }
 
-export async function Executions({ project, task, checks, autoDraftPr, planned }: {
-  project: Project; task: Task; checks: VerificationCheck[]; autoDraftPr: boolean; planned: boolean;
+export async function Executions({ project, task, checks, independentChecks, autoDraftPr, planned }: {
+  project: Project; task: Task; checks: VerificationCheck[]; independentChecks: IndependentCheck[]; autoDraftPr: boolean; planned: boolean;
 }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
   const [runsResult, workersResult] = await Promise.all([
@@ -116,7 +119,9 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   const workers = workersResult.data ?? [];
   const latest = runs[0];
   const scheduledChecks = latest?.status === 'queued' ? latest.checkPlan ?? checks : checks;
+  const scheduledIndependent = latest?.status === 'queued' ? latest.independentChecks ?? [] : independentChecks;
   const hasChecks = scheduledChecks.length > 0;
+  const gate = latest && executionQualityGate(latest, latest.artifact?.sha256);
   const needsMaven = scheduledChecks.some(({ argv }) => argv[0] === 'mvn');
   const events = latest ? await read<ExecutionEvent[]>(`${url}/${latest.id}/events`) : null;
   const earlierChecks = events?.filter(({ kind, payload }) =>
@@ -125,6 +130,8 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
   const waitingOnGithub = latest?.delivery?.state === 'queued' && !latest.delivery.configured;
   const publishing = (latest?.delivery?.state === 'queued' && !waitingOnGithub) || latest?.delivery?.state === 'publishing';
   const owner = project.role === 'owner';
+  const canRecordEvidence = owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW'
+    && !latest?.review && latest?.artifact;
   const checkingQa = latest?.qa?.state === 'queued' || latest?.qa?.state === 'running';
   const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
@@ -137,7 +144,7 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
     && (!hasChecks || capabilities?.verificationVersion === 1)
     && (!needsRevisionArtifact || capabilities?.revisionArtifactVersion === 1)
     && (!needsMaven || capabilities?.mavenVerification === true)
-    && (!hasChecks || (!autoDraftPr && !planned) || capabilities?.artifactVersion === 1));
+    && (!hasChecks || (!autoDraftPr && !planned && !scheduledIndependent.length) || capabilities?.artifactVersion === 1));
   const waitingForMaven = candidates && latest?.status === 'queued' && needsMaven
     && !candidates.some(({ id, status, capabilities }) =>
       status === 'online' && capabilities && !workerDiskPressure(capabilities)
@@ -205,14 +212,36 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
           {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">取消任务</button>
         </form>}
       </div>}
-      {(Boolean(latest.evidence?.length) || (owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW'
-        && !latest.review && latest.artifact)) && <div>
+      {gate && <section aria-labelledby="quality-gate-heading">
+        <h5 id="quality-gate-heading">质量门禁</h5>
+        <p role="status">{gate.ready ? '规定的检查已通过，可以审批。' : '必需检查尚未通过。'}</p>
+        {!gate.workerReady && <p>等待匹配当前归档的 Worker 检查通过。</p>}
+        <ul>{gate.checks.map(check => <li key={check.name}>{check.name} · {check.status === 'missing' ? '待登记' : checkLabels[check.status]}</li>)}</ul>
+        {canRecordEvidence && (latest.evidence ?? []).filter(entry => entry.check).length < 100
+          && <form action={addExecutionEvidence} className="fields" aria-label="登记独立复验">
+            {identity}<input type="hidden" name="runId" value={latest.id} />
+            <input type="hidden" name="patchHash" value={canRecordEvidence.sha256} />
+            <label>复验项目<select name="checkName" required defaultValue="">
+              <option value="" disabled>选择检查</option>
+              {gate.checks.map(({ name }) => <option key={name} value={name}>{name}</option>)}
+            </select></label>
+            <label>独立复验结果<select name="checkStatus" required defaultValue="">
+              <option value="" disabled>选择结果</option>
+              {independentCheckStatuses.map(status => <option key={status} value={status}>{checkLabels[status]}</option>)}
+            </select></label>
+            <label>执行环境<input name="environment" maxLength={200} required /></label>
+            <label>报告摘要<textarea name="summary" maxLength={2000} required /></label>
+            <label>报告链接（可选）<input type="url" name="url" maxLength={1000} /></label>
+            <p>结果须来自对当前归档的独立复验。</p>
+            <SubmitButton pendingLabel="正在登记…">登记独立复验</SubmitButton>
+          </form>}
+      </section>}
+      {(Boolean(latest.evidence?.length) || canRecordEvidence) && <div>
         <h5>复验证据</h5>
         <EvidenceList entries={latest.evidence} />
-        {owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW' && !latest.review
-          && latest.artifact && (latest.evidence?.length ?? 0) < 10 && <form action={addExecutionEvidence} className="fields">
+        {canRecordEvidence && (latest.evidence ?? []).filter(entry => !entry.check).length < 10 && <form action={addExecutionEvidence} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
-          <input type="hidden" name="patchHash" value={latest.artifact.sha256} />
+          <input type="hidden" name="patchHash" value={canRecordEvidence.sha256} />
           <label>复验结果<textarea name="summary" required maxLength={2000} /></label>
           <label>证据链接（可选）<input type="url" name="url" maxLength={1000} /></label>
           <button className="secondary">保存复验证据</button>
@@ -227,7 +256,7 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
           {autoDraftPr && latest.artifact && <p>批准变更后将自动发布分支并创建草稿 PR。</p>}
           <label>审核意见<textarea name="comment" maxLength={1500} placeholder="驳回时请填写原因" /></label>
           <div className="inline-fields">
-            <SubmitButton name="decision" value="approved" pendingLabel="正在提交…">批准变更</SubmitButton>
+            <SubmitButton name="decision" value="approved" pendingLabel="正在提交…" disabled={gate?.ready === false}>批准变更</SubmitButton>
             <SubmitButton name="decision" value="rejected" className="secondary" pendingLabel="正在提交…">驳回变更</SubmitButton>
           </div>
         </form>}
@@ -244,7 +273,7 @@ export async function Executions({ project, task, checks, autoDraftPr, planned }
         {latest.delivery.error && <p className="feedback">{deliveryErrors[latest.delivery.error] ?? '发布失败，请重试。'}</p>}
       </div>}
       {owner && project.status === 'active' && task.status === 'REVIEW' && latest.review?.decision === 'approved'
-        && latest.report?.passed && latest.artifact && (!latest.delivery || latest.delivery.state === 'failed')
+        && latest.report?.passed && latest.artifact && gate?.ready !== false && (!latest.delivery || latest.delivery.state === 'failed')
         && <form action={publishExecution} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
           <button>{latest.delivery ? '重试发布' : '发布分支并创建草稿 PR'}</button>

@@ -642,6 +642,9 @@ fs.writeFileSync(TMPDIR + '/probe', '');
         assert.equal(git('show', `${commit}:index.ts`), 'new\n');
         assert.match(title, /^\[(VERIFY-AND-REPAIR|AUTO-DRAFT-PR)\]/);
         assert(body.includes('Changed files') && body.includes('index.ts') && body.includes('unit') && body.includes(repairedHash));
+        if (title.startsWith('[AUTO-DRAFT-PR]')) {
+          assert(body.includes('Independent verification') && body.includes('browser') && body.includes('dependency'));
+        }
         pullCalls++;
         return { number: pullCalls, url: `https://github.com/test/execution-fixture/pull/${pullCalls}`,
           updatedAt: '2026-01-01T00:00:00Z', state: 'open' };
@@ -703,10 +706,14 @@ fs.writeFileSync(TMPDIR + '/probe', '');
     assert.equal((await request(verified.runs, { token }))[0].delivery.pullState, 'merged');
 
     await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: 'true' }, status: 400 });
-    const autoSetting = await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: true } });
+    const independentChecks = [{ name: 'browser', kind: 'browser' }, { name: 'dependency', kind: 'dependency' }];
+    await request(checksPath, { token, method: 'PATCH', body: { checks: [], independentChecks }, status: 400 });
+    const autoSetting = await request(checksPath, { token, method: 'PATCH', body: { checks: plan, independentChecks, autoDraftPr: true } });
     assert.equal(autoSetting.autoDraftPr, true);
+    assert.deepEqual(autoSetting.independentChecks, independentChecks);
     const automatic = await newTask('AUTO-DRAFT-PR');
     const autoRun = await request(automatic.runs, { token, method: 'POST', status: 201 });
+    await request(checksPath, { token, method: 'PATCH', body: { checks: plan, independentChecks: [] } });
     assert.equal((await worker.send('WORKER_CLAIM')).id, autoRun.id);
     const reportAuto = (sequence, kind, payload) =>
       worker.send('EXECUTION_EVENT', { runId: autoRun.id, sequence, kind, payload });
@@ -714,10 +721,43 @@ fs.writeFileSync(TMPDIR + '/probe', '');
     assert.equal((await reportAuto(2, 'result', candidate(1, repairedHash))).accepted, true);
     await upload(autoRun.id, approved, patchBytes, 200);
     assert.equal((await reportAuto(3, 'verification', { ...passing, attempt: 1 })).accepted, true);
-    assert.equal((await request(automatic.runs, { token }))[0].delivery, null);
+    const verifiedRun = (await request(automatic.runs, { token }))[0];
+    assert.equal(verifiedRun.delivery, null);
+    assert.deepEqual(verifiedRun.independentChecks, independentChecks);
     const autoReview = `${automatic.runs}/${autoRun.id}/review`;
-    await request(autoReview, approve);
-    await request(autoReview, approve);
+    const submitEvidence = (name, status, extra = {}, expected = 201) => request(`${automatic.runs}/${autoRun.id}/evidence`, {
+      token, method: 'POST', status: expected,
+      body: { patchHash: repairedHash, summary: 'Independent check on the archived patch',
+        check: { name, status, source: 'archive', environment: 'Synthetic fixture', ...extra } },
+    });
+    await request(autoReview, { ...approve, status: 409 });
+    await request(`${automatic.runs}/${autoRun.id}/evidence`, { token, method: 'POST', status: 201,
+      body: { patchHash: repairedHash, summary: 'Free text remains separate from required results' } });
+    await submitEvidence('browser', 'passed', { source: 'github_ci' }, 400);
+    await submitEvidence('unplanned', 'passed', {}, 409);
+    await submitEvidence('browser', 'failed');
+    await submitEvidence('dependency', 'passed');
+    await request(autoReview, { ...approve, status: 409 });
+    const blocked = (await request(automatic.runs, { token }))[0];
+    assert.equal(blocked.review, null);
+    assert.equal(blocked.delivery, null);
+    assert.equal(pullCalls, 1);
+    const blockedPage = await globalThis.fetch(new URL(`/?project=${first.id}&task=${automatic.id}`, web), { headers: { Cookie: cookie } });
+    const blockedHtml = await blockedPage.text();
+    assert(blockedHtml.includes('必需检查尚未通过') && blockedHtml.includes('登记独立复验'));
+    assert.match(blockedHtml, /<button(?=[^>]*\bdisabled)(?=[^>]*\bvalue="approved")[^>]*>/);
+    const evidenceAction = findFormByButton(blockedHtml, '登记独立复验')?.match(/name="(\$ACTION_ID_[^"]+)"/)?.[1];
+    assert(evidenceAction, 'Expected independent verification form');
+    const passingForm = new globalThis.FormData();
+    for (const [key, value] of Object.entries({
+      [evidenceAction]: '', projectId: first.id, taskId: automatic.id, runId: autoRun.id, patchHash: repairedHash,
+      checkName: 'browser', checkStatus: 'passed', environment: 'Narrow viewport fixture', summary: 'Passed on retest', url: '',
+    })) passingForm.set(key, value);
+    const saved = await postForm(blockedPage.url, passingForm, cookie);
+    assert.equal(saved.status, 303);
+    assert.match(saved.headers.get('location'), /notice=execution-evidence-saved/);
+    const decisions = await Promise.all([request(autoReview, approve), request(autoReview, approve)]);
+    assert.deepEqual(decisions[0], decisions[1]);
     let draft;
     for (let attempt = 0; attempt < 60; attempt++) {
       draft = (await request(automatic.runs, { token }))[0].delivery;
@@ -760,6 +800,8 @@ fs.writeFileSync(TMPDIR + '/probe', '');
       .filter(({ eventType, payload }) => eventType === 'task.github_pull_request' && payload.state === 'merged');
     assert.equal(mergedEvents.length, 1);
     assert.equal(await hasSyncButton(), false);
+    assert.equal((await request(automatic.runs, { token }))[0].evidence.filter(entry => entry.check).length, 3);
+    await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: false } });
     console.log('Signed GitHub events, deduplication and verified-commit merge tracking passed');
     console.log('Human approval atomically queued an automatic draft PR with verified evidence');
     console.log('On-demand PR synchronization completed the verified task without a webhook');
@@ -901,6 +943,82 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   await request(`${rejected.runs}/${revised.id}/evidence`, { token, method: 'POST', body: { ...reviewEvidence, patchHash: revisedHash }, status: 201 });
   assert.equal((await request(`${rejected.runs}/${revised.id}/review`, approve)).decision, 'approved');
   assert.equal((await request(rejected.runs, { token })).find(({ id }) => id === rejectedRun.id).review.decision, 'rejected');
+
+  await request(checksPath, { token, method: 'PATCH',
+    body: { checks: plan, autoDraftPr: false, independentChecks: [{ name: 'browser', kind: 'browser' }] } });
+  const sameHash = await newTask('QUALITY-SAME-HASH');
+  const oldSameHash = await request(sameHash.runs, { token, method: 'POST', status: 201 });
+  const archived = async (run, previous) => {
+    assert.equal((await worker.send('WORKER_CLAIM')).id, run.id);
+    let sequence = 0;
+    const send = (kind, payload) => worker.send('EXECUTION_EVENT', { runId: run.id, sequence: ++sequence, kind, payload });
+    if (previous) assert.equal((await send('progress', {
+      stage: 'revision', previousRunId: previous.id, patchHash: repairedHash, outcome: 'applied',
+    })).accepted, true);
+    assert.equal((await send('thread', { threadId: 'same-hash-fixture' })).accepted, true);
+    assert.equal((await send('result', candidate(1, repairedHash))).accepted, true);
+    await upload(run.id, approved, patchBytes, 200);
+    assert.equal((await send('verification', { ...passing, attempt: 1 })).accepted, true);
+  };
+  await archived(oldSameHash);
+  const structured = { patchHash: repairedHash, summary: 'Browser check on frozen archive',
+    check: { name: 'browser', status: 'passed', source: 'archive', environment: 'Synthetic browser' } };
+  const recordEvidence = (run, status = 201, body = structured) =>
+    request(`${sameHash.runs}/${run.id}/evidence`, { token, method: 'POST', status, body });
+  await recordEvidence(oldSameHash);
+  await request(`${sameHash.runs}/${oldSameHash.id}/review`, {
+    token, method: 'POST', body: { decision: 'rejected', comment: 'Request another verification run' },
+  });
+  const newSameHash = await request(sameHash.runs, { token, method: 'POST', status: 201, body: { revisionOf: oldSameHash.id } });
+  await archived(newSameHash, oldSameHash);
+  await recordEvidence(oldSameHash, 404);
+  await recordEvidence(newSameHash, 409, { ...structured, patchHash: initialHash });
+  await request(`/projects/${second.id}/tasks/${sameHash.id}/executions/${newSameHash.id}/evidence`, {
+    token, method: 'POST', status: 404, body: structured,
+  });
+  const sameHashReview = `${sameHash.runs}/${newSameHash.id}/review`;
+  await request(sameHashReview, { ...approve, status: 409 });
+  const [priorFree, priorArchived] = await request(sameHash.runs, { token });
+  assert.equal(priorFree.artifact.sha256, priorArchived.artifact.sha256);
+  assert.deepEqual(priorFree.evidence, []);
+  assert.equal(priorArchived.evidence.length, 1);
+  if (publisher) {
+    const actor = await request('/auth/session', { token });
+    // Simulate a review left by an older server during a rollback.
+    await db.query(
+      "INSERT INTO execution_reviews (run_id, reviewer_id, reviewer_name, decision, comment) VALUES ($1,$2,$3,'approved','Fixture')",
+      [newSameHash.id, actor.id, actor.name],
+    );
+    await assert.rejects(publisher.enqueue(actor, first.id, sameHash.id, newSameHash.id), /Required verification is incomplete/);
+    await db.query(
+      `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch, state)
+       VALUES ($1,$2,$3,$4,$5,'main',$6,'queued')`,
+      [newSameHash.id, repository.id, actor.id, repairedHash, baseline, `ado/${newSameHash.id}`],
+    );
+    let delivery;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      delivery = (await request(sameHash.runs, { token }))[0].delivery;
+      if (delivery.state === 'failed') break;
+      await delay(250);
+    }
+    assert.equal(delivery?.state, 'failed');
+    assert.equal(delivery?.error, 'quality_gate');
+    assert.equal(delivery?.pullNumber, null);
+    assert.throws(() => git('rev-parse', '--verify', `ado/${newSameHash.id}`));
+    await db.query('DELETE FROM execution_deliveries WHERE run_id = $1', [newSameHash.id]);
+    await db.query('DELETE FROM execution_reviews WHERE run_id = $1', [newSameHash.id]);
+  }
+  const [recorded, racingApproval] = await Promise.all([recordEvidence(newSameHash), globalThis.fetch(new URL(sameHashReview, api), {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(approve.body), signal: globalThis.AbortSignal.timeout(10000),
+  })]);
+  assert.equal(recorded.check.status, 'passed');
+  assert([200, 409].includes(racingApproval.status));
+  if (racingApproval.status === 409) assert.equal((await racingApproval.json()).code, 'quality_gate');
+  else assert.equal((await racingApproval.json()).decision, 'approved');
+  await request(sameHashReview, approve);
+  assert.equal((await request(sameHash.runs, { token }))[0].delivery, null);
+  console.log('Independent evidence is frozen per run, gates approval and delivery, and supports audited retests');
   console.log('Rejected candidate revisions, patch-specific evidence and fresh approval passed');
   console.log('Revision artifact access, legacy Worker rejection, integrity, base, and audit checks passed');
   console.log('Workbench dispatch, Worker isolation, event replay, cancellation, timeout and retry passed');

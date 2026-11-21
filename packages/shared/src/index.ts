@@ -11,10 +11,13 @@ export { decodeWorkerMessage, isWorkerId, workerCredentialLifetimeHours, workerD
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,
   WorkerRecovery, WorkerReport, WorkerResources } from './workers';
 export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRevision, ExecutionRun, ExecutionState, ReviewEvidence } from './executions';
+export { executionQualityGate } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
 export { canRepair, checkFailureStatuses, maxVerificationAttempts, parseCheckPlan } from './verification';
-export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, QaAssessment, VerificationCheck, VerificationReport } from './verification';
+export { independentCheckKinds, independentCheckStatuses, parseIndependentChecks } from './verification';
+export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckResult,
+  QaAssessment, VerificationCheck, VerificationReport } from './verification';
 export type { ModelRate, ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
 
 export interface ApiHealth {

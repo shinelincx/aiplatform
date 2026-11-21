@@ -26,6 +26,7 @@ const issues: Record<string, string> = {
   review: '审核提交失败。选择驳回时请填写原因。',
   revision: '修订派发失败。请核对最新驳回记录，并确认有支持读取前序归档的 Worker。',
   evidence: '证据保存失败。请核对当前补丁、证据数量和链接格式。',
+  'quality-gate': '必需检查尚未通过。请打开当前归档的质量门禁查看缺项。',
   delivery: '发布请求失败。请确认当前补丁已归档并通过检查和审核。',
   'delivery-refresh': '无法同步 GitHub PR 状态。请检查 GitHub App 和目标仓库访问权限。',
   'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',

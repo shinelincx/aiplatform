@@ -1,4 +1,4 @@
-import type { VerificationCheck } from './verification';
+import type { IndependentCheck, VerificationCheck } from './verification';
 
 export interface Account {
   id: string;
@@ -62,5 +62,6 @@ export interface RepositoryBinding extends Omit<GitHubRepository, 'id'> {
   githubId: string;
   installationId: string;
   checks: VerificationCheck[];
+  independentChecks?: IndependentCheck[];
   autoDraftPr: boolean;
 }

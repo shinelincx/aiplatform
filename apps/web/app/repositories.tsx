@@ -25,7 +25,7 @@ export async function Repositories({ project, manage, installation }: {
   return (
     <>
       {issue ? <SectionReadError label="已绑定仓库" issue={issue} /> : bindings.length ? <ul className="members">
-        {bindings.map(({ id, url, fullName, defaultBranch, checks, autoDraftPr }) => (
+        {bindings.map(({ id, url, fullName, defaultBranch, checks, autoDraftPr, independentChecks = [] }) => (
           <li key={id}>
             <div>
               <a href={url}>{fullName}</a>
@@ -38,6 +38,9 @@ export async function Repositories({ project, manage, installation }: {
                   <label>检查计划 JSON<textarea name="checks" rows={8} cols={53} maxLength={24000}
                     defaultValue={JSON.stringify(checks, null, 2)} required /></label>
                   <p className="muted">每项包含 name、kind 和 argv。kind 支持 unit、api 和 static。可填写相对目录 directory 和超时秒数 timeoutSeconds。</p>
+                  <label>必需独立复验 JSON<textarea name="independentChecks" rows={4} cols={53} maxLength={5000}
+                    defaultValue={JSON.stringify(independentChecks, null, 2)} required /></label>
+                  <p className="muted">每项填写 name 和 kind。kind 支持 static、unit、integration、browser、security 和 dependency。新派发沿用保存时的清单。</p>
                   <label className="checkbox">
                     <input type="checkbox" name="autoDraftPr" defaultChecked={autoDraftPr} />
                     人工审核通过后自动发布分支并创建草稿 PR

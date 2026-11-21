@@ -14,6 +14,37 @@ export interface CheckResult {
   reason?: CheckFailureReason;
 }
 
+export const independentCheckKinds = ['static', 'unit', 'integration', 'browser', 'security', 'dependency'] as const;
+export const independentCheckStatuses = ['passed', 'failed', 'timed_out', 'unavailable'] as const;
+
+export interface IndependentCheck {
+  name: string;
+  kind: typeof independentCheckKinds[number];
+}
+
+export interface IndependentCheckResult {
+  name: string;
+  status: typeof independentCheckStatuses[number];
+  environment: string;
+  source: 'archive';
+}
+
+export function parseIndependentChecks(value: unknown): IndependentCheck[] {
+  if (!Array.isArray(value) || value.length > 8) throw new Error('Expected at most eight independent checks');
+  const checks = value.map((entry): IndependentCheck => {
+    const name = entry?.name;
+    const kind = independentCheckKinds.find(item => item === entry?.kind);
+    if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/.test(name) || !kind) {
+      throw new Error('Invalid independent check name or kind');
+    }
+    return { name, kind };
+  });
+  if (new Set(checks.map(({ name }) => name)).size !== checks.length) {
+    throw new Error('Independent check names must be unique');
+  }
+  return checks;
+}
+
 export const checkFailureStatuses = {
   directory_unavailable: 'unavailable',
   executable_unavailable: 'unavailable',

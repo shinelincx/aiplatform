@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  canRepair, canTransitionTask, checkFailureStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
+  canRepair, canTransitionTask, checkFailureStatuses, independentCheckStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
   type CheckFailureReason, type CheckResult,
   type AgentAssignment, type DevelopmentHandoff, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type ReviewEvidence,
   type Task, type TaskStatus, type VerificationCheck, type VerificationReport, type WorkerRecovery,
@@ -16,13 +16,15 @@ import { DeliveriesService } from './deliveries';
 import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
+import { requireQualityGate } from './quality-gate';
 import { TasksService } from './tasks';
 import { workerCanVerify, workerDiskReady, workerMatchesAssignment, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
   finished_at AS "finishedAt", verification_report AS report, requested_worker_id AS "requestedWorkerId",
-  developer_assignment->'revision' AS revision, review_evidence AS evidence`;
+  developer_assignment->'revision' AS revision, review_evidence AS evidence,
+  check_plan AS "checkPlan", independent_checks AS "independentChecks"`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
@@ -186,7 +188,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async list(actor: Account, projectId: string, taskId: string) {
     await this.tasks.get(actor, projectId, taskId);
     const { rows } = await this.db.pool.query<ExecutionRun>(
-      `SELECT ${runColumns}, r.check_plan AS "checkPlan", (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
+      `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
          'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
            WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
@@ -264,8 +266,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
       }
       const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, source_branch, developer_assignment, qa_assignment)
-         SELECT $1, $2, id, check_plan, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
+        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, independent_checks, source_branch,
+           developer_assignment, qa_assignment)
+         SELECT $1, $2, id, check_plan, independent_checks, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
          RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
         [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
       );
@@ -327,6 +330,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [projectId, taskId],
       );
       if (!run || run.id !== runId) throw new NotFoundException('Current execution run not found');
+      if (decision === 'approved' && run.independentChecks?.length) {
+        const { rows: [archive] } = await client.query<{ sha256: string }>(
+          'SELECT sha256 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2', [runId, run.report?.patchHash],
+        );
+        requireQualityGate(run, archive?.sha256);
+      }
       const { rows: [existing] } = await client.query<ExecutionReview>(
         `SELECT decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"
          FROM execution_reviews WHERE run_id = $1`, [runId],
@@ -357,6 +366,16 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const patchHash = textInput(input.patchHash, 'patch hash', 64);
     if (!/^[0-9a-f]{64}$/.test(patchHash)) throw new BadRequestException('Invalid patch hash');
     const summary = textInput(input.summary, 'review evidence', 2000);
+    let check: ReviewEvidence['check'];
+    if (input.check !== undefined) {
+      const entry = objectInput(input.check);
+      const status = independentCheckStatuses.find(item => item === entry.status);
+      if (!status || entry.source !== 'archive') {
+        throw new BadRequestException('Independent results must describe a check performed on this archive');
+      }
+      check = { name: textInput(entry.name, 'independent check name', 48), status,
+        environment: textInput(entry.environment, 'independent check environment', 200), source: 'archive' };
+    }
     const rawUrl = textInput(input.url ?? '', 'evidence URL', 1000, true);
     const url = rawUrl ? URL.parse(rawUrl) : null;
     if (rawUrl && (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password)) {
@@ -377,15 +396,23 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const archived = await client.query(
         `SELECT 1 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2
          AND NOT EXISTS (SELECT 1 FROM execution_reviews WHERE run_id = $1)`, [runId, patchHash]);
-      if (!archived.rowCount || (run.evidence?.length ?? 0) >= 10) {
-        throw new ConflictException('Evidence requires an archived patch and at most ten entries');
+      if (!archived.rowCount) throw new ConflictException('Evidence requires an unreviewed archived patch');
+      if (check && !run.independentChecks?.some(item => item.name === check.name)) {
+        throw new ConflictException('Independent check is not required by this execution');
+      }
+      const entries = (run.evidence ?? []).filter(item => Boolean(item.check) === Boolean(check));
+      if (entries.length >= (check ? 100 : 10)) {
+        throw new ConflictException('Evidence entry limit reached');
       }
       const evidence: ReviewEvidence = {
         patchHash, summary, ...(url && { url: url.href }), author: actor.name, recordedAt: new Date().toISOString(),
+        ...(check && { check }),
       };
       await client.query('UPDATE execution_runs SET review_evidence = review_evidence || $2::jsonb WHERE id = $1',
         [runId, JSON.stringify([evidence])]);
-      await this.tasks.event(client, task, 'task.review_evidence_added', { runId, patchHash, actorId: actor.id });
+      await this.tasks.event(client, task, 'task.review_evidence_added', {
+        runId, patchHash, actorId: actor.id, ...(check && { check: check.name, status: check.status }),
+      });
       await this.projects.audit(client, actor.id, projectId, 'execution.evidence_added', runId);
       return evidence;
     });
