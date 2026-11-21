@@ -179,7 +179,7 @@ try {
     token, method: 'POST', status: 201, body: { model: 'fixture-qa', instructions: 'Verify empty states' },
   });
 
-  const { rows: [repo] } = await db.pool.query(
+  const { rows: [repo] } = await db.projectQuery(first.id,
     `INSERT INTO repositories (project_id, github_repository_id, owner, repo_name, repository_url, default_branch, installation_id)
      VALUES ($1, $2, 'test', 'planning-fixture', 'https://github.com/test/planning-fixture', 'main', 1) RETURNING id`,
     [first.id, Number.parseInt(suffix, 16)],
@@ -227,7 +227,7 @@ try {
   await request(`${otherKnowledgePath}/${foreignVersion.entryId}/active-version`, {
     token, method: 'PUT', body: { versionId: foreignVersion.id },
   });
-  await assert.rejects(db.pool.query('UPDATE project_knowledge SET active_version_id=$2 WHERE id=$1',
+  await assert.rejects(db.projectQuery(first.id, 'UPDATE project_knowledge SET active_version_id=$2 WHERE id=$1',
     [firstVersion.entryId, foreignVersion.id]), error => error.code === '23503');
   const input = { request: 'Add a settings page', repositoryId: repo.id, requirementId: requirement.id,
     knowledgeVersionIds: [firstVersion.id] };
@@ -284,7 +284,7 @@ try {
   await request(`${planPath}/retry`, { token: viewerToken, method: 'POST', status: 403 });
   assert.equal((await planning.retry(account, first.id, queued.taskId)).state, 'queued');
   // A replacement processor can recover an expired claim after a restart.
-  await db.pool.query(
+  await db.projectQuery(first.id,
     `UPDATE task_agent_plans SET state = 'running', lease_id = gen_random_uuid(),
       lease_expires_at = now() - interval '1 second' WHERE task_id = $1`, [queued.taskId],
   );
@@ -544,7 +544,7 @@ try {
       };
       const diagnostic = await providerPlanning.start(account, first.id, { repositoryId: repo.id, request: providerRequest });
       // Markers in the invocation context must remain in the preexisting private fields.
-      await db.pool.query(
+      await db.projectQuery(first.id,
         `UPDATE task_agent_plans
          SET input = jsonb_set(input, '{request}', to_jsonb($2::text)),
              assignments = jsonb_set(assignments, '{PROJECT_DIRECTOR,instructions}', to_jsonb($3::text))
@@ -561,7 +561,7 @@ try {
         error: 'planning_step_failed', failureCategory: category,
       });
       assert.equal((await request(detailPath, { token })).status, 'PLANNING');
-      const { rows: [saved] } = await db.pool.query(
+      const { rows: [saved] } = await db.projectQuery(first.id,
         'SELECT error, failure_category, steps, lease_id, lease_expires_at FROM task_agent_plans WHERE task_id = $1',
         [diagnostic.taskId],
       );
@@ -585,7 +585,7 @@ try {
         assert(!(await showTask(diagnostic.taskId, viewerToken)).includes(hint));
         await request(`/projects/${second.id}/tasks/${diagnostic.taskId}/agent-plan`, { token: viewerToken, status: 404 });
         for (const legacy of [null, 'fixture-unrecognized-category']) {
-          await db.pool.query('UPDATE task_agent_plans SET failure_category = $2 WHERE task_id = $1',
+          await db.projectQuery(first.id, 'UPDATE task_agent_plans SET failure_category = $2 WHERE task_id = $1',
             [diagnostic.taskId, legacy]);
           assert.equal((await request(diagnosisPath, { token })).plan.failureCategory, undefined);
           const legacyPage = await showTask(diagnostic.taskId);
@@ -599,7 +599,7 @@ try {
         assert.equal(retry.state, 'queued');
         assert.equal(retry.error, null);
         assert.equal(retry.failureCategory, undefined);
-        const { rows: [retried] } = await db.pool.query('SELECT failure_category FROM task_agent_plans WHERE task_id = $1',
+        const { rows: [retried] } = await db.projectQuery(first.id, 'SELECT failure_category FROM task_agent_plans WHERE task_id = $1',
           [diagnostic.taskId]);
         assert.equal(retried.failure_category, null);
         assert.equal(await providerPlanning.runNext(), true);
@@ -629,7 +629,7 @@ try {
     });
   } else {
     assert.equal(intakeResult.reason.getStatus(), 404);
-    const { rows: [{ count }] } = await db.pool.query(
+    const { rows: [{ count }] } = await db.projectQuery(first.id,
       'SELECT count(*)::int FROM tasks WHERE project_id=$1 AND title=$2', [first.id, racingRequest.request],
     );
     assert.equal(count, 0);

@@ -52,7 +52,7 @@ export class ProjectKnowledgeService {
   async list(actor: Account, projectId: string, query: string | undefined, kind: string | undefined, history: boolean) {
     const project = await this.projects.access(actor.id, projectId);
     const text = textInput(query ?? '', 'knowledge search', 160, true);
-    const { rows } = await this.db.pool.query<KnowledgeEntry>(
+    const { rows } = await this.db.projectQuery<KnowledgeEntry>(projectId,
       `SELECT e.id, e.kind, e.title, e.active_version_id AS "activeVersionId", v.version, v.id AS "matchedVersionId"
        FROM project_knowledge e
        JOIN LATERAL (
@@ -71,11 +71,11 @@ export class ProjectKnowledgeService {
 
   async detail(actor: Account, projectId: string, entryId: string) {
     const project = await this.projects.access(actor.id, projectId);
-    const { rows: [entry] } = await this.db.pool.query<Omit<KnowledgeEntry, 'version' | 'matchedVersionId'>>(
+    const { rows: [entry] } = await this.db.projectQuery<Omit<KnowledgeEntry, 'version' | 'matchedVersionId'>>(projectId,
       `SELECT ${entryColumns} FROM project_knowledge WHERE project_id = $1 AND id = $2`, [projectId, entryId],
     );
     if (!entry) throw new NotFoundException('Knowledge entry not found');
-    const { rows: versions } = await this.db.pool.query<KnowledgeVersion>(
+    const { rows: versions } = await this.db.projectQuery<KnowledgeVersion>(projectId,
       `SELECT ${versionColumns}
        FROM project_knowledge_versions v JOIN project_knowledge e ON e.project_id = v.project_id AND e.id = v.entry_id
        LEFT JOIN users u ON u.id = v.decided_by

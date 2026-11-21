@@ -207,7 +207,7 @@ export class RepositoriesController {
   @Get()
   async list(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string) {
     await this.projects.access(actor.id, id);
-    const { rows } = await this.db.pool.query<RepositoryBinding>(
+    const { rows } = await this.db.projectQuery<RepositoryBinding>(id,
       `SELECT ${columns} FROM repositories WHERE project_id = $1 ORDER BY owner, repo_name`, [id],
     );
     return rows;

@@ -10,10 +10,17 @@ services:
   storage:
     restart: unless-stopped
 
+  migrate:
+    image: ado-platform-staging:local
+    environment:
+      ADO_DATABASE_PASSWORD: ${ADO_DATABASE_PASSWORD:?Set a separate staging API database password}
+
   api:
     image: ado-platform-staging:local
     command: [./node_modules/.bin/tsx, --tsconfig, apps/api/tsconfig.json, apps/api/src/main.ts]
     restart: unless-stopped
+    environment:
+      PGPASSWORD: ${ADO_DATABASE_PASSWORD:?Set a separate staging API database password}
 
   web:
     image: ado-platform-staging:local

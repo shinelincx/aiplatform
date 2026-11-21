@@ -18,7 +18,7 @@ import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { requireQualityGate } from './quality-gate';
 import { TasksService } from './tasks';
-import { workerCanVerify, workerDiskReady, workerMatchesAssignment, type WorkerIdentity } from './workers';
+import { workerCanVerify, workerDiskReady, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
   last_sequence AS "lastSequence", cancel_requested AS "cancelRequested", created_at AS "createdAt",
@@ -187,7 +187,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   async list(actor: Account, projectId: string, taskId: string) {
     await this.tasks.get(actor, projectId, taskId);
-    const { rows } = await this.db.pool.query<ExecutionRun>(
+    const { rows } = await this.db.projectQuery<ExecutionRun>(projectId,
       `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
          'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
@@ -207,7 +207,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   async events(actor: Account, projectId: string, taskId: string, runId: string) {
     await this.tasks.get(actor, projectId, taskId);
-    const { rows } = await this.db.pool.query<ExecutionEvent>(
+    const { rows } = await this.db.projectQuery<ExecutionEvent>(projectId,
       `SELECT e.sequence, e.kind, e.payload, e.created_at AS "createdAt"
        FROM execution_events e JOIN execution_runs r ON r.id = e.run_id
        WHERE r.project_id = $1 AND r.task_id = $2 AND r.id = $3 ORDER BY e.sequence`, [projectId, taskId, runId],
@@ -467,26 +467,19 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const claimed = await this.db.transaction(async (client) => {
       const capabilities = await this.lockWorker(client, worker);
       if (!capabilities?.canExecute || !capabilities.diskReady) return null;
-      const assigned = await client.query(
-        `SELECT id FROM execution_runs WHERE worker_id = $1 AND status = 'running'`, [worker.workerId],
-      );
-      if (assigned.rowCount) return null;
+      const { rows: [candidate] } = await client.query<{ id: string; project_id: string }>(
+        'SELECT * FROM ado_private.worker_candidate($1, $2, $3)', [worker.workerId, worker.hash, worker.connectionId]);
+      if (!candidate) return null;
+      await this.db.bindProject(client, candidate.project_id);
       const { rows: [offer] } = await client.query<ExecutionOffer & { installationId: string; githubId: string }>(
         `SELECT r.id, r.task_id AS "taskId", r.project_id AS "projectId", t.title, t.description,
            t.acceptance_criteria AS "acceptanceCriteria", g.owner || '/' || g.repo_name AS repository,
            COALESCE(r.source_branch, g.default_branch) AS "defaultBranch", g.installation_id::text AS "installationId",
            g.github_repository_id::text AS "githubId", r.check_plan AS checks, r.developer_assignment AS development
          FROM execution_runs r
-         JOIN worker_projects wp ON wp.project_id = r.project_id AND wp.worker_id = $1
-         JOIN workers w ON w.id = wp.worker_id
-         JOIN projects p ON p.id = r.project_id AND p.status = 'active'
          JOIN tasks t ON t.id = r.task_id AND t.status = 'QUEUED'
          JOIN repositories g ON g.id = r.repository_id
-         WHERE r.status = 'queued' AND NOT r.cancel_requested
-           AND ${workerMatchesAssignment}
-           AND ${workerCanVerify}
-         ORDER BY t.priority, r.created_at, r.id LIMIT 1 FOR UPDATE OF p, r SKIP LOCKED`,
-        [worker.workerId],
+         WHERE r.id = $1`, [candidate.id],
       );
       if (!offer) return null;
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
@@ -512,7 +505,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   async renew(worker: WorkerLease, runId: string) {
     return this.db.transaction(async (client) => {
-      if (!await this.lockWorker(client, worker)) return false;
+      if (!await this.lockWorker(client, worker) || !await this.db.bindWorkerRun(client, worker, runId)) return false;
       const { rows: [run] } = await client.query<{ cancelRequested: boolean }>(
         `UPDATE execution_runs r SET lease_expires_at = now() + ($3 * interval '1 millisecond')
          FROM projects p, worker_projects wp WHERE r.id = $1 AND r.worker_id = $2 AND r.status = 'running'
@@ -527,7 +520,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async recover(worker: WorkerLease, runId: string): Promise<WorkerRecovery> {
     return this.db.transaction(async (client) => {
       const unavailable = { state: 'unavailable', lastSequence: 0 } as const;
-      if (!await this.lockWorker(client, worker)) return unavailable;
+      if (!await this.lockWorker(client, worker) || !await this.db.bindWorkerRun(client, worker, runId)) return unavailable;
       const { rows: [run] } = await client.query<{
         status: ExecutionRun['status']; lastSequence: number; cancelled: boolean; live: boolean | null;
       }>(
@@ -549,7 +542,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async record(worker: WorkerLease, body: unknown) {
     const event = executionEvent(body);
     return this.db.transaction(async (client) => {
-      if (!await this.lockWorker(client, worker)) return { stop: true, accepted: false };
+      if (!await this.lockWorker(client, worker) || !await this.db.bindWorkerRun(client, worker, event.runId)) {
+        return { stop: true, accepted: false };
+      }
       const { rows: [run] } = await client.query<ClaimedRun & {
         current: boolean; checks: VerificationCheck[]; candidateHash: string | null; archivePatch: boolean; requiresQa: boolean;
       }>(
@@ -633,13 +628,18 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async expire() {
-    await this.db.transaction(async (client) => {
-      const { rows } = await client.query<ClaimedRun>(
-        `SELECT ${runColumns}, project_id AS "projectId", task_id AS "taskId" FROM execution_runs
-         WHERE status = 'running' AND lease_expires_at <= now() LIMIT 25 FOR UPDATE SKIP LOCKED`,
-      );
-      for (const run of rows) await this.finish(client, run, run.cancelRequested ? 'cancelled' : 'timed_out');
-    });
+    for (let index = 0; index < 25; index++) {
+      const expired = await this.db.transaction(async (client) => {
+        const runId = await this.db.nextProjectJob(client, 'expired_execution');
+        if (!runId) return false;
+        const { rows: [run] } = await client.query<ClaimedRun>(
+          `SELECT ${runColumns}, project_id AS "projectId", task_id AS "taskId" FROM execution_runs WHERE id = $1`, [runId]);
+        if (!run) return false;
+        await this.finish(client, run, run.cancelRequested ? 'cancelled' : 'timed_out');
+        return true;
+      });
+      if (!expired) break;
+    }
   }
 
   private async finish(client: PoolClient, run: ClaimedRun,

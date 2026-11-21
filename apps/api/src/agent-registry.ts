@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { isUsableSkillVersion, isWorkerId, type Account, type AgentAssignment, type AgentRegistry,
   type AgentRole, type AgentVersion, type ProjectSkill, type SkillDecision, type SkillEvaluation, type SkillVersion } from '@ado/shared';
-import type { Pool, PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
@@ -56,7 +56,8 @@ export class AgentRegistryService {
     @Inject(ProjectsService) private readonly projects: ProjectsService,
   ) {}
 
-  async view(projectId: string, client: Pool | PoolClient = this.db.pool): Promise<AgentRegistry> {
+  async view(projectId: string, client?: PoolClient): Promise<AgentRegistry> {
+    if (!client) return this.db.projectTransaction(projectId, (scoped) => this.view(projectId, scoped));
     const { rows: [registry] } = await client.query<{
       settings: { role: AgentRole; enabled: boolean; activeVersion: number }[];
       versions: (AgentVersion & { role: AgentRole })[];

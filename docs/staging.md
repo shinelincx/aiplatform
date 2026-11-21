@@ -17,6 +17,8 @@ S3_PORT=49000
 ADO_STAGING_PORT=3443
 ADO_STAGING_BIND=127.0.0.1
 ADO_STAGING_TLS_DIR=/absolute/path/to/staging-tls
+POSTGRES_PASSWORD=<迁移账号密码>
+ADO_DATABASE_PASSWORD=<API 账号的独立密码，至少 12 字符>
 ```
 
 ```bash
@@ -24,6 +26,10 @@ export COMPOSE_FILE=compose.yaml:compose.staging.yaml
 export COMPOSE_ENV_FILES=.env.staging
 docker compose -p ado-staging up -d --build --wait
 ```
+
+Compose 先运行一次性 `migrate` 服务，用现有 `POSTGRES_PASSWORD` 执行数据库迁移，并配置独立的 `ado_api` 账号。API 使用 `ADO_DATABASE_PASSWORD`。如果 `migrate` 失败，先查看 `docker compose -p ado-staging logs migrate`。API 启动时验证数据库角色和 schema 版本。
+
+从 V19 升级到 V20 时，先排空队列，用旧版本的备份工具生成 PostgreSQL 和对象存储快照，再用新版 Compose 停写切换。迁移后核查 API 健康、项目用量和归档读取，并确认受限账号只在授权项目范围内读写。回退时停止写入，用 V19 程序和配置恢复升级前快照到独立实例，核对数据和归档后再切换入口。回退快照之后产生的数据需按回退决策单独处理。
 
 工作台和 `/health` 走 TLS 入口。发布到远端时，将 `ADO_STAGING_BIND` 设置为预发布主机的可达地址，并配置相应防火墙入口。基础 API、数据库、Redis 和对象存储端口绑定在主机回环地址。网关转发 Worker WebSocket、归档上传与签名 Webhook。 [Nginx WebSocket 转发](https://nginx.org/en/docs/http/websocket.html)
 

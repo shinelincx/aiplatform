@@ -2,7 +2,8 @@ import {
   BadRequestException, Body, ConflictException, Controller, Delete, ForbiddenException, Get, HttpCode, Inject,
   Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Put, UseGuards,
 } from '@nestjs/common';
-import type { Pool, PoolClient } from 'pg';
+import { randomUUID } from 'node:crypto';
+import type { PoolClient } from 'pg';
 import type { Account, Project, ProjectAuditEntry, ProjectMember, ProjectRequirement } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
@@ -27,22 +28,26 @@ export class ProjectsService {
 
   async list(userId: string) {
     const { rows } = await this.db.pool.query<Project>(
-      `SELECT p.id, p.code, p.name, p.description, p.status, m.role
-       FROM projects p JOIN project_members m ON m.project_id = p.id
-       WHERE m.user_id = $1 ORDER BY p.status, p.code`, [userId],
+      'SELECT * FROM ado_private.member_projects($1, NULL)', [userId],
     );
     return rows;
   }
 
   async access(userId: string, projectId: string, options: { owner?: boolean; write?: boolean; active?: boolean } = {},
-    client: Pool | PoolClient = this.db.pool) {
-    const lock = client === this.db.pool ? '' : 'FOR UPDATE OF p, m';
-    const { rows: [project] } = await client.query<Project>(
-      `SELECT p.id, p.code, p.name, p.description, p.status, m.role
-       FROM projects p JOIN project_members m ON m.project_id = p.id
-       WHERE m.user_id = $1 AND p.id = $2 ${lock}`, [userId, projectId],
-    );
-    if (!project) throw new NotFoundException('Project not found');
+    client?: PoolClient) {
+    const { rows: [allowed] } = await (client ?? this.db.pool).query<Project>(
+      'SELECT * FROM ado_private.member_projects($1, $2)', [userId, projectId]);
+    if (!allowed) throw new NotFoundException('Project not found');
+    let project = allowed;
+    if (client) {
+      await this.db.bindProject(client, projectId);
+      const { rows: [locked] } = await client.query<Project>(
+        `SELECT p.id, p.code, p.name, p.description, p.status, m.role
+         FROM projects p JOIN project_members m ON m.project_id = p.id
+         WHERE m.user_id = $1 AND p.id = $2 FOR UPDATE OF p, m`, [userId, projectId]);
+      if (!locked) throw new NotFoundException('Project not found');
+      project = locked;
+    }
     if (options.owner && project.role !== 'owner') throw new ForbiddenException('Project owner required');
     if (options.write && project.role === 'viewer') throw new ForbiddenException('Project write access required');
     if (options.active && project.status !== 'active') throw new ConflictException('Project is archived');
@@ -59,9 +64,9 @@ export class ProjectsService {
     const name = textInput(input.name, 'name', 200);
     const description = textInput(input.description ?? '', 'description', 4000, true);
     try {
-      return await this.db.transaction(async (client) => {
+      return await this.db.projectTransaction(randomUUID(), async (client) => {
         const { rows: [project] } = await client.query<Omit<Project, 'role'>>(
-          `INSERT INTO projects (code, name, description) VALUES ($1, $2, $3)
+          `INSERT INTO projects (id, code, name, description) VALUES (ado_private.project_scope(), $1, $2, $3)
            RETURNING id, code, name, description, status`, [code, name, description],
         );
         await client.query(
@@ -123,7 +128,7 @@ export class ProjectsService {
 
   async members(actor: Account, projectId: string) {
     await this.access(actor.id, projectId, { owner: true });
-    const { rows } = await this.db.pool.query<ProjectMember>(
+    const { rows } = await this.db.projectQuery<ProjectMember>(projectId,
       `SELECT u.id, u.email, u.name, m.role FROM project_members m
        JOIN users u ON u.id = m.user_id WHERE m.project_id = $1 ORDER BY u.email`, [projectId],
     );
@@ -132,7 +137,7 @@ export class ProjectsService {
 
   async listRequirements(actor: Account, projectId: string) {
     await this.access(actor.id, projectId);
-    const { rows } = await this.db.pool.query<ProjectRequirement>(
+    const { rows } = await this.db.projectQuery<ProjectRequirement>(projectId,
       `SELECT ${requirementFields} FROM project_requirements WHERE project_id = $1 AND retired_at IS NULL
        ORDER BY approved_at DESC, id`, [projectId]);
     return rows;

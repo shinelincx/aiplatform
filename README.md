@@ -12,7 +12,7 @@ docker compose up --build --wait
 
 打开 [Web 控制台](http://127.0.0.1:3100) 查看 API 状态并登录。也可直接访问 [API 健康接口](http://127.0.0.1:3101/health)。
 
-首次登录前，将 `.env.example` 复制为 `.env`，设置 `ADO_BOOTSTRAP_EMAIL` 和至少 12 字符的 `ADO_BOOTSTRAP_PASSWORD`，再启动 Compose。API 启动时自动执行 PostgreSQL 迁移。首次启动创建管理员后，可以清空启动账号环境变量并重启，现有账号与项目继续保存在 PostgreSQL。
+首次登录前，将 `.env.example` 复制为 `.env`，设置 `ADO_BOOTSTRAP_EMAIL` 和至少 12 字符的 `ADO_BOOTSTRAP_PASSWORD`，再启动 Compose。一次性 `migrate` 服务先完成 PostgreSQL 迁移，API 随后以 `ado_api` 账号启动。首次启动创建管理员后，可以清空启动账号环境变量并重启，现有账号与项目继续保存在 PostgreSQL。
 
 管理员可创建 Fitbest、ADO 项目和用户账号。项目创建者拥有项目所有者权限，可添加成员或只读用户。项目列表和仓库信息按成员关系过滤。归档项目保留历史并停止接受设置变更。
 
@@ -34,7 +34,7 @@ docker compose up --build --wait
 | Redis | 16379 | `redis:6379` |
 | S3 兼容对象存储（SeaweedFS） | 19000 | `http://storage:8333`，桶为 `ado-dev` |
 
-端口只绑定宿主机回环地址。在根目录的 `.env` 可以覆盖 `WEB_PORT`、`API_PORT`、`POSTGRES_PORT`、`REDIS_PORT` 和 `S3_PORT`。本地数据库密码默认为 `ado-local-dev`，对象存储开发密钥默认为 `ado-local` / `ado-local-dev`。首次启动前可设置 `POSTGRES_PASSWORD`、`S3_ACCESS_KEY` 和 `S3_SECRET_KEY`。
+端口只绑定宿主机回环地址。在根目录的 `.env` 可以覆盖 `WEB_PORT`、`API_PORT`、`POSTGRES_PORT`、`REDIS_PORT` 和 `S3_PORT`。本地迁移账号的开发密码默认为 `ado-local-dev`，API 账号为 `ado-local-api-dev`。可分别通过 `POSTGRES_PASSWORD` 和 `ADO_DATABASE_PASSWORD` 设置不同的密码。对象存储开发密钥默认为 `ado-local` / `ado-local-dev`，可通过 `S3_ACCESS_KEY` 和 `S3_SECRET_KEY` 设置。
 
 ```sh
 docker compose ps

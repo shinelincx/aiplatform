@@ -122,19 +122,19 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
     if (this.busy) return false;
     this.busy = true;
     try {
-      const { rows: [job] } = await this.db.pool.query<ClaimedQa>(
-        `WITH next AS (
+      const job = await this.db.transaction(async (client) => {
+        const runId = await this.db.nextProjectJob(client, 'qa_candidate');
+        if (!runId) return null;
+        const { rows: [claimed] } = await client.query<ClaimedQa>(
+          `WITH next AS (
           SELECT q.run_id, r.project_id, r.task_id, r.qa_assignment, r.verification_report, a.size, a.object_key,
             r.developer_assignment->'requirement' AS requirement, r.developer_assignment->'knowledge' AS knowledge,
             e.payload->>'baseCommit' AS base_commit
           FROM execution_qa q JOIN execution_runs r ON r.id = q.run_id
-          JOIN projects p ON p.id = r.project_id AND p.status = 'active'
-          JOIN tasks t ON t.id = r.task_id AND t.status = 'TESTING'
           JOIN execution_artifacts a ON a.run_id = q.run_id AND a.sha256 = q.patch_hash
           LEFT JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = q.run_id AND kind = 'result'
             AND payload->>'patchHash' = a.sha256 ORDER BY sequence DESC LIMIT 1) e ON true
-          WHERE q.state = 'queued' OR (q.state = 'running' AND q.lease_expires_at < now())
-          ORDER BY q.updated_at LIMIT 1 FOR UPDATE OF q SKIP LOCKED
+          WHERE q.run_id = $1
          )
          UPDATE execution_qa q SET state = 'running', lease_id = gen_random_uuid(),
            lease_expires_at = now() + interval '2 minutes', updated_at = now()
@@ -142,7 +142,9 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
          RETURNING q.run_id AS "runId", next.project_id AS "projectId", next.task_id AS "taskId",
            q.lease_id AS "leaseId", next.qa_assignment AS agent, next.verification_report AS verification, next.requirement,
            next.knowledge, next.base_commit AS "baseCommit",
-           jsonb_build_object('sha256', q.patch_hash, 'size', next.size, 'key', next.object_key) AS artifact`);
+           jsonb_build_object('sha256', q.patch_hash, 'size', next.size, 'key', next.object_key) AS artifact`, [runId]);
+        return claimed;
+      });
       if (!job) return false;
 
       let assessment: QaAssessment | null = null;
@@ -176,7 +178,7 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
   }
 
   private async settle(job: ClaimedQa, assessment: QaAssessment | null, partialPatch: boolean, failure: QaFailure, usage?: ModelUsage) {
-    await this.db.transaction(async (client) => {
+    await this.db.projectTransaction(job.projectId, async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [job.projectId]);
       const task = await this.tasks.find(job.projectId, job.taskId, client);

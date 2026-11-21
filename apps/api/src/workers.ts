@@ -11,10 +11,7 @@ import { Database } from './database';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 
-const hasActiveProject = `EXISTS (
-  SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id
-  WHERE wp.worker_id = w.id AND p.status = 'active'
-)`;
+const hasActiveProject = 'ado_private.worker_has_active_project(w.id)';
 export const workerOnline = `NOT w.disabled AND w.connection_id IS NOT NULL AND w.credential_expires_at > now()
   AND w.last_heartbeat_at >= now() - ($2 * interval '1 millisecond')`;
 export const workerDiskReady = `COALESCE((w.capabilities->>'diskFreeBytes')::bigint
@@ -105,7 +102,7 @@ export class WorkersService {
 
   async list(actor: Account, projectId: string) {
     await this.projects.access(actor.id, projectId);
-    const { rows } = await this.db.pool.query<WorkerReport>(
+    const { rows } = await this.db.projectQuery<WorkerReport>(projectId,
       `SELECT w.id, w.name, w.capabilities, w.last_heartbeat_at AS "lastHeartbeatAt",
          w.credential_expires_at AS "credentialExpiresAt",
          CASE
