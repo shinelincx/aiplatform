@@ -168,7 +168,10 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
         failure = { error: 'invalid_structured_output' };
         assessment = assessmentInput(response.output, partialPatch);
       } catch (error) {
-        if (error instanceof PlanningFailure) failure = { error: error.category, httpStatus: error.httpStatus };
+        if (error instanceof PlanningFailure) {
+          usage ??= error.usage;
+          failure = { error: error.category, httpStatus: error.httpStatus };
+        }
       }
       await this.settle(job, assessment, partialPatch, failure, usage);
       return true;
@@ -189,9 +192,11 @@ export class ExecutionQaService implements OnApplicationBootstrap, OnModuleDestr
            lease_id = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE run_id = $1 AND lease_id = $2 AND state = 'running'`,
         [job.runId, job.leaseId, state, cancelled ? null : assessment, partialPatch]);
+      if (usage) {
+        await this.tasks.recordModelUsage(client, task, job.leaseId, { runId: job.runId, role: job.agent.role, usage });
+      }
       if (!updated.rowCount) return;
       const payload = { runId: job.runId, patchHash: job.artifact.sha256 };
-      if (usage) await this.tasks.event(client, task, 'agent.model_usage', { runId: job.runId, role: job.agent.role, usage });
       await this.tasks.event(client, task, `agent.qa_${state}`, {
         ...payload, ...(state === 'failed' && failure),
         ...(assessment && !cancelled && { recommendation: assessment.recommendation, version: job.agent.version }),

@@ -3,7 +3,7 @@ import { developerRoles, type AgentAssignment, type ArchitecturePlan, type Direc
 import { objectInput, textInput } from './input';
 
 export class PlanningFailure extends Error {
-  constructor(readonly category: PlanningFailureCategory, readonly httpStatus?: number) {
+  constructor(readonly category: PlanningFailureCategory, readonly httpStatus?: number, readonly usage?: ModelUsage) {
     super(category);
   }
 }
@@ -116,7 +116,7 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(90_000),
     body: JSON.stringify({
-      model: agent.model, store: false, max_output_tokens: 6000,
+      model: agent.model, service_tier: 'auto', store: false, max_output_tokens: 6000,
       instructions: [...instructions, agent.instructions,
         ...agent.skills.map((skill) => `${skill.name} (v${skill.version}): ${skill.instructions}`)].join('\n\n'),
       input: JSON.stringify(input),
@@ -131,35 +131,42 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
   const result: unknown = await response.json().catch((error: unknown) => {
     throw error instanceof SyntaxError ? new PlanningFailure('invalid_structured_output') : transportFailure(error);
   });
-  try {
-    return decodeStructuredOutput(result);
-  } catch {
-    throw new PlanningFailure('invalid_structured_output');
-  }
+  return decodeStructuredOutput(result);
 }
 
 function decodeStructuredOutput(input: unknown): AgentResponse {
   const result = input as {
     status?: string;
     model?: string;
+    created_at?: unknown;
+    service_tier?: unknown;
     output?: { type?: string; content?: { type?: string; text?: string }[] }[];
     usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   };
-  const content = result.output?.filter(({ type }) => type === 'message').flatMap((item) => item.content ?? []);
-  if (result.status !== 'completed' || content?.some(({ type }) => type === 'refusal')) {
-    throw new Error('Responses provider did not complete');
-  }
-  const output = content?.filter(({ type }) => type === 'output_text').map(({ text }) => text).join('');
-  if (!output) throw new Error('Responses provider returned no structured output');
-  const usage = result.usage;
-  const model = result.model;
+  const usage = result?.usage;
+  const model = result?.model;
+  const created = result?.created_at;
+  const createdAt = typeof created === 'number' && created > 0 ? new Date(created * 1000) : undefined;
+  const providerCreatedAt = createdAt && Number.isFinite(createdAt.valueOf()) ? createdAt.toISOString() : undefined;
   const modelUsage = usage && typeof model === 'string' && /^[\w.-]{1,100}$/.test(model)
     && count(usage.input_tokens) && count(usage.output_tokens) && count(usage.input_tokens_details?.cached_tokens)
     && usage.input_tokens_details.cached_tokens <= usage.input_tokens ? {
       model, inputTokens: usage.input_tokens, cachedInputTokens: usage.input_tokens_details.cached_tokens,
       outputTokens: usage.output_tokens,
+      ...(providerCreatedAt && { providerCreatedAt }),
+      ...(result?.service_tier === 'default' && { serviceTier: 'default' }),
     } : undefined;
-  return { output: JSON.parse(output) as unknown, usage: modelUsage };
+  try {
+    const content = result.output?.filter(({ type }) => type === 'message').flatMap((item) => item.content ?? []);
+    if (result.status !== 'completed' || content?.some(({ type }) => type === 'refusal')) {
+      throw new Error('Responses provider did not complete');
+    }
+    const output = content?.filter(({ type }) => type === 'output_text').map(({ text }) => text).join('');
+    if (!output) throw new Error('Responses provider returned no structured output');
+    return { output: JSON.parse(output) as unknown, usage: modelUsage };
+  } catch {
+    throw new PlanningFailure('invalid_structured_output', undefined, modelUsage);
+  }
 }
 
 function count(value: unknown): value is number {

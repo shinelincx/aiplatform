@@ -81,6 +81,8 @@ details > .fields { padding-top: .5rem; }
 .members { list-style: none; padding: 0; }
 .members li { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .75rem 0; border-bottom: 1px solid #e3ebe7; overflow-wrap: anywhere; }
 .inline-fields { display: flex; flex-wrap: wrap; gap: .5rem; }
+.budget-summary { display: flex; flex-wrap: wrap; gap: .65rem 2rem; }
+.budget-summary dd { margin: .25rem 0 0; font-weight: 600; }
 .repository-form { margin-top: 1rem; }
 .fields .checkbox { display: flex; align-items: center; }
 .checkbox input { width: 1.2rem; }

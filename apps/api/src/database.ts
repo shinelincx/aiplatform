@@ -327,6 +327,33 @@ const migrations = [
     FOREIGN KEY (project_id, id, active_version_id) REFERENCES project_knowledge_versions(project_id, entry_id, id);
   CREATE INDEX project_knowledge_versions_scope ON project_knowledge_versions (project_id, id);`,
   projectIsolation,
+  `CREATE UNIQUE INDEX task_events_model_usage_attempt
+    ON task_events (project_id, task_id, (payload->>'attemptId'))
+    WHERE event_type = 'agent.model_usage' AND payload ? 'attemptId';
+  CREATE TABLE project_model_rate_versions (
+    project_id uuid NOT NULL,
+    model varchar(100) NOT NULL,
+    version integer NOT NULL CHECK (version > 0),
+    effective_at timestamptz NOT NULL,
+    source_url text,
+    input_usd numeric(15,6) NOT NULL CHECK (input_usd >= 0),
+    cached_input_usd numeric(15,6) NOT NULL CHECK (cached_input_usd >= 0),
+    output_usd numeric(15,6) NOT NULL CHECK (output_usd >= 0),
+    PRIMARY KEY (project_id, model, version),
+    FOREIGN KEY (project_id, model) REFERENCES project_model_rates(project_id, model)
+  );
+  CREATE INDEX project_model_rate_versions_effective
+    ON project_model_rate_versions (project_id, model, effective_at DESC, version DESC);
+  CREATE TABLE project_monthly_budgets (
+    project_id uuid NOT NULL REFERENCES projects(id),
+    month_start date NOT NULL CHECK (extract(day FROM month_start) = 1),
+    amount_usd numeric(11,2) CHECK (amount_usd > 0),
+    PRIMARY KEY (project_id, month_start)
+  );
+  ALTER TABLE project_model_rate_versions ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY project_scope ON project_model_rate_versions USING (project_id = ado_private.project_scope());
+  ALTER TABLE project_monthly_budgets ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY project_scope ON project_monthly_budgets USING (project_id = ado_private.project_scope());`,
 ];
 
 function connect(user: string) {

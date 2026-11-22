@@ -18,7 +18,9 @@ export { canRepair, checkFailureStatuses, maxVerificationAttempts, parseCheckPla
 export { independentCheckKinds, independentCheckStatuses, parseIndependentChecks } from './verification';
 export type { CheckFailureReason, CheckResult, ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckResult,
   QaAssessment, VerificationCheck, VerificationReport } from './verification';
-export type { ModelRate, ModelUsage, ModelUsageRow, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage } from './operations';
+export { budgetAmountPattern, budgetMonthPattern } from './operations';
+export type { ModelRate, ModelUsage, ModelUsageRow, MonthlyUsage, ProjectAuditEntry, ProjectOperations, ProjectOverview, TokenUsage }
+  from './operations';
 export { knowledgeKinds, maxPlanKnowledgeVersions } from './knowledge';
 export type { DesignEvidence, KnowledgeEntry, KnowledgeKind, KnowledgeSnapshot, KnowledgeVersion } from './knowledge';
 

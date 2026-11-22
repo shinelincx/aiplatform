@@ -3,7 +3,7 @@
 import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { agentRoleLabels, isWorkerId, type AgentPlan, type Project, type Session, type WorkerCredential } from '@ado/shared';
+import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, isWorkerId, type AgentPlan, type Project, type Session, type WorkerCredential } from '@ado/shared';
 import { api, sessionCookie } from './api-client';
 
 async function execute(path: string, options: RequestInit, authenticated = true) {
@@ -70,17 +70,38 @@ export async function updateProject(form: FormData) {
   redirect(query);
 }
 
-export async function saveModelRate(form: FormData) {
+function operationsTarget(form: FormData) {
   const { query, endpoint } = projectPath(form);
+  const month = String(form.get('month') ?? '');
+  const task = String(form.get('task') ?? '');
+  const target = `${query}&section=operations${budgetMonthPattern.test(month) ? `&month=${month}` : ''}`
+    + (task ? `&task=${encodeURIComponent(task)}` : '');
+  return { target, endpoint, month };
+}
+
+export async function saveModelRate(form: FormData) {
+  const { target, endpoint } = operationsTarget(form);
   const model = String(form.get('model') ?? '').trim();
-  const target = `${query}&section=operations`;
   if (!/^[\w.-]{1,100}$/.test(model)) redirect(`${target}&issue=model-rate#operations`);
   const response = await execute(`${endpoint}/operations/rates/${encodeURIComponent(model)}`, { method: 'PUT', body: JSON.stringify({
     inputUsdPerMillion: form.get('inputUsdPerMillion'), cachedInputUsdPerMillion: form.get('cachedInputUsdPerMillion'),
-    outputUsdPerMillion: form.get('outputUsdPerMillion'),
+    outputUsdPerMillion: form.get('outputUsdPerMillion'), sourceUrl: form.get('sourceUrl'),
   }) });
   if (!response?.ok) redirect(`${target}&issue=${issue(response, 'model-rate')}#operations`);
-  redirect(`${target}#operations`);
+  redirect(`${target}&notice=rate-saved#operations`);
+}
+
+export async function saveMonthlyBudget(form: FormData) {
+  const { endpoint, target, month } = operationsTarget(form);
+  const amount = String(form.get('amountUsd') ?? '').trim();
+  if (!budgetMonthPattern.test(month) || (amount && (!budgetAmountPattern.test(amount) || Number(amount) <= 0))) {
+    redirect(`${target}&issue=monthly-budget#budget-heading`);
+  }
+  const response = await execute(`${endpoint}/operations/budget/${month}`, {
+    method: 'PUT', body: JSON.stringify({ amountUsd: amount || null }),
+  });
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'monthly-budget')}#budget-heading`);
+  redirect(`${target}&notice=budget-saved#budget-heading`);
 }
 
 export async function archiveProject(form: FormData) {

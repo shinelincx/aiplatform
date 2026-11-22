@@ -22,6 +22,72 @@ async function post(path, body, expected = 201) {
   return request(path, { method: 'POST', body, expected });
 }
 
+async function verifyBudgets(ado, fit, third) {
+  const month = '2040-11';
+  const model = 'fixture-budget-model';
+  const source = 'https://example.test/rates';
+  const operations = (project, selected = month, actor = token) =>
+    request(project.path + '/operations?month=' + selected, { actor });
+  const budget = (project, amountUsd, expected = 200, actor = token) =>
+    request(project.path + '/operations/budget/' + month, { method: 'PUT', body: { amountUsd }, expected, actor });
+
+  assert.deepEqual((await operations(ado)).monthly,
+    { month, budgetUsd: null, estimatedUsd: null, records: 0, matched: 0, undated: 0, notice: 'unset' });
+  await budget(ado, '0', 400);
+  await budget(ado, '10.001', 400);
+  await request(ado.path + '/operations?month=2040-13', { expected: 400 });
+  assert.deepEqual(await budget(ado, '10'), { month, budgetUsd: '10.00' });
+  assert.equal((await operations(ado)).monthly.notice, 'unknown');
+  assert.equal((await operations(fit)).monthly.budgetUsd, null);
+  assert.equal((await operations(third, month, viewerToken)).rates, null);
+  await budget(third, '25', 403, viewerToken);
+
+  await db.projectTransaction(ado.projectId, async (client) => {
+    await client.query('INSERT INTO project_model_rates(project_id,model,input_usd,cached_input_usd,output_usd) VALUES ($1,$2,1000,0,0)',
+      [ado.projectId, model]);
+    await client.query("INSERT INTO project_model_rate_versions VALUES ($1,$2,1,'2040-10-01T00:00:00Z',$3,1000,0,0), " +
+      "($1,$2,2,'2040-11-15T00:00:00Z',$3,2000,0,0)", [ado.projectId, model, source]);
+  });
+  const record = (stamp, tokens, fields = {}) => db.projectQuery(ado.projectId,
+    "INSERT INTO task_events(project_id,task_id,event_type,payload,created_at) VALUES ($1,$2,'agent.model_usage',$3,'2040-11-25T00:00:00Z')",
+    [ado.projectId, ado.taskId, { role: 'PROJECT_DIRECTOR', usage: {
+      model, inputTokens: tokens, cachedInputTokens: 0, outputTokens: 0, providerCreatedAt: stamp, serviceTier: 'default', ...fields,
+    } }]);
+  await record('2040-10-31T23:59:59.500Z', 1000);
+  await record('2040-11-01T00:00:00.000Z', 4000);
+  await record('2040-11-14T23:59:59.500Z', 4000);
+  await record(undefined, 9000);
+  await record('2040-11-03T12:00:00.000Z', 9000, { serviceTier: 'priority' });
+  await record('2040-11-04T12:00:00.000Z', 'invalid');
+  assert.equal((await operations(ado, '2040-10')).monthly.estimatedUsd, '1.000000000000');
+  assert.deepEqual((await operations(ado)).monthly,
+    { month, budgetUsd: '10.00', estimatedUsd: '8.000000000000', records: 5, matched: 2, undated: 1, notice: 'warning' });
+  await record('2040-11-15T00:00:00.000Z', 1000);
+  await record('2040-12-01T00:00:00.000Z', 1000);
+  const atLimit = (await operations(ado)).monthly;
+  assert.equal(atLimit.estimatedUsd, '10.000000000000');
+  assert.equal(atLimit.notice, 'reached');
+  assert.equal((await operations(ado, '2040-12')).monthly.estimatedUsd, '2.000000000000');
+  const version = await request(ado.path + '/operations/rates/' + model, { method: 'PUT', body: {
+    inputUsdPerMillion: '3000', cachedInputUsdPerMillion: '0', outputUsdPerMillion: '0', sourceUrl: source,
+  } });
+  assert.equal(version.version, 3);
+  assert.equal(version.sourceUrl, source);
+  assert.deepEqual((await operations(ado)).monthly, atLimit);
+  assert.equal((await operations(fit)).monthly.estimatedUsd, null);
+
+  await assert.rejects(db.projectQuery(fit.projectId, 'INSERT INTO project_monthly_budgets VALUES ($1,$2,5)',
+    [ado.projectId, month + '-01']), { code: '42501' });
+  await assert.rejects(db.projectQuery(ado.projectId, 'UPDATE project_model_rate_versions SET input_usd=1'),
+    { code: '42501' });
+  await budget(ado, null);
+  const final = await operations(ado);
+  assert.equal(final.monthly.notice, 'unset');
+  assert.equal(final.monthly.estimatedUsd, atLimit.estimatedUsd);
+  assert.equal(final.audit.filter(({ action }) => action === 'operations.budget_updated').length, 2);
+  console.log('Verified UTC budget months, rate versions, unknown usage, 80% and 100% thresholds, and project permissions.');
+}
+
 async function seed(name, index) {
   const code = name + '-' + suffix;
   const { id: projectId } = await post('/projects', { code, name });
@@ -52,7 +118,7 @@ try {
       has_table_privilege('schema_migrations', 'INSERT') AS migrations,
       has_table_privilege('tasks', 'TRUNCATE') AS truncate
   `);
-  assert.deepEqual(grants, { role: 'ado_api', protectedTables: 23, ddl: false, migrations: false, truncate: false });
+  assert.deepEqual(grants, { role: 'ado_api', protectedTables: 25, ddl: false, migrations: false, truncate: false });
   const email = process.env.ADO_BOOTSTRAP_EMAIL;
   const password = process.env.ADO_BOOTSTRAP_PASSWORD;
   assert(email && password, 'Use an isolated stack with a synthetic bootstrap account');
@@ -105,7 +171,8 @@ try {
     const broken = await pooled.query('ROLLBACK').then(() => false, () => true);
     pooled.release(broken);
   }
-  console.log('Verified 23 RLS tables, restricted role, three project memberships and transaction-local isolation.');
+  await verifyBudgets(ado, fit, third);
+  console.log('Verified 25 RLS tables, restricted role, three project memberships and transaction-local isolation.');
 } finally {
   try {
     if (viewerToken) await request('/auth/session', { method: 'DELETE', actor: viewerToken, expected: 204 });

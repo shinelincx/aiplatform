@@ -12,6 +12,23 @@ afterEach(() => {
 });
 
 describe('planning provider failures', () => {
+  it('retains valid metering and UTC provider time when structured output cannot be used', async () => {
+    vi.stubEnv('ADO_AGENT_API_KEY', 'private-key-fixture');
+    const fetch = vi.fn().mockResolvedValue(Response.json({
+      model: 'fixture-model', created_at: Date.parse('2040-10-31T23:59:59.500Z') / 1000,
+      service_tier: 'default', status: 'incomplete',
+      usage: { input_tokens: 100, input_tokens_details: { cached_tokens: 20 }, output_tokens: 10 },
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(openAIPlanningModel.generate('PROJECT_DIRECTOR', agent, {}))
+      .rejects.toMatchObject({
+        category: 'invalid_structured_output',
+        usage: { model: 'fixture-model', inputTokens: 100, cachedInputTokens: 20, outputTokens: 10,
+          providerCreatedAt: '2040-10-31T23:59:59.500Z', serviceTier: 'default' },
+      });
+    expect(JSON.parse(fetch.mock.calls[0][1].body).service_tier).toBe('auto');
+  });
   it('does not read the provider error body or attach it to a classified error', async () => {
     vi.stubEnv('ADO_AGENT_API_KEY', 'private-key-fixture');
     const response = Response.json({ error: { message: 'private-body-fixture' } }, { status: 403 });

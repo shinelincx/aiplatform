@@ -1,9 +1,11 @@
-import { BadRequestException, Body, Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, Put, UseGuards } from '@nestjs/common';
-import { agentRoleLabels, workerOfflineMs, type Account, type ModelRate, type ModelUsageRow, type ProjectAuditEntry,
+import { BadRequestException, Body, Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, Put, Query, UseGuards } from '@nestjs/common';
+import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, workerOfflineMs, type Account, type ModelRate,
+  type ModelUsageRow, type MonthlyUsage, type ProjectAuditEntry,
   type ProjectOperations, type ProjectOverview } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
-import { objectInput } from './input';
+import { objectInput, textInput } from './input';
+import { monthlyUsage } from './monthly-usage';
 import { ProjectsService } from './projects';
 import { workerCanVerify, workerDiskReady, workerMatchesAssignment, workerOnline } from './workers';
 
@@ -15,6 +17,22 @@ function rateInput(value: unknown) {
     throw new BadRequestException('Expected a non-negative decimal rate per million tokens');
   }
   return value;
+}
+
+function budgetMonth(value: unknown) {
+  if (typeof value !== 'string' || !budgetMonthPattern.test(value)) {
+    throw new BadRequestException('Invalid UTC month');
+  }
+  return value;
+}
+
+function rateSource(value: unknown) {
+  if (value == null || value === '') return null;
+  const url = URL.parse(textInput(value, 'price source', 2048));
+  if (url?.protocol !== 'https:' || url.username || url.password) {
+    throw new BadRequestException('Expected an HTTPS price source URL');
+  }
+  return url.href;
 }
 
 @Injectable()
@@ -75,10 +93,11 @@ export class OperationsService {
     return summary;
   }
 
-  async list(actor: Account, projectId: string): Promise<ProjectOperations> {
+  async list(actor: Account, projectId: string, month?: string): Promise<ProjectOperations> {
     const project = await this.projects.access(actor.id, projectId);
+    const selectedMonth = month === undefined ? null : budgetMonth(month);
     const canManage = project.role === 'owner';
-    const [usage, audit, rates] = await Promise.all([
+    const [usage, audit, rates, monthly] = await Promise.all([
       this.db.projectQuery<ModelUsageRow>(projectId,
         `WITH usage_records AS (
           SELECT payload->>'role' AS role, payload->'usage'->>'model' AS model, payload->'usage' AS usage
@@ -94,7 +113,11 @@ export class OperationsService {
            SELECT role, model, SUM((usage->>'inputTokens')::numeric) AS inputs,
              SUM((usage->>'cachedInputTokens')::numeric) AS cached, SUM((usage->>'outputTokens')::numeric) AS outputs,
              bool_and((usage->>'cachedInputTokens')::numeric <= (usage->>'inputTokens')::numeric) AS valid
-           FROM usage_records GROUP BY role, model
+           FROM usage_records
+           WHERE usage->>'inputTokens' ~ '^[0-9]{1,16}$'
+             AND usage->>'cachedInputTokens' ~ '^[0-9]{1,16}$'
+             AND usage->>'outputTokens' ~ '^[0-9]{1,16}$'
+           GROUP BY role, model
          )
          SELECT t.role, t.model, t.inputs::text AS "inputTokens", t.cached::text AS "cachedInputTokens", t.outputs::text AS "outputTokens",
            CASE WHEN t.valid THEN round(((t.inputs - t.cached) * r.input_usd + t.cached * r.cached_input_usd
@@ -117,15 +140,21 @@ export class OperationsService {
           )
          ) activity ORDER BY "createdAt" DESC, id DESC LIMIT 25`, [projectId]) : null,
       canManage ? this.db.projectQuery<ModelRate>(projectId,
-        `SELECT ${rateFields} FROM project_model_rates WHERE project_id = $1 ORDER BY model`, [projectId]) : null,
+        `SELECT ${rateFields}, v.source_url AS "sourceUrl", v.effective_at AS "effectiveAt", v.version
+         FROM project_model_rates r LEFT JOIN LATERAL (
+           SELECT source_url, effective_at, version FROM project_model_rate_versions
+           WHERE project_id=r.project_id AND model=r.model ORDER BY version DESC LIMIT 1
+         ) v ON true WHERE r.project_id=$1 ORDER BY r.model`, [projectId]) : null,
+      this.db.projectQuery<MonthlyUsage>(projectId, monthlyUsage, [projectId, selectedMonth]),
     ]);
-    return { usage: usage.rows, audit: audit?.rows ?? null, rates: rates?.rows ?? null };
+    return { usage: usage.rows, monthly: monthly.rows[0], audit: audit?.rows ?? null, rates: rates?.rows ?? null };
   }
 
   async saveRate(actor: Account, projectId: string, model: string, body: unknown) {
     if (!/^[\w.-]{1,100}$/.test(model)) throw new BadRequestException('Invalid model identifier');
     const input = objectInput(body);
     const rates = [rateInput(input.inputUsdPerMillion), rateInput(input.cachedInputUsdPerMillion), rateInput(input.outputUsdPerMillion)];
+    const sourceUrl = rateSource(input.sourceUrl);
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const { rows: [{ id, ...saved }] } = await client.query<ModelRate & { id: string }>(
@@ -133,8 +162,34 @@ export class OperationsService {
          VALUES ($1,$2,$3,$4,$5) ON CONFLICT (project_id, model) DO UPDATE
          SET input_usd = EXCLUDED.input_usd, cached_input_usd = EXCLUDED.cached_input_usd, output_usd = EXCLUDED.output_usd
          RETURNING id, ${rateFields}`, [projectId, model, ...rates]);
-      await this.projects.audit(client, actor.id, projectId, 'operations.model_rate_updated', id);
-      return saved;
+      const { rows: [version] } = await client.query<{ version: number; effectiveAt: string; sourceUrl: string | null }>(
+        `INSERT INTO project_model_rate_versions (
+           project_id, model, input_usd, cached_input_usd, output_usd, source_url, version, effective_at
+         ) SELECT $1::uuid,$2::varchar(100),$3::numeric,$4::numeric,$5::numeric,$6::text,coalesce(max(version),0)+1,
+           greatest(clock_timestamp(), max(effective_at)+interval '1 microsecond')
+         FROM project_model_rate_versions WHERE project_id=$1 AND model=$2
+         RETURNING version, effective_at AS "effectiveAt", source_url AS "sourceUrl"`, [projectId, model, ...rates, sourceUrl]);
+      await this.projects.audit(client, actor.id, projectId, 'operations.model_rate_updated', id, { model, ...version });
+      return { ...saved, ...version };
+    });
+  }
+
+  async saveBudget(actor: Account, projectId: string, month: string, body: unknown) {
+    const selectedMonth = budgetMonth(month);
+    const { amountUsd } = objectInput(body);
+    if (amountUsd !== null && (typeof amountUsd !== 'string' || !budgetAmountPattern.test(amountUsd) || Number(amountUsd) <= 0)) {
+      throw new BadRequestException('Expected a positive USD amount with up to two decimal places, or null');
+    }
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [budget] } = await client.query<{ budgetUsd: string | null }>(
+        `INSERT INTO project_monthly_budgets(project_id, month_start, amount_usd)
+         VALUES ($1,($2 || '-01')::date,$3)
+         ON CONFLICT (project_id, month_start) DO UPDATE SET amount_usd=EXCLUDED.amount_usd
+         RETURNING amount_usd::text AS "budgetUsd"`, [projectId, selectedMonth, amountUsd]);
+      await this.projects.audit(client, actor.id, projectId, 'operations.budget_updated', projectId,
+        { month: selectedMonth, budgetUsd: budget.budgetUsd });
+      return { month: selectedMonth, ...budget };
     });
   }
 }
@@ -145,8 +200,15 @@ export class OperationsController {
   constructor(@Inject(OperationsService) private readonly operations: OperationsService) {}
 
   @Get()
-  list(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string) {
-    return this.operations.list(actor, projectId);
+  list(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Query('month') month?: string) {
+    return this.operations.list(actor, projectId, month);
+  }
+
+  @Put('budget/:month')
+  saveBudget(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('month') month: string, @Body() body: unknown) {
+    return this.operations.saveBudget(actor, projectId, month, body);
   }
 
   @Get('overview')
