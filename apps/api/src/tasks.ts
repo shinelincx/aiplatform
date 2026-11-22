@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { canTransitionTask, developerRoles, taskPriorities, type Account, type AgentAssignment, type ArchitecturePlan,
-  type DeveloperRole, type KnowledgeSnapshot, type RequirementContent, type Task, type TaskDetail,
+  type AgentRole, type DeveloperRole, type KnowledgeSnapshot, type ModelUsage, type RequirementContent, type Task, type TaskDetail,
   type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -280,6 +280,16 @@ export class TasksService {
   async event(client: PoolClient, task: Task, eventType: string, payload: object) {
     await client.query('INSERT INTO task_events (project_id, task_id, event_type, payload) VALUES ($1,$2,$3,$4)',
       [task.projectId, task.id, eventType, payload]);
+  }
+
+  async recordModelUsage(client: PoolClient, task: Task, attemptId: string,
+    reading: { role: AgentRole; usage: ModelUsage; runId?: string }) {
+    await client.query(
+      `INSERT INTO task_events (project_id, task_id, event_type, payload)
+       VALUES ($1,$2,'agent.model_usage',$3)
+       ON CONFLICT (project_id, task_id, (payload->>'attemptId'))
+       WHERE event_type = 'agent.model_usage' AND payload ? 'attemptId' DO NOTHING`,
+      [task.projectId, task.id, { ...reading, attemptId }]);
   }
 
   private async hasActiveAgentPlan(client: PoolClient, task: Task) {

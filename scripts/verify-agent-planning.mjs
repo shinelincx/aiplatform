@@ -474,7 +474,7 @@ try {
   assert.equal(metricsPage.status, 200);
   const metricsHtml = await metricsPage.text();
   assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
-  assert(metricsHtml.includes('估算费用 US$0.000224'));
+  assert(metricsHtml.includes('月度费用与预算') && metricsHtml.includes('暂无估算'));
 
   const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference',
     knowledgeVersionIds: [secondVersion.id] });

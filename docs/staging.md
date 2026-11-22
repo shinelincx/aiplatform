@@ -31,6 +31,8 @@ Compose 先运行一次性 `migrate` 服务，用现有 `POSTGRES_PASSWORD` 执�
 
 从 V19 升级到 V20 时，先排空队列，用旧版本的备份工具生成 PostgreSQL 和对象存储快照，再用新版 Compose 停写切换。迁移后核查 API 健康、项目用量和归档读取，并确认受限账号只在授权项目范围内读写。回退时停止写入，用 V19 程序和配置恢复升级前快照到独立实例，核对数据和归档后再切换入口。回退快照之后产生的数据需按回退决策单独处理。
 
+V20 升级到 V21 时，先排空队列、暂停写入并验证升级前快照可还原。迁移后核对旧用量仍可读、费率版本和月度预算受项目行级安全保护，未确认的历史金额保持未知。V20 API 要求 V20 数据库；回退时先保留 V21 数据库和备份，再恢复预升级 V20 快照与匹配程序。重新上线前核对留存的 V21 用量、费率和预算以便后续对账。
+
 工作台和 `/health` 走 TLS 入口。发布到远端时，将 `ADO_STAGING_BIND` 设置为预发布主机的可达地址，并配置相应防火墙入口。基础 API、数据库、Redis 和对象存储端口绑定在主机回环地址。网关转发 Worker WebSocket、归档上传与签名 Webhook。 [Nginx WebSocket 转发](https://nginx.org/en/docs/http/websocket.html)
 
 预发布容器随 Docker 恢复运行。网关通过 Compose 的 DNS 跟踪 API 和 Web 容器地址，容器重建后仍使用原来的入口域名。主动停止的服务用 `docker compose -p ado-staging up -d --wait` 恢复。 [Docker 容器重启策略](https://docs.docker.com/engine/containers/start-containers-automatically/) · [Nginx 动态解析上游](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#resolve)

@@ -156,4 +156,6 @@ export const runtimePermissions = `
     public.project_model_rates, public.project_knowledge, public.project_knowledge_versions TO ado_api;
   GRANT SELECT, INSERT, UPDATE, DELETE ON public.project_members, public.worker_projects, public.task_dependencies TO ado_api;
   GRANT SELECT, INSERT, DELETE ON public.sessions TO ado_api;
+  GRANT SELECT, INSERT ON public.project_model_rate_versions TO ado_api;
+  GRANT SELECT, INSERT, UPDATE ON public.project_monthly_budgets TO ado_api;
 `;

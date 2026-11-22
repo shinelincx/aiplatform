@@ -187,7 +187,8 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         }
         step = { role, version: agent.version, model: agent.model, output };
       } catch (error) {
-        await this.settle(row, null, usage, error instanceof PlanningFailure ? error.category : 'unknown');
+        const failure = error instanceof PlanningFailure ? error : undefined;
+        await this.settle(row, null, usage ?? failure?.usage, failure?.category ?? 'unknown');
         return true;
       }
       await this.settle(row, step, usage);
@@ -205,9 +206,12 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       const current = await client.query(
         "SELECT 1 FROM task_agent_plans WHERE task_id = $1 AND lease_id = $2 AND state = 'running' FOR UPDATE",
         [row.taskId, row.leaseId]);
-      if (!current.rowCount) return;
+      if (!current.rowCount && !usage) return;
       const task = await this.tasks.find(row.projectId, row.taskId, client);
-      if (usage) await this.tasks.event(client, task, 'agent.model_usage', { role: planningRoles[row.steps.length], usage });
+      if (usage && row.leaseId) {
+        await this.tasks.recordModelUsage(client, task, row.leaseId, { role: planningRoles[row.steps.length], usage });
+      }
+      if (!current.rowCount) return;
       if (task.status !== 'PLANNING' || task.archivedAt || project?.status !== 'active') {
         await this.saveProgress(client, row, 'cancelled', row.steps, null);
         await this.tasks.event(client, task, 'agent.plan_cancelled', {});

@@ -34,7 +34,7 @@ const issues: Record<string, string> = {
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
   'worker-assignment': '无法分配 Worker，请检查任务是否仍在排队，以及 Worker 的项目授权和执行能力。',
-  'model-rate': '无法保存费率，请核对模型标识和每百万 token 的非负美元金额。',
+  'model-rate': '无法保存费率，请核对模型标识、美元费率和 HTTPS 来源链接。',
   'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
   'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
   'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
@@ -43,7 +43,7 @@ const issues: Record<string, string> = {
 };
 
 export default async function Home({ searchParams }: {
-  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string;
+  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string; month?: string;
     requirementResult?: string; skill?: string; skillVersion?: string; skillResult?: string; knowledgeQuery?: string;
     knowledgeKind?: string; knowledgeHistory?: string; knowledgeEntry?: string; knowledgeVersion?: string; knowledgeResult?: string }>;
 }) {
@@ -104,7 +104,7 @@ export default async function Home({ searchParams }: {
               {selected && query.section === 'operations' && <div className="inline-fields"><Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}#task-detail` : '#tasks-heading'}`}>返回项目工作台</Link></div>}
               {selected && query.section === 'operations' && <DataPanel key={selected.id} id="operations"
                 headingId="operations-heading" title="项目用量与审计">
-                <Operations project={selected} />
+                <Operations project={selected} month={query.month} task={query.task} issue={query.issue} notice={query.notice} />
               </DataPanel>}
               {selected && <Tasks project={selected} selectedId={query.task} requirementResult={query.requirementResult} notice={query.notice} />}
               {selected && query.section === 'knowledge' && <DataPanel key={`knowledge:${selected.id}`} id="project-knowledge"
