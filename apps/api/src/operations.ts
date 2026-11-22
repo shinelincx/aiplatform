@@ -1,11 +1,12 @@
 import { BadRequestException, Body, Controller, Get, Inject, Injectable, Param, ParseUUIDPipe, Put, Query, UseGuards } from '@nestjs/common';
-import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, workerOfflineMs, type Account, type ModelRate,
+import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, planningFailureMessages, planningRoles, workerOfflineMs, type Account, type ModelRate,
   type ModelUsageRow, type MonthlyUsage, type ProjectAuditEntry,
   type ProjectOperations, type ProjectOverview } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { objectInput, textInput } from './input';
 import { monthlyUsage } from './monthly-usage';
+import { monitoringSnapshot } from './project-monitoring';
 import { ProjectsService } from './projects';
 import { workerCanVerify, workerDiskReady, workerMatchesAssignment, workerOnline } from './workers';
 
@@ -91,6 +92,14 @@ export class OperationsService {
           FROM alerts WHERE kind IS NOT NULL ORDER BY updated_at DESC, "taskId" LIMIT 10) AS alerts`,
       [projectId, workerOfflineMs, Object.keys(agentRoleLabels).length, project.status === 'active']);
     return summary;
+  }
+
+  async monitoring(actor: Account, projectId: string) {
+    const project = await this.projects.access(actor.id, projectId);
+    const { rows: [snapshot] } = await this.db.projectQuery(projectId, monitoringSnapshot, [
+      projectId, planningRoles, [...Object.keys(planningFailureMessages), 'artifact_unavailable', 'task_read_failed'],
+    ]);
+    return { project: project.code, ...snapshot };
   }
 
   async list(actor: Account, projectId: string, month?: string): Promise<ProjectOperations> {
@@ -209,6 +218,11 @@ export class OperationsController {
   saveBudget(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('month') month: string, @Body() body: unknown) {
     return this.operations.saveBudget(actor, projectId, month, body);
+  }
+
+  @Get('monitoring')
+  monitoring(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string) {
+    return this.operations.monitoring(actor, projectId);
   }
 
   @Get('overview')
