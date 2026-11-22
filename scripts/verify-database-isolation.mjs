@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 import { Database } from '../apps/api/src/database.ts';
+import { monitorProject } from './monitor-project.mjs';
 
 const db = new Database();
 const api = process.env.ADO_VERIFY_API_URL ?? 'http://127.0.0.1:3101';
@@ -88,6 +89,45 @@ async function verifyBudgets(ado, fit, third) {
   console.log('Verified UTC budget months, rate versions, unknown usage, 80% and 100% thresholds, and project permissions.');
 }
 
+async function verifyMonitoring(fit, third, email, password) {
+  const event = (project, type, payload, age = '0 hours') => db.projectQuery(project.projectId,
+    "INSERT INTO task_events(project_id,task_id,event_type,payload,created_at) VALUES ($1,$2,$3,$4,now() - $5::interval)",
+    [project.projectId, project.taskId, type, payload, age]);
+  await event(third, 'agent.qa_failed', { error: 'rate_limited' });
+  await event(third, 'agent.qa_failed', { error: 'rate_limited' });
+  await event(third, 'agent.qa_failed', { error: 'fixture-sensitive-message' });
+  await event(third, 'agent.qa_failed', { error: 'network' }, '73 hours');
+  await event(third, 'agent.plan_failed', { role: 'ARCHITECT', error: 'planning_step_failed' });
+  await event(fit, 'agent.qa_failed', { error: 'artifact_unavailable' });
+  await db.projectQuery(third.projectId, "UPDATE tasks SET status='FAILED' WHERE id=$1", [third.taskId]);
+
+  const path = '/operations/monitoring';
+  await request(fit.path + path, { actor: viewerToken, expected: 404 });
+  await request(third.path + path, { actor: null, expected: 401 });
+  const env = { ADO_MONITOR_API_URL: api, ADO_MONITOR_PROJECT_ID: third.projectId,
+    ADO_MONITOR_EMAIL: email, ADO_MONITOR_PASSWORD: password };
+  const before = await monitorProject(env);
+  assert.equal(before.project, 'THIRD-ISOLATION-' + suffix.toUpperCase());
+  assert.equal(before.current.workerFailures, 1);
+  assert.equal(before.recentAffectedTasks, 1);
+  assert.equal(Date.parse(before.checkedAt) - Date.parse(before.windowStart), 72 * 60 * 60 * 1000);
+  assert.deepEqual(before.incidents.map(({ stage, role, category, occurrences, affectedTasks }) =>
+    [stage, role, category, occurrences, affectedTasks]), [
+    ['planning', 'ARCHITECT', 'unclassified', 1, 1],
+    ['qa', 'QA', 'rate_limited', 2, 1],
+    ['qa', 'QA', 'unclassified', 1, 1],
+  ]);
+  assert(!JSON.stringify(before).includes('fixture-sensitive-message'));
+  assert.deepEqual(before.suggestions.map(({ key }) => key), ['recent-agent-failures', 'current-failed-work']);
+  await db.projectQuery(third.projectId, "UPDATE tasks SET status='COMPLETED' WHERE id=$1", [third.taskId]);
+  const after = await monitorProject(env);
+  assert.equal(after.current.workerFailures, 0);
+  assert.deepEqual(after.incidents, before.incidents);
+  assert.deepEqual(after.suggestions.map(({ key }) => key), ['recent-agent-failures']);
+  console.log('Verified monitoring isolation, safe history grouping and recovery across two samples.');
+}
+
+
 async function seed(name, index) {
   const code = name + '-' + suffix;
   const { id: projectId } = await post('/projects', { code, name });
@@ -172,6 +212,7 @@ try {
     pooled.release(broken);
   }
   await verifyBudgets(ado, fit, third);
+  await verifyMonitoring(fit, third, viewerEmail, password);
   console.log('Verified 25 RLS tables, restricted role, three project memberships and transaction-local isolation.');
 } finally {
   try {
