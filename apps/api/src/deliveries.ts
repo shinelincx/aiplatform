@@ -7,9 +7,10 @@ import type { PoolClient } from 'pg';
 import { executionQualityGate, type Account, type ExecutionDelivery, type Task, type VerificationReport } from '@ado/shared';
 import { ArtifactStore } from './artifacts';
 import { CurrentAccount, SessionGuard } from './auth';
+import { autoApprovalActor } from './auto-approval';
 import { Database } from './database';
 import { DeliveryError, pushCandidate } from './git-delivery';
-import { GitHubApp } from './github';
+import { GitHubApp, TransientGitHubError } from './github';
 import { ProjectsService } from './projects';
 import { qualityGateColumns, requireQualityGate, type QualityGateRun } from './quality-gate';
 import { TasksService } from './tasks';
@@ -60,6 +61,9 @@ type Publication = QualityGateRun & {
   code: string;
   title: string;
   current: boolean;
+  automaticApproval: boolean;
+  autoApprovalEnabled: boolean;
+  autoApprovalAttempts: number;
   files: string[];
   checks: VerificationReport['checks'];
   lease: string;
@@ -207,7 +211,7 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     const { rows: [delivery] } = await client.query<ExecutionDelivery>(
       `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch, state)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'queued')
-       ON CONFLICT (run_id) DO UPDATE SET state = 'queued', error = NULL, updated_at = now(), requested_by = EXCLUDED.requested_by
+       ON CONFLICT (run_id) DO UPDATE SET state = 'queued', error = NULL, updated_at = now(), requested_by = EXCLUDED.requested_by, auto_approval_attempts = 0
        RETURNING ${deliveryColumns}`,
       [runId, candidate.repoId, actorId, candidate.patchHash, candidate.baseCommit, candidate.baseBranch, `ado/${runId}`],
     );
@@ -228,29 +232,39 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
            g.github_repository_id::text AS "externalId", d.branch, d.base_branch AS "baseBranch", d.base_commit AS "baseCommit",
            d.patch_hash AS "patchHash", a.object_key AS "objectKey", a.size, t.task_code AS code, t.title,
            e.payload->'files' AS files, r.verification_report->'checks' AS checks, ${qualityGateColumns},
+           d.requested_by = $2 AS "automaticApproval",
+           (p.settings->'autoApproval'->'REVIEW' = 'true'::jsonb AND g.auto_draft_pr) AS "autoApprovalEnabled",
+           d.auto_approval_attempts AS "autoApprovalAttempts",
            r.id = (SELECT latest.id FROM execution_runs latest WHERE latest.project_id=r.project_id AND latest.task_id=r.task_id
              ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS current
          FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
          JOIN tasks t ON t.id = r.task_id AND t.status = 'REVIEW'
+         JOIN projects p ON p.id = r.project_id
          JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
          JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = d.patch_hash
          JOIN LATERAL (SELECT payload FROM execution_events WHERE run_id = r.id AND kind = 'result'
            AND payload->>'patchHash' = d.patch_hash ORDER BY sequence DESC LIMIT 1) e ON true
-         WHERE d.run_id = $1`, [runId],
+         WHERE d.run_id = $1`, [runId, autoApprovalActor.id],
       );
       if (!work) return null;
       const gate = executionQualityGate(work, work.patchHash);
-      if (gate && (!gate.ready || !work.current)) {
+      let failure: string | undefined;
+      if ((gate && !gate.ready) || ((gate || work.automaticApproval) && !work.current)) failure = 'quality_gate';
+      if (work.automaticApproval && !work.autoApprovalEnabled) failure = 'auto_approval_disabled';
+      if (work.automaticApproval && work.autoApprovalAttempts >= 2) failure = 'auto_approval_lease_expired';
+      if (failure) {
         await client.query(
-          `UPDATE execution_deliveries SET state = 'failed', error = 'quality_gate', lease_id = NULL,
-             lease_expires_at = NULL, updated_at = now() WHERE run_id = $1`, [work.runId],
+          `UPDATE execution_deliveries SET state = 'failed', error = $2, lease_id = NULL,
+             lease_expires_at = NULL, updated_at = now() WHERE run_id = $1`, [work.runId, failure],
         );
+        if (work.automaticApproval) this.logAutoApprovalFailure(work, failure);
         return null;
       }
       await client.query(
         `UPDATE execution_deliveries SET state = 'publishing', lease_id = $2,
-           lease_expires_at = now() + interval '4 minutes', updated_at = now() WHERE run_id = $1`,
-        [work.runId, lease],
+           lease_expires_at = now() + interval '4 minutes', updated_at = now(),
+           auto_approval_attempts = auto_approval_attempts + CASE WHEN $3 THEN 1 ELSE 0 END WHERE run_id = $1`,
+        [work.runId, lease, work.automaticApproval],
       );
       return { ...work, lease };
     });
@@ -288,13 +302,19 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       const code = error instanceof DeliveryError ? error.code : 'github_failed';
       if (!this.stopping.signal.aborted) {
-        await this.db.projectQuery(work.projectId,
-          `UPDATE execution_deliveries SET state = 'failed', error = $3, updated_at = now(),
+        const retry = work.automaticApproval && work.autoApprovalAttempts === 0 && error instanceof TransientGitHubError;
+        const updated = await this.db.projectQuery(work.projectId,
+          `UPDATE execution_deliveries SET state = $4, error = $3, updated_at = now(),
              lease_id = NULL, lease_expires_at = NULL WHERE run_id = $1 AND lease_id = $2`,
-          [work.runId, work.lease, code],
+          [work.runId, work.lease, retry ? null : code, retry ? 'queued' : 'failed'],
         );
+        if (updated.rowCount && work.automaticApproval && !retry) this.logAutoApprovalFailure(work, code);
       }
     }
+  }
+
+  private logAutoApprovalFailure(work: Pick<Publication, 'projectId' | 'taskId' | 'runId'>, reason: string) {
+    this.log.warn(`Automatic approval delivery failed: project=${work.projectId} task=${work.taskId} run=${work.runId} reason=${reason}`);
   }
 
   private async markMerged(client: PoolClient, task: Task, runId: string, pullNumber: number) {
@@ -305,6 +325,17 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     );
     if (!changed.rowCount) return;
     await this.tasks.event(client, task, 'task.status_changed', { from: 'REVIEW', to: 'MERGED', runId, pullNumber });
+    const { rows: [automatic] } = await client.query<{ entryId: string }>(
+      `SELECT h.auto_approval_entry AS "entryId"
+       FROM execution_reviews h JOIN execution_deliveries d ON d.run_id = h.run_id
+       WHERE h.run_id = $1 AND d.requested_by = $2 AND h.auto_approval_entry IS NOT NULL`,
+      [runId, autoApprovalActor.id],
+    );
+    if (automatic) {
+      await this.tasks.event(client, task, 'task.auto_approval_succeeded',
+        { entryId: automatic.entryId, actorId: autoApprovalActor.id, from: 'REVIEW', to: 'MERGED', runId });
+      await this.projects.audit(client, autoApprovalActor.id, projectId, 'execution.auto_approval_succeeded', runId);
+    }
     await client.query(`UPDATE tasks SET status = 'COMPLETED', updated_at = now() WHERE project_id = $1 AND id = $2`,
       [projectId, taskId]);
     await this.tasks.event(client, task, 'task.status_changed', { from: 'MERGED', to: 'COMPLETED', runId, pullNumber });

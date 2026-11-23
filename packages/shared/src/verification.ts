@@ -63,6 +63,7 @@ export interface VerificationReport {
 }
 
 export interface ExecutionReview {
+  automatic?: boolean;
   decision: 'approved' | 'rejected';
   comment: string;
   reviewer: string;

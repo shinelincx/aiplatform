@@ -113,6 +113,22 @@ assert.equal((await request(fitbestPath, {
   token: admin, method: 'PATCH', body: { description: 'Updated by owner' },
 })).description, 'Updated by owner');
 
+const autoApproval = (path, token, body) => request(`${path}/auto-approval`,
+  body === undefined ? { token } : { method: 'PUT', token, body });
+const disabled = { READY: false, REVIEW: false };
+const enabled = { READY: true, REVIEW: true };
+assert.deepEqual(await autoApproval(fitbestPath, viewer), disabled);
+assert.deepEqual(await autoApproval(fitbestPath, admin, enabled), enabled);
+assert.deepEqual(await autoApproval(fitbestPath, admin), enabled);
+assert.deepEqual(await autoApproval(adoPath, admin), disabled);
+await request(`${fitbestPath}/auto-approval`, { token: viewer, method: 'PUT', body: disabled, status: 403 });
+await request(`${adoPath}/auto-approval`, { token: viewer, method: 'PUT', body: enabled, status: 404 });
+await request(`${fitbestPath}/auto-approval`, {
+  token: admin, method: 'PUT', body: { ...disabled, QUEUED: true }, status: 400,
+});
+assert.deepEqual(await autoApproval(fitbestPath, admin), enabled);
+assert.deepEqual(await autoApproval(fitbestPath, admin, disabled), disabled);
+
 const createTask = (projectPath, code, links = {}) => request(`${projectPath}/tasks`, {
   token: admin, method: 'POST', status: 201,
   body: { code, title: code, description: 'Integration task', acceptanceCriteria: ['Check test result'], ...links },

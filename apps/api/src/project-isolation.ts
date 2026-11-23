@@ -153,7 +153,7 @@ export const runtimePermissions = `
   GRANT EXECUTE ON FUNCTION ado_private.project_scope(), ado_private.member_projects(uuid, uuid),
     ado_private.worker_has_active_project(uuid), ado_private.worker_run_project(uuid, text, uuid),
     ado_private.worker_candidate(uuid, text, uuid), ado_private.expired_execution(), ado_private.planning_candidate(),
-    ado_private.qa_candidate(), ado_private.delivery_candidate(), ado_private.webhook_project(bigint, bigint) TO ado_api;
+    ado_private.qa_candidate(), ado_private.delivery_candidate(), ado_private.auto_approval_candidate(), ado_private.webhook_project(bigint, bigint) TO ado_api;
   GRANT SELECT ON public.schema_migrations TO ado_api;
   GRANT SELECT, INSERT ON public.users, public.audit_logs, public.task_events, public.project_agent_versions,
     public.execution_events, public.execution_reviews, public.execution_artifacts, public.github_webhook_deliveries TO ado_api;

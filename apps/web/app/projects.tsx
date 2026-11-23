@@ -1,6 +1,6 @@
-import type { Account, Project, ProjectMember, ProjectOverview } from '@ado/shared';
+import type { Account, AutoApprovalSettings, Project, ProjectMember, ProjectOverview } from '@ado/shared';
 import Link from 'next/link';
-import { archiveProject, changeMember, updateProject } from './actions';
+import { archiveProject, changeMember, saveAutoApproval, updateProject } from './actions';
 import { ActionDialog } from './console-controls';
 import { Icon } from './icons';
 import { RefreshExecution } from './refresh-execution';
@@ -12,8 +12,9 @@ const alertNames: Record<ProjectOverview['alerts'][number]['kind'], string> = {
   qa: 'QA 审查失败', delivery: 'PR 发布失败',
 };
 
-export function ProjectDetails({ project, members, users, overview, live, reachable }: {
+export function ProjectDetails({ project, members, users, overview, live, reachable, autoApproval }: {
   project: Project;
+  autoApproval: AutoApprovalSettings | null;
   members: ProjectMember[];
   users: Account[];
   overview: ProjectOverview | null;
@@ -71,6 +72,15 @@ export function ProjectDetails({ project, members, users, overview, live, reacha
               <div className="form-actions"><button>保存项目</button></div>
             </form>
           </ActionDialog>}
+          <ActionDialog title="自动审批" actionKey="auto-approval">
+            {autoApproval ? <form className="fields" action={saveAutoApproval}>
+              <input type="hidden" name="projectId" value={project.id} />
+              <label><input type="checkbox" role="switch" name="READY" defaultChecked={autoApproval.READY} disabled={!canEdit} /> 待派发</label>
+              <label><input type="checkbox" role="switch" name="REVIEW" defaultChecked={autoApproval.REVIEW} disabled={!canEdit} /> 待评审</label>
+              <p>开关对之后进入节点的任务生效。待评审还需启用仓库的自动草稿 PR，合并确认后记为审批成功。</p>
+              {canEdit && <div className="form-actions"><button>保存自动审批</button></div>}
+            </form> : <p>无法读取自动审批设置。</p>}
+          </ActionDialog>
           {project.role === 'owner' && <ActionDialog title="项目成员" actionKey="project-members">
             <ul className="member-list">
               {members.map((member) => (

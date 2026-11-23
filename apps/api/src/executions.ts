@@ -6,12 +6,13 @@ import {
 import type { PoolClient } from 'pg';
 import {
   canRepair, canTransitionTask, checkFailureStatuses, independentCheckStatuses, isWorkerId, maxVerificationAttempts,
-  parseDecisionQuestions, workerOfflineMs, type Account,
+  parseDecisionQuestions, workerOfflineMs, type Account, type AutoApprovalSettings,
   type CheckFailureReason, type CheckResult,
   type AgentAssignment, type DevelopmentHandoff, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type ReviewEvidence,
   type Task, type TaskStatus, type VerificationCheck, type VerificationReport, type WorkerRecovery,
 } from '@ado/shared';
 import { CurrentAccount, SessionGuard } from './auth';
+import { autoApprovalActor, readAutoApproval } from './auto-approval';
 import { Database } from './database';
 import { DeliveriesService } from './deliveries';
 import { GitHubApp } from './github';
@@ -184,6 +185,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   onModuleInit() {
     this.reaper = setInterval(() => {
       void this.expire().catch(() => this.log.warn('Execution lease sweep failed'));
+      void this.approveNext().catch(() => this.log.warn('Automatic approval sweep failed'));
     }, 5000).unref();
   }
 
@@ -196,7 +198,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const { rows } = await this.db.projectQuery<ExecutionRun>(projectId,
       `SELECT ${runColumns}, ${runFailure} AS failure,
          (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
-         'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
+         'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at, 'automatic', e.auto_approval_entry IS NOT NULL) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
            WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
          (SELECT jsonb_build_object('state', q.state, 'patchHash', q.patch_hash, 'partialPatch', q.partial_patch,
@@ -228,73 +230,84 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     if (revisionOf != null && !isWorkerId(revisionOf)) throw new BadRequestException('Invalid rejected execution ID');
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
-      const task = await this.tasks.find(projectId, taskId, client);
-      const revising = task.status === 'REJECTED';
-      if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT', 'TESTING', 'REJECTED'].includes(task.status)
-        || revising !== Boolean(revisionOf)) {
-        throw new ConflictException('An approved task and bound repository are required');
-      }
-      if (!task.acceptanceCriteria.length) throw new ConflictException('Acceptance criteria are required');
-      requireTaskDecisions(task);
-      const { rows: [prior] } = task.status !== 'READY' || task.decisions?.length ? await client.query<{
-        id: string; repositoryId: string; patchHash: string | null; decision: string | null; comment: string | null;
-        development: DevelopmentHandoff | null; qa: AgentAssignment | null;
-      }>(
-        `SELECT r.id, r.repository_id AS "repositoryId", r.verification_report->>'patchHash' AS "patchHash",
-           h.decision, h.comment, r.developer_assignment AS development, r.qa_assignment AS qa
-         FROM execution_runs r LEFT JOIN execution_reviews h ON h.run_id = r.id
-         WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, [projectId, taskId],
-      ) : { rows: [] };
-      if (revising && (!prior || prior.id !== revisionOf || prior.repositoryId !== task.repositoryId
-        || prior.decision !== 'rejected' || !prior.patchHash || !prior.comment)) {
-        throw new ConflictException('Only the latest rejected candidate can be sent back for revision');
-      }
-      if (task.status === 'TESTING') {
-        const { rows: [previous] } = await client.query<{ status: string; hasReport: boolean; configured: boolean }>(
-          `SELECT r.status, r.verification_report IS NOT NULL AS "hasReport",
-             jsonb_array_length(g.check_plan) > 0 AS configured
-           FROM execution_runs r JOIN repositories g ON g.project_id = r.project_id AND g.id = $3
-           WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
-          [projectId, taskId, task.repositoryId],
-        );
-        if (previous?.status !== 'succeeded' || previous.hasReport || !previous.configured) {
-          throw new ConflictException('Configure repository checks to rerun an unverified candidate');
-        }
-      }
-      if (task.status === 'FAILED' || task.status === 'TIMEOUT') {
-        await this.move(client, task, 'RETRYING', { actorId: actor.id });
-        task.status = 'RETRYING';
-      }
-      const planned = await this.tasks.plannedDevelopment(client, task);
-      const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);
-      const existing = (revising || prior?.development?.revision) ? prior?.development : null;
-      const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
-        ...(planned?.requirement && { requirement: planned.requirement }), ...(planned?.knowledge && { knowledge: planned.knowledge }) };
-      if (existing && task.status === 'READY') handoff.agent = agent;
-      if (task.decisions?.length) {
-        handoff.decisions = task.decisions.flatMap(({ question, answer }) => answer ? [{ question, answer }] : []);
-      }
-      if (revising && prior?.patchHash && prior.comment) {
-        handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
-      }
-      const { rows: [run] } = await client.query<ExecutionRun>(
-        `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, independent_checks, source_branch,
-           developer_assignment, qa_assignment)
-         SELECT $1, $2, id, check_plan, independent_checks, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
-         RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
-        [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
-      );
-      if (workerId || handoff.revision) {
-        await this.assignWorker(client, projectId, run.id, workerId, Boolean(handoff.revision));
-        run.requestedWorkerId = workerId;
-      }
-      await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
-        ...(workerId && { requestedWorkerId: workerId }),
-        ...(handoff.revision && { revisionOf: handoff.revision.runId, previousPatchHash: handoff.revision.patchHash }),
-        developer: handoff.agent.role, developerVersion: handoff.agent.version });
-      if (revising) await this.projects.audit(client, actor.id, projectId, 'execution.revision_queued', run.id);
-      return run;
+      return this.queueExecution(client, actor, projectId, taskId, workerId, revisionOf);
     });
+  }
+
+  private async queueExecution(client: PoolClient, actor: Pick<Account, 'id'>, projectId: string, taskId: string,
+    workerId: string | null, revisionOf: unknown, autoApprovalEntry?: string) {
+    const task = await this.tasks.find(projectId, taskId, client);
+    const revising = task.status === 'REJECTED';
+    if (autoApprovalEntry && task.status !== 'READY') throw new ConflictException('Task left READY');
+    if (task.archivedAt || !task.repositoryId || !['READY', 'FAILED', 'TIMEOUT', 'TESTING', 'REJECTED'].includes(task.status)
+      || revising !== Boolean(revisionOf)) {
+      throw new ConflictException('An approved task and bound repository are required');
+    }
+    if (!task.acceptanceCriteria.length) throw new ConflictException('Acceptance criteria are required');
+    requireTaskDecisions(task);
+    const { rows: [prior] } = task.status !== 'READY' || task.decisions?.length ? await client.query<{
+      id: string; repositoryId: string; patchHash: string | null; decision: string | null; comment: string | null;
+      development: DevelopmentHandoff | null; qa: AgentAssignment | null;
+    }>(
+      `SELECT r.id, r.repository_id AS "repositoryId", r.verification_report->>'patchHash' AS "patchHash",
+         h.decision, h.comment, r.developer_assignment AS development, r.qa_assignment AS qa
+       FROM execution_runs r LEFT JOIN execution_reviews h ON h.run_id = r.id
+       WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, [projectId, taskId],
+    ) : { rows: [] };
+    if (revising && (!prior || prior.id !== revisionOf || prior.repositoryId !== task.repositoryId
+      || prior.decision !== 'rejected' || !prior.patchHash || !prior.comment)) {
+      throw new ConflictException('Only the latest rejected candidate can be sent back for revision');
+    }
+    if (task.status === 'TESTING') {
+      const { rows: [previous] } = await client.query<{ status: string; hasReport: boolean; configured: boolean }>(
+        `SELECT r.status, r.verification_report IS NOT NULL AS "hasReport",
+           jsonb_array_length(g.check_plan) > 0 AS configured
+         FROM execution_runs r JOIN repositories g ON g.project_id = r.project_id AND g.id = $3
+         WHERE r.project_id = $1 AND r.task_id = $2 ORDER BY r.created_at DESC, r.id DESC LIMIT 1`,
+        [projectId, taskId, task.repositoryId],
+      );
+      if (previous?.status !== 'succeeded' || previous.hasReport || !previous.configured) {
+        throw new ConflictException('Configure repository checks to rerun an unverified candidate');
+      }
+    }
+    if (task.status === 'FAILED' || task.status === 'TIMEOUT') {
+      await this.move(client, task, 'RETRYING', { actorId: actor.id });
+      task.status = 'RETRYING';
+    }
+    const planned = await this.tasks.plannedDevelopment(client, task);
+    const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);
+    const existing = (revising || prior?.development?.revision) ? prior?.development : null;
+    const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
+      ...(planned?.requirement && { requirement: planned.requirement }), ...(planned?.knowledge && { knowledge: planned.knowledge }) };
+    if (existing && task.status === 'READY') handoff.agent = agent;
+    if (task.decisions?.length) {
+      handoff.decisions = task.decisions.flatMap(({ question, answer }) => answer ? [{ question, answer }] : []);
+    }
+    if (revising && prior?.patchHash && prior.comment) {
+      handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
+    }
+    const { rows: [run] } = await client.query<ExecutionRun>(
+      `INSERT INTO execution_runs (project_id, task_id, repository_id, check_plan, independent_checks, source_branch,
+         developer_assignment, qa_assignment)
+       SELECT $1, $2, id, check_plan, independent_checks, default_branch, $4, $5 FROM repositories WHERE project_id = $1 AND id = $3
+       RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
+      [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
+    );
+    if (workerId || handoff.revision) {
+      await this.assignWorker(client, projectId, run.id, workerId, Boolean(handoff.revision));
+      run.requestedWorkerId = workerId;
+    }
+    await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
+      ...(workerId && { requestedWorkerId: workerId }),
+      ...(handoff.revision && { revisionOf: handoff.revision.runId, previousPatchHash: handoff.revision.patchHash }),
+      developer: handoff.agent.role, developerVersion: handoff.agent.version });
+    if (autoApprovalEntry) {
+      await this.tasks.event(client, task, 'task.auto_approval_succeeded',
+        { entryId: autoApprovalEntry, actorId: actor.id, from: 'READY', to: 'QUEUED', runId: run.id });
+      await this.projects.audit(client, actor.id, projectId, 'execution.auto_approval_succeeded', run.id);
+    }
+    if (revising) await this.projects.audit(client, actor.id, projectId, 'execution.revision_queued', run.id);
+    return run;
   }
 
   private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null, revision: boolean) {
@@ -337,40 +350,60 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     if (decision === 'rejected' && !comment) throw new BadRequestException('Rejection needs a reason');
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
-      const { rows: [run] } = await client.query<ExecutionRun>(
-        `SELECT ${runColumns} FROM execution_runs WHERE project_id = $1 AND task_id = $2
-         ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [projectId, taskId],
+      return this.reviewExecution(client, actor, projectId, taskId, runId, decision, comment);
+    });
+  }
+
+  private async reviewExecution(client: PoolClient, actor: Pick<Account, 'id' | 'name'>, projectId: string,
+    taskId: string, runId: string, decision: 'approved' | 'rejected', comment: string, autoApprovalEntry?: string) {
+    const { rows: [run] } = await client.query<ExecutionRun>(
+      `SELECT ${runColumns} FROM execution_runs WHERE project_id = $1 AND task_id = $2
+       ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`, [projectId, taskId],
+    );
+    if (!run || run.id !== runId) throw new NotFoundException('Current execution run not found');
+    if (decision === 'approved' && run.independentChecks?.length) {
+      const { rows: [archive] } = await client.query<{ sha256: string }>(
+        'SELECT sha256 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2', [runId, run.report?.patchHash],
       );
-      if (!run || run.id !== runId) throw new NotFoundException('Current execution run not found');
-      if (decision === 'approved' && run.independentChecks?.length) {
-        const { rows: [archive] } = await client.query<{ sha256: string }>(
-          'SELECT sha256 FROM execution_artifacts WHERE run_id = $1 AND sha256 = $2', [runId, run.report?.patchHash],
-        );
-        requireQualityGate(run, archive?.sha256);
-      }
-      const { rows: [existing] } = await client.query<ExecutionReview>(
-        `SELECT decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"
-         FROM execution_reviews WHERE run_id = $1`, [runId],
-      );
-      if (existing) {
-        if (existing.decision === decision && existing.comment === comment) return existing;
-        throw new ConflictException('The execution has already been reviewed');
-      }
-      const task = await this.tasks.find(projectId, taskId, client);
-      if (task.status !== 'REVIEW' || run.status !== 'succeeded' || !run.report?.passed) {
-        throw new ConflictException('Only a tested candidate in review can be approved or rejected');
-      }
-      const { rows: [saved] } = await client.query<ExecutionReview>(
-        `INSERT INTO execution_reviews (run_id, reviewer_id, reviewer_name, decision, comment)
-         VALUES ($1,$2,$3,$4,$5) RETURNING decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"`,
-        [runId, actor.id, actor.name, decision, comment],
+      requireQualityGate(run, archive?.sha256);
+    }
+    const { rows: [existing] } = await client.query<ExecutionReview>(
+      `SELECT decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"
+       FROM execution_reviews WHERE run_id = $1`, [runId],
+    );
+    if (existing) {
+      if (!autoApprovalEntry && existing.decision === decision && existing.comment === comment) return existing;
+      throw new ConflictException('The execution has already been reviewed');
+    }
+    const task = await this.tasks.find(projectId, taskId, client);
+    if ((autoApprovalEntry && task.archivedAt) || task.status !== 'REVIEW' || run.status !== 'succeeded' || !run.report?.passed) {
+      throw new ConflictException('Only a tested candidate in review can be approved or rejected');
+    }
+    const { rows: [saved] } = await client.query<ExecutionReview>(
+      `INSERT INTO execution_reviews (run_id, reviewer_id, reviewer_name, decision, comment, auto_approval_entry)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING decision, comment, reviewer_name AS reviewer, reviewed_at AS "reviewedAt"`,
+      [runId, actor.id, actor.name, decision, comment, autoApprovalEntry ?? null],
+    );
+    if (autoApprovalEntry) {
+      const repository = await client.query(
+        'SELECT 1 FROM repositories WHERE project_id = $1 AND id = $2 AND auto_draft_pr', [projectId, task.repositoryId]);
+      if (!repository.rowCount) throw new ConflictException('Repository automatic draft PR is disabled');
+      if (!this.github.configured) throw new ConflictException('GitHub delivery is not configured');
+      const delivery = await this.deliveries.enqueueApproved(client, actor.id, task, runId, true);
+      if (!delivery) throw new ConflictException('Candidate requires a tested and archived patch');
+      await this.tasks.event(client, task, 'task.auto_approval_pending_delivery',
+        { entryId: autoApprovalEntry, actorId: actor.id, from: 'REVIEW', runId });
+    } else {
+      await client.query(
+        'UPDATE tasks SET auto_approval_entry = NULL WHERE project_id = $1 AND id = $2 AND auto_approval_entry IS NOT NULL',
+        [projectId, taskId],
       );
       await this.tasks.event(client, task, 'task.execution_reviewed', { runId, actorId: actor.id, decision });
       await this.projects.audit(client, actor.id, projectId, 'execution.reviewed', runId);
       if (decision === 'rejected') await this.move(client, task, 'REJECTED', { runId, actorId: actor.id });
       else await this.deliveries.enqueueApproved(client, actor.id, task, runId, true);
-      return saved;
-    });
+    }
+    return saved;
   }
 
   async addEvidence(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
@@ -637,6 +670,48 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           : event.payload.code === 'worker_timeout' ? 'timed_out' : 'failed');
       }
       return { stop: false, accepted: true };
+    });
+  }
+
+  private async approveNext() {
+    await this.db.transaction(async (client) => {
+      const taskId = await this.db.nextProjectJob(client, 'auto_approval_candidate');
+      if (!taskId) return;
+      const { rows: [entry] } = await client.query<{
+        id: string; projectId: string; node: keyof AutoApprovalSettings; runId?: string; attempts: number;
+      }>(`SELECT t.auto_approval_entry AS id, t.project_id AS "projectId", t.status AS node,
+          e.payload->>'runId' AS "runId", t.auto_approval_attempts AS attempts
+        FROM tasks t JOIN task_events e ON e.project_id = t.project_id AND e.task_id = t.id
+          AND e.id = t.auto_approval_entry AND e.payload->>'to' = t.status
+        WHERE t.id = $1 AND t.archived_at IS NULL`, [taskId]);
+      if (!entry) return;
+      const { id, projectId, node, runId } = entry;
+      const { rows: [settings] } = await client.query<AutoApprovalSettings>(readAutoApproval, [projectId]);
+      let retry = false;
+      if (settings?.[node]) {
+        await client.query('SAVEPOINT auto_approval');
+        try {
+          if (node === 'READY') await this.queueExecution(client, autoApprovalActor, projectId, taskId, null, null, id);
+          if (node === 'REVIEW') {
+            if (!runId) throw new ConflictException('Review entry is missing an execution ID');
+            await this.reviewExecution(client, autoApprovalActor, projectId, taskId, runId, 'approved', 'Automatic approval', id);
+          }
+        } catch (error) {
+          await client.query('ROLLBACK TO SAVEPOINT auto_approval');
+          const code = typeof error === 'object' && error && 'code' in error ? error.code : undefined;
+          retry = entry.attempts === 0 && (code === '40001' || code === '40P01' || code === '55P03');
+          if (!retry) {
+            const reason = error instanceof ConflictException || error instanceof NotFoundException
+              ? error.message : 'transition_failed';
+            this.log.warn(`Automatic approval failed: project=${projectId} task=${taskId} entry=${id} node=${node} reason=${reason}`);
+            const task = await this.tasks.find(projectId, taskId, client);
+            await this.tasks.event(client, task, 'task.auto_approval_failed',
+              { entryId: id, actorId: autoApprovalActor.id, node, runId, reason });
+          }
+        }
+      }
+      await client.query(`UPDATE tasks SET auto_approval_entry = CASE WHEN $3 THEN auto_approval_entry END,
+        auto_approval_attempts = auto_approval_attempts + 1 WHERE id = $1 AND auto_approval_entry = $2`, [taskId, id, retry]);
     });
   }
 

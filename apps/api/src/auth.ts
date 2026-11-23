@@ -8,6 +8,7 @@ import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Account, Session } from '@ado/shared';
 import type { PoolClient } from 'pg';
+import { autoApprovalActor } from './auto-approval';
 import { Database, isUniqueViolation } from './database';
 import { emailInput, objectInput, passwordInput, textInput } from './input';
 
@@ -183,6 +184,7 @@ export class AuthService implements OnApplicationBootstrap {
 
   async updateUser(actor: Account, id: string, body: unknown) {
     this.requireAdmin(actor);
+    if (id === autoApprovalActor.id) throw new ForbiddenException('System identity is managed by ADO');
     const input = accountInput(body, ['name', 'systemRole']);
     const name = textInput(input.name, 'name', 100);
     const role = systemRoleInput(input.systemRole);

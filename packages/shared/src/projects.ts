@@ -15,6 +15,11 @@ export interface Session {
 
 export type ProjectRole = 'owner' | 'member' | 'viewer';
 
+export interface AutoApprovalSettings {
+  READY: boolean;
+  REVIEW: boolean;
+}
+
 export interface Project {
   id: string;
   code: string;

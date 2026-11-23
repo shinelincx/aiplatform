@@ -1,5 +1,6 @@
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { autoApprovalActor } from './auto-approval';
 import { projectIsolation, runtimePermissions } from './project-isolation';
 
 const migrations = [
@@ -354,6 +355,46 @@ const migrations = [
   CREATE POLICY project_scope ON project_model_rate_versions USING (project_id = ado_private.project_scope());
   ALTER TABLE project_monthly_budgets ENABLE ROW LEVEL SECURITY;
   CREATE POLICY project_scope ON project_monthly_budgets USING (project_id = ado_private.project_scope());`,
+  `INSERT INTO users (id, email, name, password_hash, system_role, status)
+    VALUES ('${autoApprovalActor.id}', 'auto-approval@ado.invalid', '${autoApprovalActor.name}',
+      'disabled:' || repeat('00', 64), 'user', 'disabled');
+  ALTER TABLE users ADD CONSTRAINT auto_approval_non_login
+    CHECK (id <> '${autoApprovalActor.id}' OR (status = 'disabled' AND system_role = 'user'));
+  ALTER TABLE tasks ADD COLUMN auto_approval_entry bigint,
+    ADD COLUMN auto_approval_attempts integer NOT NULL DEFAULT 0;
+  CREATE INDEX tasks_auto_approval_pending ON tasks (project_id, auto_approval_entry)
+    WHERE auto_approval_entry IS NOT NULL;
+  ALTER TABLE execution_reviews ADD COLUMN auto_approval_entry bigint;
+  ALTER TABLE execution_deliveries ADD COLUMN auto_approval_attempts integer NOT NULL DEFAULT 0;
+
+  -- The status event is the entry identifier. Neither migrations nor settings writes replay existing entries.
+  CREATE FUNCTION ado_private.capture_auto_approval_entry() RETURNS trigger
+    LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+    DECLARE node text := NEW.payload->>'to';
+    BEGIN
+      UPDATE public.tasks t SET
+        auto_approval_entry = CASE
+          WHEN node IN ('READY', 'REVIEW') AND p.status = 'active'
+            AND p.settings->'autoApproval'->node = 'true'::jsonb THEN NEW.id END,
+        auto_approval_attempts = 0
+      FROM public.projects p
+      WHERE p.id = NEW.project_id AND t.project_id = p.id AND t.id = NEW.task_id
+        AND t.status = node AND (node IN ('READY', 'REVIEW') OR t.auto_approval_entry IS NOT NULL);
+      RETURN NEW;
+    END
+    $$;
+  CREATE CONSTRAINT TRIGGER capture_auto_approval_entry AFTER INSERT ON task_events
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.event_type = 'task.status_changed'
+      AND (NEW.payload->>'from') IS DISTINCT FROM (NEW.payload->>'to'))
+    EXECUTE FUNCTION ado_private.capture_auto_approval_entry();
+
+  CREATE FUNCTION ado_private.auto_approval_candidate() RETURNS TABLE (id uuid, project_id uuid)
+    LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+      SELECT t.id, t.project_id FROM public.tasks t
+      JOIN public.projects p ON p.id = t.project_id AND p.status = 'active'
+      WHERE t.status IN ('READY', 'REVIEW') AND t.auto_approval_entry IS NOT NULL AND t.archived_at IS NULL
+      ORDER BY t.auto_approval_entry LIMIT 1 FOR UPDATE OF p SKIP LOCKED
+    $$;`,
 ];
 
 function connect(user: string) {
@@ -463,7 +504,7 @@ export class Database implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  async nextProjectJob(client: PoolClient, source: 'planning_candidate' | 'qa_candidate' | 'delivery_candidate' | 'expired_execution') {
+  async nextProjectJob(client: PoolClient, source: 'planning_candidate' | 'qa_candidate' | 'delivery_candidate' | 'expired_execution' | 'auto_approval_candidate') {
     const { rows: [job] } = await client.query<{ id: string; project_id: string }>(`SELECT * FROM ado_private.${source}()`);
     if (!job) return null;
     await this.bindProject(client, job.project_id);
