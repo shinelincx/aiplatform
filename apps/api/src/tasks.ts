@@ -353,23 +353,27 @@ export class TasksService {
   async archive(actor: Account, projectId: string, id: string) {
     await this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
-      const task = await this.find(projectId, id, client);
-      if (task.archivedAt) return;
-      if (!['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status)) {
-        throw new ConflictException('Only draft, cancelled or completed tasks can be archived');
-      }
-      const blocked = await client.query(
-        `SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
-         WHERE d.project_id = $1 AND d.depends_on_task_id = $2
-           AND t.archived_at IS NULL AND t.status NOT IN ('COMPLETED', 'CANCELLED') LIMIT 1`, [projectId, id],
-      );
-      if (task.status !== 'COMPLETED' && blocked.rowCount) {
-        throw new ConflictException('An active task depends on this task');
-      }
-      await client.query('UPDATE tasks SET archived_at = now(), updated_at = now() WHERE project_id = $1 AND id = $2',
-        [projectId, id]);
-      await this.event(client, task, 'task.archived', { actorId: actor.id });
+      await this.archiveTask(client, await this.find(projectId, id, client), actor.id);
     });
+  }
+
+  async archiveTask(client: PoolClient, task: Task, actorId: string) {
+    const { projectId, id } = task;
+    if (task.archivedAt) return;
+    if (!['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status)) {
+      throw new ConflictException('Only draft, cancelled or completed tasks can be archived');
+    }
+    const blocked = await client.query(
+      `SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
+       WHERE d.project_id = $1 AND d.depends_on_task_id = $2
+         AND t.archived_at IS NULL AND t.status NOT IN ('COMPLETED', 'CANCELLED') LIMIT 1`, [projectId, id],
+    );
+    if (task.status !== 'COMPLETED' && blocked.rowCount) {
+      throw new ConflictException({ code: 'task_archive_dependency', message: 'An active task depends on this task' });
+    }
+    await client.query('UPDATE tasks SET archived_at = now(), updated_at = now() WHERE project_id = $1 AND id = $2',
+      [projectId, id]);
+    await this.event(client, task, 'task.archived', { actorId });
   }
 
   async event(client: PoolClient, task: Task, eventType: string, payload: object) {

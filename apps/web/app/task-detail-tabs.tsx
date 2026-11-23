@@ -21,7 +21,7 @@ const tabForHash: Record<string, TaskDetailTab> = {
   '#execution-heading': 'execution',
   '#task-events': 'activity',
 };
-const executionDialogs = ['dispatch', 'worker-assignment', 'independent-evidence', 'evidence', 'review', 'publish'];
+const executionDialogs = ['dispatch', 'worker-assignment', 'independent-evidence', 'evidence', 'review', 'publish', 'delivery-complete', 'delivery-cancel'];
 
 export function TaskDetailTabs({ initialTab, panels }: { initialTab: TaskDetailTab; panels: Record<TaskDetailTab, ReactNode> }) {
   const id = useId();
