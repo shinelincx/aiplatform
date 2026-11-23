@@ -137,6 +137,13 @@ export const projectIsolation = `
 
 // Reapply after a restore that deliberately omits cluster roles and ACLs.
 export const runtimePermissions = `
+  DROP POLICY IF EXISTS self_service_audit_write ON public.audit_logs;
+  CREATE POLICY self_service_audit_write ON public.audit_logs FOR INSERT WITH CHECK (
+    current_user = 'ado_api'
+    AND project_id IS NULL AND actor_id = resource_id AND actor_id::text = current_setting('ado.audit_account', true)
+    AND action IN ('user.profile_updated', 'user.password_changed')
+    AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = actor_id AND u.status = 'active')
+  );
   REVOKE CREATE ON SCHEMA public FROM PUBLIC;
   REVOKE ALL ON SCHEMA ado_private FROM PUBLIC;
   REVOKE ALL ON ALL FUNCTIONS IN SCHEMA ado_private FROM PUBLIC, ado_api;
@@ -150,6 +157,7 @@ export const runtimePermissions = `
   GRANT SELECT ON public.schema_migrations TO ado_api;
   GRANT SELECT, INSERT ON public.users, public.audit_logs, public.task_events, public.project_agent_versions,
     public.execution_events, public.execution_reviews, public.execution_artifacts, public.github_webhook_deliveries TO ado_api;
+  GRANT UPDATE (name, password_hash, updated_at) ON public.users TO ado_api;
   GRANT SELECT, INSERT, UPDATE ON public.projects, public.repositories, public.tasks, public.workers,
     public.execution_runs, public.execution_deliveries, public.project_agent_settings, public.project_skills,
     public.project_skill_versions, public.task_agent_plans, public.execution_qa, public.project_requirements,

@@ -45,7 +45,12 @@ jobs:
             -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt"
           echo "ADO_STAGING_TLS_DIR=$tls_dir" >> "$GITHUB_ENV"
           echo "CURL_CA_BUNDLE=$tls_dir/tls.crt" >> "$GITHUB_ENV"
-      - run: docker compose up --build --wait --wait-timeout 240
+      - name: Build the release image
+        run: |
+          docker build -t ado-platform-staging:local \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "io.ado.git.tree=$(git rev-parse 'HEAD^{tree}')" .
+      - run: docker compose up --no-build --wait --wait-timeout 240
       - run: docker compose exec -T api env API_BASE_URL=http://api:3101 npm run dev -w @ado/worker
       - name: Verify HTTPS workbench and WSS Worker
         run: |
@@ -105,6 +110,22 @@ jobs:
           bash scripts/probe-staging.sh https://127.0.0.1:23443
           docker compose -p ado-ci-restore exec -T -e ADO_VERIFY_MIGRATION_PASSWORD="$POSTGRES_PASSWORD" \
             api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-recovery.mjs
+      - name: Package the verified main release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir "$RUNNER_TEMP/ado-release"
+          cd "$RUNNER_TEMP/ado-release"
+          docker tag ado-platform-staging:local "ado-platform-release:$GITHUB_SHA"
+          docker save "ado-platform-release:$GITHUB_SHA" | gzip -1 > image.tar.gz
+          sha256sum image.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: ado-release-${{ github.sha }}
+          path: ${{ runner.temp }}/ado-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
       - if: failure()
         run: docker compose logs --no-color --tail 80
       - if: always()
