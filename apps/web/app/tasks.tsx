@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { agentRoleLabels, canTransitionTask, developerRoles, taskPriorities, type Project, type RepositoryBinding, type Task,
   type AgentPlan, type AgentRegistry, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
-import { archiveTask, saveTask, transitionTask } from './actions';
+import { archiveTask, saveTask, submitTaskDecisions, transitionTask } from './actions';
 import { PlanProgress } from './agents';
 import { read, readSection, type ReadIssue } from './api-client';
 import { Executions } from './executions';
@@ -13,7 +13,7 @@ import { ActionDialog, TaskDrawer } from './console-controls';
 import { Metric } from './dashboard';
 import { Icon } from './icons';
 import { TaskBoard } from './task-board';
-import { taskStatusLabels as statusLabels, workspaceHref } from './workspace';
+import { taskFailureLabel, taskStatusLabels as statusLabels, workspaceHref } from './workspace';
 
 const taskActions: { status: TaskStatus; label: string; ownerOnly?: boolean }[] = [
   { status: 'PLANNING', label: '进入规划' },
@@ -26,6 +26,7 @@ const editable = ['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED'];
 const canManageStates = [...editable, 'WAITING_APPROVAL', 'READY', 'FAILED', 'TIMEOUT'];
 const eventLabels: Record<string, string> = {
   'task.created': '创建', 'task.updated': '编辑', 'task.archived': '归档',
+  'task.decisions_submitted': '补充决策并送审',
   'agent.plan_queued': 'Agent 规划入队', 'agent.plan_started': 'Agent 规划开始',
   'agent.model_usage': '模型用量', 'agent.step_completed': '规划步骤完成',
   'agent.plan_failed': '规划失败', 'agent.plan_cancelled': '规划取消',
@@ -94,6 +95,9 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   ]);
   const manageRequirements = project.role === 'owner' && project.status === 'active';
   const plan = planning?.plan;
+  const pendingDecisions = task?.decisions?.filter(({ answer }) => !answer) ?? [];
+  const confirmedDecisions = task?.decisions?.filter(({ answer }) => Boolean(answer)) ?? [];
+  const failure = task && taskFailureLabel(task);
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
   const chooseDeveloper = manageRequirements && task?.status === 'WAITING_APPROVAL' && plan?.state !== 'completed';
   const registry = chooseDeveloper ? await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
@@ -153,8 +157,10 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
           </section>
         ))}
       </div> : <TaskBoard projectId={project.id} canWrite={canWrite} lane={lane}
-        items={tasks.map(({ id, code, title, status, priority, archivedAt, developer, repositoryId }) => ({
+        items={tasks.map(({ id, code, title, status, priority, archivedAt, developer, repositoryId, executionFailure, decisions }) => ({
           id, code, title, status, priority, archivedAt,
+          failure: executionFailure?.code === 'needs_decisions' ? null : taskFailureLabel({ status, executionFailure, decisions }),
+          pending: decisions?.filter(({ answer }) => !answer).length ?? 0,
           developerLabel: developer ? agentRoleLabels[developer.role] : undefined,
           repository: repositoryId ? repositoryNames.get(repositoryId) : undefined,
         }))} />}
@@ -187,6 +193,33 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
             </div>
             <span className="badge badge--lg" data-status={task.status}>{statusLabels[task.status]}</span>
           </header>
+
+          {failure && <p className="feedback" role="status"><strong>执行结果</strong> · {failure}</p>}
+          {(pendingDecisions.length > 0 || confirmedDecisions.length > 0) &&
+            <section id="task-decisions" className="decision-review" aria-labelledby="decision-heading">
+              <h4 id="decision-heading">{pendingDecisions.length ? '待人工确认' : '已记录的人工决策'}</h4>
+              {confirmedDecisions.length > 0 && <dl className="decision-answers">{confirmedDecisions.map(({ id, question, answer }) =>
+                <div key={id}><dt>{question}</dt><dd>{answer}</dd></div>)}</dl>}
+              {pendingDecisions.length > 0 && <>
+                <p className="warning-text">请明确以下事项并送审。项目所有者批准后才能派发。</p>
+                {canWrite && !task.archivedAt && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)
+                  ? <form action={submitTaskDecisions} className="fields">
+                    {taskIdentity}
+                    {pendingDecisions.map(({ id, question, options }, index) => <div className="decision-question" key={id}>
+                      <label>{question}
+                        <input name={`decision:${id}`} list={`decision-options-${index}`}
+                          aria-describedby={`decision-recommendation-${index}`} autoComplete="off"
+                          placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required />
+                      </label>
+                      <datalist id={`decision-options-${index}`}>{options.map((option) => <option key={option} value={option} />)}</datalist>
+                      <p className="muted" id={`decision-recommendation-${index}`}>推荐 · {options[0]}</p>
+                    </div>)}
+                    <div className="form-actions"><SubmitButton pendingLabel="正在提交…">补充决策并重新送审</SubmitButton></div>
+                  </form>
+                  : <ul>{pendingDecisions.map(({ id, question, options }) =>
+                    <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p></li>)}</ul>}
+              </>}
+            </section>}
 
           <nav className="detail-tabs" aria-label="任务详情导航">
             <a href="#task-summary">概览</a>
@@ -235,7 +268,7 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
                     </select></label> : <p className="warning-text">请先启用开发 Agent。</p>
                   )}
                   <button name="status" value={status} className={status === 'CANCELLED' ? 'btn-danger' : status === 'REJECTED' ? 'secondary' : undefined}
-                    disabled={status === 'READY' && chooseDeveloper && !developers.length}>{label}</button>
+                    disabled={status === 'READY' && (pendingDecisions.length > 0 || (chooseDeveloper && !developers.length))}>{label}</button>
                 </form>
               ))}
             </div>}
@@ -258,7 +291,8 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
               <ol className="timeline">
                 {events?.map(({ id, eventType, payload, createdAt }) => (
                   <li key={id}>
-                    <span>{typeof payload.to === 'string' && Object.hasOwn(statusLabels, payload.to)
+                    <span>{payload.to === 'READY' ? '批准方案 · 待派发'
+                      : typeof payload.to === 'string' && Object.hasOwn(statusLabels, payload.to)
                       ? statusLabels[payload.to as TaskStatus]
                       : eventLabels[eventType] ?? eventType}</span>
                     <time dateTime={createdAt}>{new Date(createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>

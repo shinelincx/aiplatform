@@ -50,6 +50,7 @@ function offerInput(value: unknown): ExecutionOffer {
     || (offer.archivePatch !== undefined && typeof offer.archivePatch !== 'boolean')
     || (offer.detailedEvents !== undefined && offer.detailedEvents !== true)
     || (offer.turnUsage !== undefined && offer.turnUsage !== true)
+    || (offer.decisionReporting !== undefined && offer.decisionReporting !== true)
     || !Array.isArray(offer.acceptanceCriteria) || !offer.acceptanceCriteria.every((item) => typeof item === 'string')
     || (offer.repositoryToken !== undefined && typeof offer.repositoryToken !== 'string')) {
     throw new Error('Invalid execution offer');

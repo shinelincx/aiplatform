@@ -8,6 +8,7 @@ import { read, readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
 import { RefreshExecution } from './refresh-execution';
 import { SubmitButton } from './task-feedback';
+import { executionFailureLabels } from './workspace';
 
 const stateLabels: Record<ExecutionRun['status'], string> = {
   queued: '等待 Worker', running: '执行中', succeeded: '变更已生成，待测试',
@@ -15,15 +16,7 @@ const stateLabels: Record<ExecutionRun['status'], string> = {
 };
 const eventLabels: Record<string, string> = {
   checkout: '准备 Git 工作区', inference: '调用 Codex', collecting: '收集变更',
-  source_unavailable: '无法检出仓库', sandbox_rejected: '环境隔离检查未通过',
-  revision_source_unavailable: '无法恢复前序补丁，请检查归档完整性和仓库基线',
-  codex_failed: 'Codex 执行失败', no_changes: 'Codex 未生成代码变更',
-  worker_timeout: 'Worker 执行超时', worker_error: 'Worker 处理失败',
-  worker_restarted: 'Worker 重启时执行尚未完成',
-  npm_cache_unavailable: '无法准备仓库的 npm 缓存',
-  maven_cache_unavailable: '无法准备仓库的 Maven 缓存',
-  repair: '根据检查结果修复', checks_changed_candidate: '测试改动了待审核补丁',
-  artifact_upload_failed: '补丁归档失败',
+  ...executionFailureLabels, repair: '根据检查结果修复',
   agent_message: 'Codex 回复', command_execution: '命令执行', file_change: '文件变更', mcp_tool_call: 'MCP 工具调用',
 };
 function label(event: ExecutionEvent) {
@@ -137,7 +130,8 @@ export async function Executions({ project, task, checks, independentChecks, aut
   const canManageQa = owner && project.status === 'active' && task.status === 'TESTING';
   const awaitingChecks = task.status === 'TESTING' && latest?.status === 'succeeded' && !latest.report;
   const revising = task.status === 'REJECTED' && latest?.review?.decision === 'rejected' && latest.report?.passed;
-  const needsRevisionArtifact = revising || (task.status !== 'READY' && latest?.revision);
+  const pendingDecisions = task.decisions?.filter(({ answer }) => !answer) ?? [];
+  const needsRevisionArtifact = revising || (latest?.revision && (task.status !== 'READY' || task.decisions?.length));
   const canStart = owner && project.status === 'active' && !task.archivedAt && task.repositoryId
     && (['READY', 'FAILED', 'TIMEOUT'].includes(task.status) || revising || (awaitingChecks && hasChecks));
   const candidates = workersResult.data?.filter(({ status, capabilities }) =>
@@ -151,7 +145,7 @@ export async function Executions({ project, task, checks, independentChecks, aut
       status === 'online' && capabilities && !workerDiskPressure(capabilities)
       && (!latest.requestedWorkerId || latest.requestedWorkerId === id));
   const workerName = (id: string) => workers.find((worker) => worker.id === id)?.name ?? id.slice(0, 8);
-  const dispatchLabel = revising ? '派发修订' : latest ? '重试执行' : '派发任务';
+  const dispatchLabel = revising ? '派发修订' : task.status === 'READY' ? '派发任务' : '重试执行';
   const publishLabel = latest?.delivery ? '重试发布' : '发布分支并创建草稿 PR';
   const identity = <>
     <input type="hidden" name="projectId" value={project.id} />
@@ -166,12 +160,16 @@ export async function Executions({ project, task, checks, independentChecks, aut
     </header>
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
     {workersResult.issue && <SectionReadError label="执行 Worker 列表" issue={workersResult.issue} />}
-    {canStart && <ActionDialog title={dispatchLabel} actionKey="dispatch" renderClosed>
-          <form action={startExecution} className="fields">
-      {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
-      <WorkerChoice workers={candidates} /><SubmitButton pendingLabel="正在请求派发…">{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</SubmitButton>
-    </form>
-        </ActionDialog>}
+    {canStart && (!pendingDecisions.length || task.status === 'READY') && <ActionDialog title={dispatchLabel} actionKey="dispatch" renderClosed>
+      {pendingDecisions.length > 0 ? <div className="fields">
+        <p className="warning-text">请在任务详情补充以下决策并重新送审。</p>
+        <ul>{pendingDecisions.map(({ id, question }) => <li key={id}>{question}</li>)}</ul>
+      </div> : <form action={startExecution} className="fields">
+        {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
+        <WorkerChoice workers={candidates} />
+        <SubmitButton pendingLabel="正在请求派发…">{revising ? '按驳回意见派发修订' : dispatchLabel}</SubmitButton>
+      </form>}
+    </ActionDialog>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
       <p role="status" className="execution-state" data-state={latest.status}>{latest.cancelRequested && active ? '正在取消'
@@ -317,6 +315,7 @@ export async function Executions({ project, task, checks, independentChecks, aut
         <summary><span>较早的执行</span><small>{runs.length - 1} 条</small></summary>
         <ul className="member-list">{runs.slice(1).map((run) => <li key={run.id}>
           <div><span>执行 {run.id.slice(0, 8)} · {stateLabels[run.status]}</span>
+            {run.failure && <p>{executionFailureLabels[run.failure.code] ?? '执行失败，原因未记录'}</p>}
             {run.review && <p>{run.review.decision === 'rejected' ? '已驳回' : '已批准'} · {run.review.reviewer}</p>}
             {run.review?.comment && <p className="description">{run.review.comment}</p>}
             {run.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${run.id}`}>下载补丁 {run.artifact.sha256.slice(0, 12)}</a></p>}

@@ -261,7 +261,7 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
         <details key={role} open={role === 'ARCHITECT'}>
           <summary>{agentRoleLabels[role]} · v{version} · {model}</summary>
           <dl>
-            {Object.entries(output).map(([field, value]) => (
+            {Object.entries(output).filter(([field]) => Object.hasOwn(fieldLabels, field)).map(([field, value]) => (
               <div key={field}>
                 <dt><strong>{fieldLabels[field]}</strong></dt>
                 <dd>{Array.isArray(value) ? <ul>{value.map((text, index) => <li key={index}>{text}</li>)}</ul>

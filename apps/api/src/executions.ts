@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import {
-  canRepair, canTransitionTask, checkFailureStatuses, independentCheckStatuses, isWorkerId, maxVerificationAttempts, workerOfflineMs, type Account,
+  canRepair, canTransitionTask, checkFailureStatuses, independentCheckStatuses, isWorkerId, maxVerificationAttempts,
+  parseDecisionQuestions, workerOfflineMs, type Account,
   type CheckFailureReason, type CheckResult,
   type AgentAssignment, type DevelopmentHandoff, type ExecutionEvent, type ExecutionOffer, type ExecutionReview, type ExecutionRun, type ReviewEvidence,
   type Task, type TaskStatus, type VerificationCheck, type VerificationReport, type WorkerRecovery,
@@ -17,7 +18,7 @@ import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { requireQualityGate } from './quality-gate';
-import { TasksService } from './tasks';
+import { requireTaskDecisions, runFailure, TasksService } from './tasks';
 import { workerCanVerify, workerDiskReady, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
@@ -29,7 +30,7 @@ type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
   'worker_error', 'checks_changed_candidate', 'artifact_upload_failed', 'worker_restarted', 'npm_cache_unavailable',
-  'maven_cache_unavailable', 'revision_source_unavailable'];
+  'maven_cache_unavailable', 'revision_source_unavailable', 'needs_decisions'];
 
 function attemptInput(value: unknown) {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxVerificationAttempts) {
@@ -132,6 +133,11 @@ function executionEvent(body: unknown) {
   }
   if (kind === 'failed') {
     if (typeof input.code !== 'string' || !failureCodes.includes(input.code)) throw new BadRequestException('Invalid error code');
+    if (input.code === 'needs_decisions') {
+      const decisions = parseDecisionQuestions(input.decisions);
+      if (!decisions?.length) throw new BadRequestException('Invalid unresolved decisions');
+      return { runId, sequence, kind: 'failed' as const, payload: { code: input.code, decisions } };
+    }
     return { runId, sequence, kind: 'failed' as const, payload: { code: input.code } };
   }
   if (kind === 'cancelled') return { runId, sequence, kind: 'cancelled' as const,
@@ -188,7 +194,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   async list(actor: Account, projectId: string, taskId: string) {
     await this.tasks.get(actor, projectId, taskId);
     const { rows } = await this.db.projectQuery<ExecutionRun>(projectId,
-      `SELECT ${runColumns}, (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
+      `SELECT ${runColumns}, ${runFailure} AS failure,
+         (SELECT jsonb_build_object('decision', e.decision, 'comment', e.comment,
          'reviewer', e.reviewer_name, 'reviewedAt', e.reviewed_at) FROM execution_reviews e WHERE e.run_id = r.id) AS review,
          (SELECT jsonb_build_object('sha256', a.sha256, 'size', a.size) FROM execution_artifacts a
            WHERE a.run_id = r.id AND a.sha256 = COALESCE(r.candidate_hash, r.verification_report->>'patchHash')) AS artifact,
@@ -228,7 +235,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         throw new ConflictException('An approved task and bound repository are required');
       }
       if (!task.acceptanceCriteria.length) throw new ConflictException('Acceptance criteria are required');
-      const { rows: [prior] } = task.status !== 'READY' ? await client.query<{
+      requireTaskDecisions(task);
+      const { rows: [prior] } = task.status !== 'READY' || task.decisions?.length ? await client.query<{
         id: string; repositoryId: string; patchHash: string | null; decision: string | null; comment: string | null;
         development: DevelopmentHandoff | null; qa: AgentAssignment | null;
       }>(
@@ -262,6 +270,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const existing = (revising || prior?.development?.revision) ? prior?.development : null;
       const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
         ...(planned?.requirement && { requirement: planned.requirement }), ...(planned?.knowledge && { knowledge: planned.knowledge }) };
+      if (existing && task.status === 'READY') handoff.agent = agent;
+      if (task.decisions?.length) {
+        handoff.decisions = task.decisions.flatMap(({ question, answer }) => answer ? [{ question, answer }] : []);
+      }
       if (revising && prior?.patchHash && prior.comment) {
         handoff.revision = { runId: prior.id, patchHash: prior.patchHash, reason: prior.comment };
       }
@@ -485,6 +497,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
       offer.detailedEvents = true;
       offer.turnUsage = true;
+      offer.decisionReporting = true;
       await client.query(
         `UPDATE execution_runs SET status = 'running', worker_id = $2, lease_expires_at = now() + ($3 * interval '1 millisecond'),
           archive_patch = $4, source_branch = $5 WHERE id = $1`,

@@ -5,7 +5,7 @@ import process from 'node:process';
 import { mock } from 'node:test';
 import { URL } from 'node:url';
 import { inspect } from 'node:util';
-import { planningFailureMessages } from '@ado/shared';
+import { parseDecisionReply, planningFailureMessages } from '@ado/shared';
 import { Logger } from '@nestjs/common';
 import { AgentPlanningService } from '../apps/api/src/agent-planning.ts';
 import { AgentRegistryService } from '../apps/api/src/agent-registry.ts';
@@ -60,6 +60,7 @@ const outputs = {
     risks: ['Missing data state'], testApproach: ['Exercise the page with and without saved data'],
   },
 };
+const plannedDecision = { question: 'Who may disable an account?', options: ['Project owners only', 'All project members'] };
 let failProduct = true;
 let resumeCancelledCall;
 let startedCancelledCall;
@@ -75,6 +76,9 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
     if (role === 'PRODUCT_MANAGER' && failProduct) {
       failProduct = false;
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] });
+    }
+    if (role === 'ARCHITECT' && input.request === 'Confirm account policy') {
+      return modelReply(agent, { ...outputs.ARCHITECT, decisions: [plannedDecision] });
     }
     return modelReply(agent, outputs[role]);
   },
@@ -499,6 +503,114 @@ try {
   assert.equal(plan.knowledge[0].id, secondVersion.id);
   assert.equal((await request(cancelledPath, { token })).status, 'CANCELLED');
 
+  const { taskId: decisionTaskId } = await planning.start(account, first.id, { repositoryId: repo.id, request: 'Confirm account policy' });
+  for (const role of ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT']) {
+    assert(await planning.runNext(), `Expected to run ${role}`);
+  }
+  const decisionPath = `${prefix}/tasks/${decisionTaskId}`;
+  const approve = (status = 200) => request(`${decisionPath}/transition`, {
+    token, method: 'POST', body: { status: 'READY' }, status,
+  });
+  await approve(409);
+  const { decisions: [planned] } = await request(decisionPath, { token });
+  assert.deepEqual(planned, { id: 'plan:0', ...plannedDecision });
+  const submit = (answers, status = 204, session = token) => request(`${decisionPath}/decisions`, {
+    token: session, method: 'POST', body: { answers }, status,
+  });
+  await submit([{ id: planned.id, answer: planned.options[0] }], 403, viewerToken);
+  await submit([{ id: 'unknown', answer: planned.options[0] }], 409);
+  // An earlier deployment could approve a stored plan with unresolved items.
+  await db.projectQuery(first.id, "UPDATE tasks SET status = 'READY' WHERE id = $1", [decisionTaskId]);
+  await request(`${decisionPath}/executions`, { token, method: 'POST', status: 409 });
+  const dispatchUrl = new URL(`/?project=${first.id}&section=tasks&task=${decisionTaskId}&dialog=dispatch`, web);
+  const dispatchPage = await globalThis.fetch(dispatchUrl, {
+    headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  assert.equal(dispatchPage.status, 200);
+  const dispatchHtml = await dispatchPage.text();
+  assert(dispatchHtml.includes('请在任务详情补充以下决策并重新送审') && !dispatchHtml.includes('确认派发任务'));
+  await submit([{ id: planned.id, answer: planned.options[0] }]);
+  await approve();
+
+  const firstRun = await request(`${decisionPath}/executions`, { token, method: 'POST', status: 201 });
+  const firstOffer = await executions.claim(worker);
+  assert.equal(firstOffer.id, firstRun.id);
+  assert.equal(firstOffer.decisionReporting, true);
+  assert.deepEqual(firstOffer.development.decisions, [{ question: planned.question, answer: planned.options[0] }]);
+  const runtimeDecision = { question: 'How is the last administrator protected?', options: [
+    'Reject disabling the last active administrator', 'Require another administrator to be assigned first',
+  ] };
+  const runtimeDecisions = parseDecisionReply(`ADO_DECISIONS\n${JSON.stringify([runtimeDecision])}`);
+  assert.deepEqual(runtimeDecisions, [runtimeDecision]);
+  assert.equal(parseDecisionReply('ADO_DECISIONS\n[{"question":"Missing choices","options":[]}]'), null);
+  const reportedFailure = await executions.record(worker, { runId: firstRun.id, sequence: 1, kind: 'failed',
+    payload: { code: 'needs_decisions', decisions: runtimeDecisions } });
+  assert.equal(reportedFailure.accepted, true);
+  const card = (await request(`${prefix}/tasks`, { token })).find(({ id }) => id === decisionTaskId);
+  assert.deepEqual(card.executionFailure, { runId: firstRun.id, code: 'needs_decisions', decisions: [runtimeDecision] });
+  await request(`${decisionPath}/executions`, { token, method: 'POST', status: 409 });
+  const decisionPage = await globalThis.fetch(new URL(`/?project=${first.id}&section=tasks&task=${decisionTaskId}`, web), {
+    headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  assert.equal(decisionPage.status, 200);
+  const decisionHtml = await decisionPage.text();
+  assert(decisionHtml.replaceAll('<!-- -->', '').includes('1 项待人工确认') && decisionHtml.includes('补充决策并重新送审'));
+  assert(decisionHtml.includes(runtimeDecision.question) && decisionHtml.includes(runtimeDecision.options[0]));
+
+  const pending = card.decisions.find(({ answer }) => !answer);
+  const runtimeAnswer = { id: pending.id, answer: runtimeDecision.options[0] };
+  const decisionForm = [...decisionHtml.matchAll(/<form\b[^>]*>[\s\S]*?<\/form>/gu)]
+    .find(([form]) => form.includes(`name="decision:${pending.id}"`));
+  const submitAction = decisionForm?.[0].match(/name="(\$ACTION_ID_[^"]+)"/u)?.[1];
+  assert(submitAction, 'The decision form has a server action');
+  const formData = new globalThis.FormData();
+  formData.set(submitAction, '');
+  formData.set('projectId', first.id);
+  formData.set('taskId', decisionTaskId);
+  formData.set(`decision:${pending.id}`, runtimeAnswer.answer);
+  const submittedPage = await globalThis.fetch(decisionPage.url, {
+    method: 'POST', body: formData, headers: { Cookie: `ado_session=${token}`, Origin: web.origin },
+    redirect: 'manual', signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  assert.equal(submittedPage.status, 303);
+  assert(submittedPage.headers.get('location')?.includes('notice=decisions-submitted'));
+  await submit([runtimeAnswer], 409);
+  assert.equal((await request(decisionPath, { token })).status, 'WAITING_APPROVAL');
+  await request(`${decisionPath}/executions`, { token, method: 'POST', status: 409 });
+  await approve();
+  const secondRun = await request(`${decisionPath}/executions`, { token, method: 'POST', status: 201 });
+  const secondOffer = await executions.claim(worker);
+  assert.equal(secondOffer.id, secondRun.id);
+  assert.deepEqual(secondOffer.development.decisions, [
+    { question: planned.question, answer: planned.options[0] },
+    { question: pending.question, answer: runtimeAnswer.answer },
+  ]);
+  const decisionHistory = await request(`${decisionPath}/events`, { token });
+  assert.equal(decisionHistory.filter(({ payload }) => payload.to === 'READY').length, 2);
+  assert.equal(decisionHistory.filter(({ eventType }) => eventType === 'task.decisions_submitted').length, 2);
+  const runsAfterDecision = await request(`${decisionPath}/executions`, { token });
+  assert.deepEqual(runsAfterDecision.map(({ id, status }) => [id, status]), [[secondRun.id, 'running'], [firstRun.id, 'failed']]);
+  assert.equal((await request(`${decisionPath}/executions/${firstRun.id}/events`, { token }))[0].payload.code, 'needs_decisions');
+  await executions.record(worker, { runId: secondRun.id, sequence: 1, kind: 'failed', payload: { code: 'no_changes' } });
+
+  const { taskId: legacyTaskId } = await planning.start(account, first.id, { repositoryId: repo.id, request: 'Legacy account scope' });
+  for (const role of ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT']) {
+    assert(await planning.runNext(), `Expected to run ${role}`);
+  }
+  const legacyPath = `${prefix}/tasks/${legacyTaskId}`;
+  await request(`${legacyPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
+  const legacyRun = await request(`${legacyPath}/executions`, { token, method: 'POST', status: 201 });
+  assert.equal((await executions.claim(worker)).id, legacyRun.id);
+  await executions.record(worker, { runId: legacyRun.id, sequence: 1, kind: 'failed', payload: { code: 'no_changes' } });
+  await db.projectQuery(first.id,
+    "UPDATE task_agent_plans SET steps = jsonb_set(steps, '{2,output,steps}', $2::jsonb) WHERE task_id = $1",
+    [legacyTaskId, JSON.stringify(['提交人工审批：确认账号维护范围、权限粒度。删除暂不纳入。'])],
+  );
+  const legacy = await request(legacyPath, { token });
+  assert.equal(legacy.executionFailure.code, 'no_changes');
+  assert.deepEqual(legacy.decisions.map(({ question }) => question), ['账号维护范围', '权限粒度']);
+  await request(`${legacyPath}/executions`, { token, method: 'POST', status: 409 });
+
   const providerPlanning = new AgentPlanningService(db, projects, tasks, registry, openAIPlanningModel);
   const credentialsMarker = 'fixture-provider-key-sensitive';
   const providerBodyMarker = 'fixture-provider-error-body-sensitive';
@@ -643,6 +755,7 @@ try {
   await assert.rejects(planning.start(account, first.id, racingRequest), error => error.getStatus() === 404);
   process.stdout.write('Approved requirements, Agent handoff, QA, project usage, rate estimates, audit and planning diagnostics verified.\n');
   process.stdout.write('Project knowledge search, version approval, project isolation, design evidence and frozen planning, Worker and QA inputs verified.\n');
+  process.stdout.write('Execution decision recovery and approval history verified.\n');
 } finally {
   await db.onModuleDestroy();
 }
