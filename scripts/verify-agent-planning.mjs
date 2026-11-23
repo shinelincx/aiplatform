@@ -109,7 +109,7 @@ try {
   const registryPath = `${prefix}/agent-registry`;
   const developerPath = `${registryPath}/agents/FRONTEND_DEVELOPER`;
   const viewer = await request('/users', { token, status: 201, method: 'POST',
-    body: { email: `viewer-${suffix}@example.test`, name: 'Planning viewer', password } });
+    body: { email: `viewer-${suffix}@example.test`, name: 'Planning viewer', password, systemRole: 'user' } });
   const { token: viewerToken } = await request('/auth/session', {
     method: 'POST', body: { email: viewer.email, password },
   });

@@ -13,4 +13,5 @@ export const requireSettingsAccount = cache(async () => {
 export async function requireSettingsAdmin() {
   const account = await requireSettingsAccount();
   if (account.systemRole !== 'admin') redirect(`${settingsPath('account')}?issue=forbidden`);
+  return account;
 }
