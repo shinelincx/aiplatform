@@ -146,18 +146,47 @@ export async function archiveProject(form: FormData) {
   redirect(`${query}&notice=project-archived`);
 }
 
-export async function createUser(form: FormData) {
-  const path = settingsPath('accounts');
-  const target = atDialog(path, 'accounts');
-  const response = await execute('/users', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: form.get('name'), email: form.get('email'), password: form.get('password'),
+export type AccountActionState = { error?: string; notice?: string };
+
+const accountErrors: Record<string, string> = {
+  'Invalid name': '请输入名称，最多 100 个字符。',
+  'Invalid email': '请输入有效的邮箱地址。',
+  'Invalid password length': '初始密码须为 12 至 256 个字符。',
+  'Invalid system role': '请选择有效的平台角色。',
+  'Unexpected account field': '提交中包含不允许修改的字段。',
+  'Email already in use': '该邮箱已被使用。',
+  'Account not found': '该账号已不存在。',
+  'Cannot disable your own account': '不能停用当前登录账号。',
+  'Cannot remove the last active administrator': '必须保留至少一个启用的管理员账号。',
+};
+
+export async function manageAccount(operation: 'create' | 'edit' | 'disable', id: string | null,
+  isSelf: boolean, _state: AccountActionState, form: FormData): Promise<AccountActionState> {
+  const fields = { name: form.get('name'), systemRole: form.get('systemRole') };
+  const response = await api(operation === 'create' ? '/users' : `/users/${encodeURIComponent(id ?? '')}`, {
+    method: { create: 'POST', edit: 'PATCH', disable: 'DELETE' }[operation],
+    ...(operation === 'disable' ? {} : {
+      body: JSON.stringify(operation === 'create'
+        ? { ...fields, email: form.get('email'), password: form.get('password') }
+        : fields),
     }),
-  });
-  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'user')}`);
-  revalidatePath(path);
-  redirect(`${target}&notice=user-created`);
+  }).catch(() => null);
+  if (!response) return { error: '无法连接服务，请稍后重试。' };
+  if (!response.ok) {
+    if (response.status === 401) return { error: '登录已失效，请重新登录。' };
+    if (response.status === 403) return { error: '此操作需要管理员权限。' };
+    const error = await response.json().catch(() => null) as { message?: string } | null;
+    const message = error?.message;
+    return { error: message && Object.hasOwn(accountErrors, message) ? accountErrors[message] : '账号操作失败，请稍后重试。' };
+  }
+
+  const path = settingsPath('accounts');
+  revalidatePath(settingsHref, 'layout');
+  if (operation === 'disable') redirect(`${path}?notice=user-disabled`);
+  if (operation === 'edit' && isSelf && fields.systemRole === 'user') {
+    redirect(`${settingsPath('account')}?notice=user-updated`);
+  }
+  return { notice: operation === 'create' ? '账号已创建' : '账号已更新' };
 }
 
 export async function changeMember(form: FormData) {

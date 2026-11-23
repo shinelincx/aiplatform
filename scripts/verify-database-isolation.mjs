@@ -164,7 +164,7 @@ try {
   `);
   assert.deepEqual(grants, {
     role: 'ado_api', protectedTables: 25, ddl: false, migrations: false, truncate: false,
-    updatableAccountFields: ['name', 'password_hash', 'updated_at'],
+    updatableAccountFields: ['name', 'password_hash', 'status', 'system_role', 'updated_at'],
   });
   const email = process.env.ADO_BOOTSTRAP_EMAIL;
   const password = process.env.ADO_BOOTSTRAP_PASSWORD;
@@ -174,7 +174,7 @@ try {
   const fit = await seed('FITBEST-ISOLATION', 2);
   const third = await seed('THIRD-ISOLATION', 3);
   const viewerEmail = 'viewer-' + suffix + '@example.test';
-  const viewer = await post('/users', { email: viewerEmail, name: 'Isolated viewer', password });
+  const viewer = await post('/users', { email: viewerEmail, name: 'Isolated viewer', password, systemRole: 'user' });
   await request(third.path + '/members/' + viewer.id, { method: 'PUT', body: { role: 'viewer' }, expected: 204 });
   ({ token: viewerToken } = await post('/auth/session', { email: viewerEmail, password }, 200));
   assert.deepEqual((await request('/projects', { actor: viewerToken })).map(({ id }) => id), [third.projectId]);

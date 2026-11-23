@@ -1,7 +1,8 @@
 import {
   BadRequestException, Body, ConflictException, Controller, createParamDecorator, type CanActivate,
   type ExecutionContext, ForbiddenException, Get, Headers, HttpCode, Inject,
-  Injectable, type OnApplicationBootstrap, Patch, Post, Delete, UnauthorizedException, UseGuards,
+  Injectable, NotFoundException, type OnApplicationBootstrap, Param, ParseUUIDPipe, Patch, Post, Delete,
+  UnauthorizedException, UseGuards,
 } from '@nestjs/common';
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -36,6 +37,19 @@ function sessionToken(authorization: string | undefined) {
   const token = /^Bearer ([0-9a-f]{64})$/.exec(authorization ?? '')?.[1];
   if (!token) throw new UnauthorizedException();
   return token;
+}
+
+function accountInput(body: unknown, fields: string[]) {
+  const input = objectInput(body);
+  if (Object.keys(input).some((field) => !fields.includes(field))) {
+    throw new BadRequestException('Unexpected account field');
+  }
+  return input;
+}
+
+function systemRoleInput(role: unknown): Account['systemRole'] {
+  if (role !== 'admin' && role !== 'user') throw new BadRequestException('Invalid system role');
+  return role;
 }
 
 @Injectable()
@@ -147,21 +161,18 @@ export class AuthService implements OnApplicationBootstrap {
 
   async createUser(actor: Account, body: unknown) {
     this.requireAdmin(actor);
-    const input = objectInput(body);
+    const input = accountInput(body, ['email', 'name', 'password', 'systemRole']);
     const email = emailInput(input.email);
     const name = textInput(input.name, 'name', 100);
+    const role = systemRoleInput(input.systemRole);
     const hash = await hashPassword(passwordInput(input.password));
     try {
-      return await this.db.transaction(async (client) => {
+      return await this.adminTransaction(actor, async (client) => {
         const { rows: [account] } = await client.query<Account>(
-          `INSERT INTO users (email, name, password_hash, system_role) VALUES ($1, $2, $3, 'user')
-           RETURNING ${accountColumns}`, [email, name, hash],
+          `INSERT INTO users (email, name, password_hash, system_role) VALUES ($1, $2, $3, $4)
+           RETURNING ${accountColumns}`, [email, name, hash, role],
         );
-        await client.query("SELECT set_config('ado.audit_admin', $1, true)", [actor.id]);
-        await client.query(
-          `INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.created', $2)`,
-          [actor.id, account.id],
-        );
+        await this.auditUser(client, actor.id, account.id, 'user.created', { systemRole: role });
         return account;
       });
     } catch (error) {
@@ -170,8 +181,75 @@ export class AuthService implements OnApplicationBootstrap {
     }
   }
 
+  async updateUser(actor: Account, id: string, body: unknown) {
+    this.requireAdmin(actor);
+    const input = accountInput(body, ['name', 'systemRole']);
+    const name = textInput(input.name, 'name', 100);
+    const role = systemRoleInput(input.systemRole);
+    return this.adminTransaction(actor, async (client) => {
+      const target = await this.findUser(client, id);
+      if (role !== target.systemRole) {
+        if (role === 'user') await this.requireAnotherAdmin(client, target);
+        await this.auditUser(client, actor.id, target.id, 'user.role_changed', {
+          previousSystemRole: target.systemRole, systemRole: role,
+        });
+      }
+      await this.auditUser(client, actor.id, target.id, 'user.updated');
+      const { rows: [updated] } = await client.query<Account>(
+        `UPDATE users SET name = $2, system_role = $3, updated_at = now() WHERE id = $1
+         RETURNING ${accountColumns}`, [target.id, name, role],
+      );
+      return updated;
+    });
+  }
+
+  async disableUser(actor: Account, id: string) {
+    return this.adminTransaction(actor, async (client) => {
+      const target = await this.findUser(client, id);
+      await this.requireAnotherAdmin(client, target);
+      if (target.id === actor.id) throw new ConflictException('Cannot disable your own account');
+      if (target.status === 'disabled') return;
+      await client.query("UPDATE users SET status = 'disabled', updated_at = now() WHERE id = $1", [target.id]);
+      await client.query('DELETE FROM sessions WHERE user_id = $1', [target.id]);
+      await this.auditUser(client, actor.id, target.id, 'user.disabled');
+    });
+  }
+
+  private adminTransaction<T>(actor: Account, operation: (client: PoolClient) => Promise<T>) {
+    this.requireAdmin(actor);
+    return this.db.transaction(async (client) => {
+      // Serialize account administration, including the last-admin check and actor revalidation.
+      await client.query('SELECT pg_advisory_xact_lock(17431)');
+      this.requireAdmin(await this.findUser(client, actor.id));
+      await client.query("SELECT set_config('ado.audit_admin', $1, true)", [actor.id]);
+      return operation(client);
+    });
+  }
+
+  private async findUser(client: PoolClient, id: string) {
+    const { rows: [account] } = await client.query<Account>(
+      `SELECT ${accountColumns} FROM users WHERE id = $1`, [id],
+    );
+    if (!account) throw new NotFoundException('Account not found');
+    return account;
+  }
+
+  private async requireAnotherAdmin(client: PoolClient, target: Account) {
+    if (target.systemRole !== 'admin' || target.status !== 'active') return;
+    const { rowCount } = await client.query(
+      "SELECT 1 FROM users WHERE system_role = 'admin' AND status = 'active' AND id <> $1 LIMIT 1", [target.id],
+    );
+    if (!rowCount) throw new ConflictException('Cannot remove the last active administrator');
+  }
+
+  private async auditUser(client: PoolClient, actorId: string, targetId: string,
+    action: string, details?: Record<string, unknown>) {
+    await client.query('INSERT INTO audit_logs (actor_id, action, resource_id, details) VALUES ($1, $2, $3, $4)',
+      [actorId, action, targetId, details ?? null]);
+  }
+
   requireAdmin(account: Account) {
-    if (account.systemRole !== 'admin') throw new ForbiddenException('Administrator required');
+    if (account.status !== 'active' || account.systemRole !== 'admin') throw new ForbiddenException('Administrator required');
   }
 }
 
@@ -237,5 +315,18 @@ export class AuthController {
   @UseGuards(SessionGuard)
   createUser(@CurrentAccount() account: Account, @Body() body: unknown) {
     return this.auth.createUser(account, body);
+  }
+
+  @Patch('users/:id')
+  @UseGuards(SessionGuard)
+  updateUser(@CurrentAccount() account: Account, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    return this.auth.updateUser(account, id, body);
+  }
+
+  @Delete('users/:id')
+  @UseGuards(SessionGuard)
+  @HttpCode(204)
+  disableUser(@CurrentAccount() account: Account, @Param('id', ParseUUIDPipe) id: string) {
+    return this.auth.disableUser(account, id);
   }
 }
