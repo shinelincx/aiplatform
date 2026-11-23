@@ -41,6 +41,16 @@ function eventStatus(value: unknown): value is TaskStatus {
 
 function taskActivity(event: TaskEvent): ActivityItem {
   const { to, from } = event.payload;
+  if (event.eventType === 'task.delivery_closed') {
+    const { outcome, reason, pullNumber, originalCommitSha, finalCommitSha, mergeSha } = event.payload;
+    const committed = typeof originalCommitSha === 'string' && typeof finalCommitSha === 'string' && typeof mergeSha === 'string';
+    return {
+      id: event.id, at: event.createdAt, group: '交付', label: outcome === 'completed' ? '确认交付并结案' : '取消并归档',
+      detail: committed ? ['PR #' + String(pullNumber), '原审批 ' + originalCommitSha.slice(0, 8),
+        '最终提交 ' + finalCommitSha.slice(0, 8), '合并 ' + mergeSha.slice(0, 8)].join(' · ')
+        : typeof reason === 'string' ? reason : undefined,
+    };
+  }
   const planning = event.eventType.startsWith('agent.');
   const failed = ['FAILED', 'TIMEOUT', 'BLOCKED', 'REJECTED'].includes(String(to)) || event.eventType.endsWith('_failed');
   return {
