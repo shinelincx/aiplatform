@@ -414,11 +414,16 @@ export async function saveTask(form: FormData) {
 export async function transitionTask(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
+  const status = form.get('status');
   const response = await execute(`${endpoint}/transition`, {
-    method: 'POST', body: JSON.stringify({ status: form.get('status'), developerRole: form.get('developerRole') || null }),
+    method: 'POST', body: JSON.stringify({ status, developerRole: form.get('developerRole') || null }),
   });
   if (await hasPendingDecisions(response)) redirect(`${query}&issue=pending-decisions#task-decisions`);
-  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  if (!response?.ok) {
+    const confirmation = status === 'READY' ? 'task-approve' : status === 'REJECTED' ? 'task-reject' : status === 'CANCELLED' ? 'task-cancel' : null;
+    const errorTarget = confirmation && form.get('confirmTransition') === '1' ? atDialog(query, confirmation) : query;
+    redirect(`${errorTarget}&issue=${taskIssue(response)}#task-detail`);
+  }
   redirect(`${query}&notice=task-transitioned#task-detail`);
 }
 
@@ -470,7 +475,7 @@ export async function stopExecution(form: FormData) {
   const runId = form.get('runId');
   if (!id || !isWorkerId(runId)) redirect(query);
   const response = await execute(`${endpoint}/executions/${runId}/cancel`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  if (!response?.ok) redirect(`${atDialog(query, 'execution-stop')}&issue=${taskIssue(response)}#task-detail`);
   redirect(`${query}#task-detail`);
 }
 

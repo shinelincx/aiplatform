@@ -1,4 +1,4 @@
-import { agentRoleLabels, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, type AgentPlan, type AgentRegistry, type Project, type SkillVersion, type SkillVersionStatus } from '@ado/shared';
+import { agentRoleLabels, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, planningRoles, type AgentPlan, type AgentRegistry, type Project, type SkillVersion, type SkillVersionStatus } from '@ado/shared';
 import { retryAgentPlan, reviewSkillVersion, updateAgent, updateSkill } from './actions';
 import { AgentVersionEditor } from './agent-version-editor';
 import { readSection } from './api-client';
@@ -226,11 +226,20 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
     ? planningFailureMessages[isPlanningFailureCategory(plan.failureCategory) ? plan.failureCategory : 'unknown']
     : null;
   return (
-    <section aria-labelledby="agent-plan-heading" className="plan-block">
+    <section aria-labelledby="agent-plan-heading" className="plan-block task-detail__card">
       <header className="plan-head">
         <h4 id="agent-plan-heading">Agent 规划</h4>
         <span className="badge" data-status={plan.state}>{planStates[plan.state]}</span>
       </header>
+      <ol className="plan-stages" aria-label="Agent 规划阶段">
+        {planningRoles.map((role) => {
+          const complete = plan.steps.some((step) => step.role === role);
+          const current = !complete && plan.stage === role && plan.state !== 'cancelled';
+          return <li key={role} data-state={complete ? 'completed' : current ? plan.state : 'waiting'}
+            aria-current={current ? 'step' : undefined}><strong>{agentRoleLabels[role]}</strong>
+            <small>{complete ? '已生成' : current ? planStates[plan.state] : '等待'}</small></li>;
+        })}
+      </ol>
       {plan.requirement && <>
         <p>需求来源 · <a href={plan.requirement.referenceUrl} rel="noreferrer">{plan.requirement.title}</a></p>
         <details>
@@ -239,7 +248,6 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
           <small>登记人 · {plan.requirement.approvedBy}</small>
         </details>
       </>}
-      <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
       {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
       {diagnosis && <p><strong>{diagnosis.label}</strong> · {diagnosis.hint}</p>}
         {Boolean(plan.knowledge?.length) && <details>
@@ -255,7 +263,7 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
       {plan.state === 'failed' && canRetry && <form action={retryAgentPlan}>
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="taskId" value={plan.taskId} />
-        <button className="secondary">重试规划</button>
+        <SubmitButton pendingLabel="正在重试…">重试规划</SubmitButton>
       </form>}
       {plan.steps.map(({ role, version, model, output }) => (
         <details key={role} open={role === 'ARCHITECT'}>
