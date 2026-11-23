@@ -1,5 +1,6 @@
 import { agentRoleLabels, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, type AgentPlan, type AgentRegistry, type Project, type SkillVersion, type SkillVersionStatus } from '@ado/shared';
 import { retryAgentPlan, reviewSkillVersion, updateAgent, updateSkill } from './actions';
+import { AgentVersionEditor } from './agent-version-editor';
 import { readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
 import { ActionFeedback, SubmitButton } from './task-feedback';
@@ -131,45 +132,29 @@ export async function Agents({ project, selectedSkill, selectedVersion, skillRes
                     {!manage && active.instructions && <p className="description">{active.instructions}</p>}
                   </div>
                 </details>
-                {manage && <>
-                  <div className="modal-group modal-group--inline">
-                    <form action={updateAgent}>
-                      {roleInput}<input type="hidden" name="enabled" value={String(!agent.enabled)} />
-                      <button className="secondary" name="operation" value="toggle">{agent.enabled ? '停用 Agent' : '启用 Agent'}</button>
-                    </form>
-                    {agent.versions.length > 1 && <form className="inline-fields" action={updateAgent}>
-                      {roleInput}
-                      <label>历史版本<select name="version" defaultValue={active.version} key={active.version}>
-                        {agent.versions.map(({ version, model, skills: refs }) => {
-                          const unavailable = refs.some(ref => !allowedRefs.has(`${ref.id}:${ref.version}`));
-                          return <option key={version} value={version} disabled={unavailable}>
-                            v{version}{model && ` · ${model}`}{unavailable && ' · 技能版本不可用'}
-                          </option>;
-                        })}
-                      </select></label>
-                      <button className="secondary" name="operation" value="activate">启用所选版本</button>
-                    </form>}
-                  </div>
-                  <form className="fields modal-group" action={updateAgent} key={active.version}>
-                    <h3>发布新版本</h3>
-                    {roleInput}
-                    <label>模型标识<input name="model" maxLength={100} defaultValue={active.model} /></label>
-                    <label>项目指令<textarea name="instructions" maxLength={8000} defaultValue={active.instructions} /></label>
-                    {skills.length > 0 && <fieldset className="check-grid"><legend>关联 Skill</legend>
-                      {skills.map((skill) => {
-                        const linked = active.skills.find(({ id }) => id === skill.id);
-                        return <label key={skill.id}>{skill.name}{!skill.enabled && '（停用）'}
-                          <select name="skills" defaultValue={linked ? `${skill.id}:${linked.version}` : ''}>
-                            <option value="">无</option>
-                            {skill.versions.map(version => <option key={version.version} value={`${skill.id}:${version.version}`}
-                              disabled={!isUsableSkillVersion(version)}>v{version.version} · {skillStatuses[version.status]}</option>)}
-                          </select>
-                        </label>;
-                      })}
-                    </fieldset>}
-                    <div className="form-actions"><button name="operation" value="publish">发布 Agent 版本</button></div>
-                  </form>
-                </>}
+                {manage && <AgentVersionEditor key={`${project.id}:${agent.role}:${active.version}`}
+                  projectId={project.id} role={agent.role} activeVersion={active.version}
+                  versions={agent.versions.map(({ version, model, instructions, skills: refs }) => ({
+                    version, model, instructions,
+                    canActivate: refs.every(ref => allowedRefs.has(`${ref.id}:${ref.version}`)),
+                  }))}
+                  toggle={<form action={updateAgent}>
+                    {roleInput}<input type="hidden" name="enabled" value={String(!agent.enabled)} />
+                    <button className="secondary" name="operation" value="toggle">{agent.enabled ? '停用 Agent' : '启用 Agent'}</button>
+                  </form>}>
+                  {skills.length > 0 && <fieldset className="check-grid"><legend>关联 Skill</legend>
+                    {skills.map((skill) => {
+                      const linked = active.skills.find(({ id }) => id === skill.id);
+                      return <label key={skill.id}>{skill.name}{!skill.enabled && '（停用）'}
+                        <select name="skills" defaultValue={linked ? `${skill.id}:${linked.version}` : ''}>
+                          <option value="">无</option>
+                          {skill.versions.map(version => <option key={version.version} value={`${skill.id}:${version.version}`}
+                            disabled={!isUsableSkillVersion(version)}>v{version.version} · {skillStatuses[version.status]}</option>)}
+                        </select>
+                      </label>;
+                    })}
+                  </fieldset>}
+                </AgentVersionEditor>}
               </ActionDialog>
             </footer>
           </li>;
