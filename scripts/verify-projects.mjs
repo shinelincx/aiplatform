@@ -20,7 +20,7 @@ async function request(path, { method = 'GET', token, body, status = 200 } = {})
     signal: globalThis.AbortSignal.timeout(10000),
   });
   assert.equal(response.status, status, `${method} ${path} returned ${response.status}`);
-  if (status < 300 && status !== 204) return response.json();
+  if (status !== 204) return response.json();
 }
 
 const suffix = randomBytes(5).toString('hex');
@@ -30,10 +30,63 @@ await login({ email, password: 'wrong-password' }, 401);
 const { token: admin } = await login({ email, password });
 const credentials = { email: `viewer-${suffix}@example.test`, password: randomBytes(24).toString('hex') };
 const user = await request('/users', {
-  method: 'POST', token: admin, body: { ...credentials, name: 'Integration Viewer' }, status: 201,
+  method: 'POST', token: admin, body: { ...credentials, name: 'Integration Viewer', systemRole: 'user' }, status: 201,
 });
 const { token: viewer } = await login(credentials);
 await request('/users', { token: viewer, status: 403 });
+
+const listUsers = () => request('/users', { token: admin });
+const initialUsers = await listUsers();
+const actor = await request('/auth/session', { token: admin });
+const actorPath = `/users/${actor.id}`;
+const userPath = `/users/${user.id}`;
+const candidateCredentials = { email: `admin-${suffix}@example.test`, password: randomBytes(24).toString('hex') };
+const candidateBody = { ...candidateCredentials, name: 'Integration Admin', systemRole: 'admin' };
+const editBody = { name: 'Updated Admin', systemRole: 'user' };
+
+for (const [token, status] of [[undefined, 401], [viewer, 403]]) {
+  await request('/users', { token, method: 'POST', body: candidateBody, status });
+  await request(userPath, { token, method: 'PATCH', body: editBody, status });
+  await request(userPath, { token, method: 'DELETE', status });
+}
+await request('/users', { token: admin, method: 'POST', status: 400,
+  body: { ...candidateBody, systemRole: 'owner' } });
+await request('/users', { token: admin, method: 'POST', status: 400,
+  body: { ...candidateBody, name: ' ' } });
+await request(userPath, { token: admin, method: 'PATCH', status: 400, body: { ...editBody, email: 'other@example.test' } });
+await request(userPath, { token: admin, method: 'PATCH', status: 400, body: { ...editBody, name: ' ' } });
+assert.deepEqual(await listUsers(), initialUsers);
+
+if (initialUsers.filter(({ status, systemRole }) => status === 'active' && systemRole === 'admin').length === 1) {
+  const lastAdmin = await request(actorPath, { token: admin, method: 'DELETE', status: 409 });
+  assert.equal(lastAdmin.message, 'Cannot remove the last active administrator');
+  const demotion = await request(actorPath, { token: admin, method: 'PATCH', status: 409,
+    body: { name: actor.name, systemRole: 'user' } });
+  assert.equal(demotion.message, 'Cannot remove the last active administrator');
+  assert.deepEqual(await listUsers(), initialUsers);
+}
+
+const candidate = await request('/users', { token: admin, method: 'POST', body: candidateBody, status: 201 });
+assert.equal(candidate.email, candidateCredentials.email);
+assert.equal(candidate.name, candidateBody.name);
+assert.equal(candidate.systemRole, 'admin');
+assert.equal(candidate.password, undefined);
+assert.equal(candidate.password_hash, undefined);
+assert.deepEqual((await listUsers()).find(({ id }) => id === candidate.id), candidate);
+const candidatePath = `/users/${candidate.id}`;
+const { token: secondary } = await login(candidateCredentials);
+await request('/users', { token: secondary });
+const selfDisable = await request(actorPath, { token: admin, method: 'DELETE', status: 409 });
+assert.equal(selfDisable.message, 'Cannot disable your own account');
+
+const updated = await request(candidatePath, { token: admin, method: 'PATCH', body: editBody });
+assert.deepEqual(updated, { ...candidate, ...editBody });
+assert.deepEqual((await listUsers()).find(({ id }) => id === candidate.id), updated);
+await request('/users', { token: secondary, status: 403 });
+await request(candidatePath, { token: admin, method: 'DELETE', status: 204 });
+assert.deepEqual((await listUsers()).find(({ id }) => id === candidate.id), { ...updated, status: 'disabled' });
+await request('/auth/session', { token: secondary, status: 401 });
+await login(candidateCredentials, 401);
 
 const project = (code, name) => request('/projects', {
   token: admin, method: 'POST', body: { code: `${code}-${suffix}`, name }, status: 201,
