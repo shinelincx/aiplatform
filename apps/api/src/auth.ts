@@ -1,7 +1,7 @@
 import {
-  Body, ConflictException, Controller, createParamDecorator, type CanActivate,
+  BadRequestException, Body, ConflictException, Controller, createParamDecorator, type CanActivate,
   type ExecutionContext, ForbiddenException, Get, Headers, HttpCode, Inject,
-  Injectable, type OnApplicationBootstrap, Post, Delete, UnauthorizedException, UseGuards,
+  Injectable, type OnApplicationBootstrap, Patch, Post, Delete, UnauthorizedException, UseGuards,
 } from '@nestjs/common';
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -65,15 +65,15 @@ export class AuthService implements OnApplicationBootstrap {
       throw new UnauthorizedException('Invalid email or password');
     }
     const token = randomBytes(32).toString('hex');
-    await this.db.transaction(async (client) => {
-      await client.query('DELETE FROM sessions WHERE expires_at <= now()');
-      await client.query(
-        `INSERT INTO sessions (token_hash, user_id, expires_at)
-         SELECT $1, id, now() + ($3 * interval '1 second') FROM users
-         WHERE id = $2 AND status = 'active'`,
-        [tokenHash(token), account.id, sessionSeconds],
-      );
-    });
+    await this.db.pool.query('DELETE FROM sessions WHERE expires_at <= now()');
+    // Lock the user during issuance so a concurrent password change can revoke every old session.
+    const { rowCount } = await this.db.pool.query(
+      `INSERT INTO sessions (token_hash, user_id, expires_at)
+       SELECT $1, id, now() + ($3 * interval '1 second') FROM users
+       WHERE id = $2 AND status = 'active' AND password_hash = $4 FOR UPDATE`,
+      [tokenHash(token), account.id, sessionSeconds, account.password_hash],
+    );
+    if (!rowCount) throw new UnauthorizedException('Invalid email or password');
     return { token, expiresIn: sessionSeconds };
   }
 
@@ -92,6 +92,51 @@ export class AuthService implements OnApplicationBootstrap {
     await this.db.pool.query('DELETE FROM sessions WHERE token_hash = $1', [
       tokenHash(sessionToken(authorization)),
     ]);
+  }
+
+  async updateProfile(actor: Account, body: unknown) {
+    const name = textInput(objectInput(body).name, 'name', 100);
+    return this.db.transaction(async (client) => {
+      const { rows: [account] } = await client.query<Account>(
+        `UPDATE users SET name = $2, updated_at = now() WHERE id = $1 AND status = 'active'
+         RETURNING ${accountColumns}`,
+        [actor.id, name],
+      );
+      if (!account) throw new UnauthorizedException();
+      await client.query(
+        "INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.profile_updated', $1)",
+        [actor.id],
+      );
+      return account;
+    });
+  }
+
+  async changePassword(actor: Account, body: unknown) {
+    const input = objectInput(body);
+    const currentPassword = passwordInput(input.currentPassword, 1);
+    const newPassword = passwordInput(input.newPassword);
+    if (currentPassword === newPassword) throw new BadRequestException('New password must differ from current password');
+    const { rows: [credentials] } = await this.db.pool.query<{ password_hash: string }>(
+      "SELECT password_hash FROM users WHERE id = $1 AND status = 'active'", [actor.id],
+    );
+    if (!credentials) throw new UnauthorizedException();
+    if (!(await verifyPassword(currentPassword, credentials.password_hash))) {
+      throw new ForbiddenException('Current password is incorrect');
+    }
+    const hash = await hashPassword(newPassword);
+    await this.db.transaction(async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE users SET password_hash = $2, updated_at = now()
+         WHERE id = $1 AND status = 'active' AND password_hash = $3`,
+        [actor.id, hash, credentials.password_hash],
+      );
+      if (!rowCount) throw new ConflictException('Account changed while updating password');
+      await client.query('DELETE FROM sessions WHERE user_id = $1', [actor.id]);
+      await client.query(
+        "INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.password_changed', $1)",
+        [actor.id],
+      );
+    });
   }
 
   async listUsers(actor: Account) {
@@ -167,6 +212,19 @@ export class AuthController {
   @HttpCode(204)
   logout(@Headers('authorization') authorization?: string) {
     return this.auth.logout(authorization);
+  }
+
+  @Patch('auth/profile')
+  @UseGuards(SessionGuard)
+  updateProfile(@CurrentAccount() account: Account, @Body() body: unknown) {
+    return this.auth.updateProfile(account, body);
+  }
+
+  @Patch('auth/password')
+  @HttpCode(204)
+  @UseGuards(SessionGuard)
+  changePassword(@CurrentAccount() account: Account, @Body() body: unknown) {
+    return this.auth.changePassword(account, body);
   }
 
   @Get('users')

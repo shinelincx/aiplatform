@@ -1,7 +1,8 @@
 import type { Account, Project, ProjectMember, ProjectOverview } from '@ado/shared';
 import Link from 'next/link';
-import type { ReactNode } from 'react';
-import { archiveProject, changeMember, createProject, createUser, updateProject } from './actions';
+import { archiveProject, changeMember, updateProject } from './actions';
+import { ActionDialog } from './console-controls';
+import { Icon } from './icons';
 import { RefreshExecution } from './refresh-execution';
 
 const roleNames = { owner: '所有者', member: '成员', viewer: '只读' };
@@ -11,151 +12,103 @@ const alertNames: Record<ProjectOverview['alerts'][number]['kind'], string> = {
   qa: 'QA 审查失败', delivery: 'PR 发布失败',
 };
 
-export function ProjectSidebar({ projects, selected, admin }: {
-  projects: Project[];
-  selected?: Project;
-  admin: boolean;
-}) {
-  return (
-    <aside>
-      <h2>项目</h2>
-      {projects.length === 0 && <p>当前账号没有项目。</p>}
-      <nav aria-label="切换项目">
-        {projects.map((project) => (
-          <Link key={project.id} href={`/?project=${project.id}`} aria-current={selected?.id === project.id ? 'page' : undefined}>
-            <span>{project.name}</span>
-            <small>{project.status === 'archived' ? '已归档' : project.code}</small>
-          </Link>
-        ))}
-      </nav>
-      {admin && (
-        <details>
-          <summary>创建项目</summary>
-          <form action={createProject} className="fields">
-            <label>项目代码<input name="code" maxLength={50} pattern="[A-Za-z][A-Za-z0-9_\-]*" required /></label>
-            <label>项目名称<input name="name" maxLength={200} required /></label>
-            <label>说明<textarea name="description" maxLength={4000} /></label>
-            <button>创建项目</button>
-          </form>
-        </details>
-      )}
-    </aside>
-  );
-}
-
-export function ProjectDetails({ project, members, users, overview, overviewFeedback, taskId, live }: {
+export function ProjectDetails({ project, members, users, overview, live, reachable }: {
   project: Project;
   members: ProjectMember[];
   users: Account[];
   overview: ProjectOverview | null;
-  overviewFeedback?: ReactNode;
-  taskId?: string;
   live: boolean;
+  reachable: boolean;
 }) {
   const canEdit = project.role === 'owner' && project.status === 'active';
   const assignable = users.filter((user) => user.status === 'active' && !members.some((member) => member.id === user.id));
   return (
-    <section className="panel project-overview" aria-labelledby="project-heading">
-      <h2 id="project-heading">{project.name}</h2>
-      <p className="muted">{project.code} · {project.status === 'active' ? '进行中' : '已归档'} · {roleNames[project.role]}</p>
-      {project.description && <p className="description">{project.description}</p>}
-      {overviewFeedback}
-      {overview && <>
-        {live && project.status === 'active' && <RefreshExecution intervalMs={15000} />}
-        <dl className="project-metrics">
-          <div><dt>研发任务</dt><dd>{overview.tasks.open} 项进行中 · {overview.tasks.completed} 项已完成</dd></div>
-          <div><dt>待审批方案</dt><dd>{overview.tasks.approval} 项</dd></div>
-          <div><dt>已启用 Agent</dt><dd>{overview.agentsEnabled} 个</dd></div>
-          <div><dt>在线 Worker</dt><dd>{overview.workers.online} / {overview.workers.total}</dd>
-            {overview.workers.diskPaused > 0 && <small>{overview.workers.diskPaused} 台因磁盘空间不足暂停领取</small>}
-          </div>
-        </dl>
-        {overview.alerts.length > 0 && <>
-          <h3>需要处理</h3>
-          <nav aria-label="需要处理的任务">
-            {overview.alerts.map((alert) => <Link key={alert.taskId} href={`/?project=${project.id}&task=${alert.taskId}#task-detail`}>
-              <span>{alert.code} · {alert.title}</span><small>{alertNames[alert.kind]}</small>
-            </Link>)}
-          </nav>
-        </>}
-      </>}
-      <details className="project-settings"><summary>项目设置与运行信息</summary>
-      {overview && <p className="execution-summary">执行队列 · {overview.executions.queued} 项排队 · {overview.executions.running} 项运行 / 成功执行 · {overview.executions.succeeded} / {overview.executions.total}</p>}
-      <p><Link href={`/?project=${project.id}${taskId ? `&task=${encodeURIComponent(taskId)}` : ''}&section=operations#operations`}>项目用量与审计</Link></p>
-      {canEdit && (
-        <details>
-          <summary>编辑项目</summary>
-          <form className="fields" action={updateProject}>
-            <input type="hidden" name="projectId" value={project.id} />
-            <label>项目名称<input name="name" defaultValue={project.name} maxLength={200} required /></label>
-            <label>说明<textarea name="description" defaultValue={project.description} maxLength={4000} /></label>
-            <button>保存项目</button>
-          </form>
-        </details>
-      )}
-      {project.role === 'owner' && (
-        <details>
-          <summary>项目成员</summary>
-          <ul className="members">
-            {members.map((member) => (
-              <li key={member.id}>
-                <span>{member.name} <small>{member.email} · {roleNames[member.role]}</small></span>
-                {canEdit && member.role !== 'owner' && (
-                  <form action={changeMember} className="inline-fields">
-                    <input type="hidden" name="projectId" value={project.id} />
-                    <input type="hidden" name="userId" value={member.id} />
-                    <select aria-label={`${member.name} 的权限`} name="role" defaultValue={member.role}>
-                      <option value="member">成员</option><option value="viewer">只读</option><option value="remove">移除</option>
-                    </select>
-                    <button>更新</button>
-                  </form>
-                )}
-              </li>
-            ))}
-          </ul>
-          {canEdit && assignable.length > 0 && (
-            <form action={changeMember} className="fields">
-              <input type="hidden" name="projectId" value={project.id} />
-              <label>账号<select name="userId" required>
-                {assignable.map((user) => <option key={user.id} value={user.id}>{user.email}</option>)}
-              </select></label>
-              <label>权限<select name="role"><option value="member">成员</option><option value="viewer">只读</option></select></label>
-              <button>添加成员</button>
-            </form>
-          )}
-        </details>
-      )}
-      {canEdit && (
-        <details>
-          <summary>归档项目</summary>
-          <form action={archiveProject} className="fields">
-            <input type="hidden" name="projectId" value={project.id} />
-            <p>归档后仍可查看项目，项目设置将锁定。</p>
-            <button>确认归档</button>
-          </form>
-        </details>
-      )}
-      </details>
-    </section>
-  );
-}
+    <section className="project-overview" aria-label="项目设置与告警">
+      {live && project.status === 'active' && <RefreshExecution intervalMs={15000} />}
 
-export function CreateAccount({ users }: { users: Account[] }) {
-  return (
-    <details className="panel">
-      <summary>账号管理</summary>
-      <ul className="members">
-        {users.map((user) => (
-          <li key={user.id}><span>{user.name} <small>{user.email}</small></span>
-            <small>{user.systemRole === 'admin' ? '管理员' : '普通用户'}</small></li>
-        ))}
-      </ul>
-      <form action={createUser} className="fields">
-        <label>姓名<input name="name" maxLength={100} required /></label>
-        <label>邮箱<input name="email" type="email" maxLength={255} required /></label>
-        <label>初始密码<input name="password" type="password" minLength={12} maxLength={256} autoComplete="new-password" required /></label>
-        <button>创建账号</button>
-      </form>
-    </details>
+      {overview && overview.alerts.length > 0 && (
+        <div className="alert-board">
+          <div className="alert-board__head">
+            <span className="eyebrow">Needs attention / 需要处理</span>
+            <em>{overview.alerts.length}</em>
+          </div>
+          <nav aria-label="需要处理的任务" className="alert-list">
+            {overview.alerts.map((alert) => (
+              <Link key={alert.taskId} href={`/?project=${project.id}&task=${alert.taskId}#task-detail`}>
+                <span><strong>{alert.title}</strong><small>{alert.code}</small></span>
+                <span className="alert-tag">{alertNames[alert.kind]}</span>
+              </Link>
+            ))}
+          </nav>
+        </div>
+      )}
+
+      <section className="panel project-module">
+        <header className="panel__head">
+          <h2 className="panel__title"><Icon name="grid" />{project.name}</h2>
+          <span className="module-tag" data-tone={project.status === 'active' && reachable ? 'mint' : 'mute'}>
+            {roleNames[project.role]} · {project.status === 'archived' ? '已归档' : reachable ? '在线' : '离线'}
+          </span>
+        </header>
+        <div className="page-actions">
+          <ActionDialog title="项目信息">
+            <dl className="modal-facts">
+              <div><dt>项目</dt><dd>{project.name}</dd></div>
+              <div><dt>代码</dt><dd>{project.code}</dd></div>
+              {overview && <>
+                <div><dt>排队 / 执行中</dt><dd>{overview.executions.queued} / {overview.executions.running}</dd></div>
+                <div><dt>成功 / 总执行</dt><dd>{overview.executions.succeeded} / {overview.executions.total}</dd></div>
+              </>}
+            </dl>
+            {project.description && <p className="description">{project.description}</p>}
+            <Link className="linkbtn" href={`/?project=${project.id}&section=operations#operations`}>用量与审计 <Icon name="arrow" /></Link>
+          </ActionDialog>
+          {canEdit && <ActionDialog title="编辑项目" actionKey="project-edit">
+            <form className="fields" action={updateProject}>
+              <input type="hidden" name="projectId" value={project.id} />
+              <label>项目名称<input name="name" defaultValue={project.name} maxLength={200} required /></label>
+              <label>说明<textarea name="description" defaultValue={project.description} maxLength={4000} /></label>
+              <div className="form-actions"><button>保存项目</button></div>
+            </form>
+          </ActionDialog>}
+          {project.role === 'owner' && <ActionDialog title="项目成员" actionKey="project-members">
+            <ul className="member-list">
+              {members.map((member) => (
+                <li key={member.id}>
+                  <span className="member-name"><strong>{member.name}</strong><small>{member.email} · {roleNames[member.role]}</small></span>
+                  {canEdit && member.role !== 'owner' && (
+                    <form action={changeMember} className="inline-fields">
+                      <input type="hidden" name="projectId" value={project.id} />
+                      <input type="hidden" name="userId" value={member.id} />
+                      <select aria-label={`${member.name} 的权限`} name="role" defaultValue={member.role} key={member.role}>
+                        <option value="member">成员</option><option value="viewer">只读</option><option value="remove">移除</option>
+                      </select>
+                      <button>更新</button>
+                    </form>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {canEdit && assignable.length > 0 && <form action={changeMember} className="fields modal-group">
+              <input type="hidden" name="projectId" value={project.id} />
+              <div className="field-row">
+                <label>账号<select name="userId" required>
+                  {assignable.map((user) => <option key={user.id} value={user.id}>{user.email}</option>)}
+                </select></label>
+                <label>权限<select name="role"><option value="member">成员</option><option value="viewer">只读</option></select></label>
+              </div>
+              <div className="form-actions"><button>添加成员</button></div>
+            </form>}
+          </ActionDialog>}
+          {canEdit && <ActionDialog title="归档项目" actionKey="project-archive">
+            <form action={archiveProject} className="fields">
+              <input type="hidden" name="projectId" value={project.id} />
+              <p>归档后锁定项目设置，项目仍可查看。</p>
+              <div className="form-actions"><button className="btn-danger">确认归档</button></div>
+            </form>
+          </ActionDialog>}
+        </div>
+      </section>
+    </section>
   );
 }

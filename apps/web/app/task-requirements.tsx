@@ -1,5 +1,6 @@
 import { maxPlanKnowledgeVersions, type KnowledgeEntry, type Project, type ProjectRequirement, type RepositoryBinding } from '@ado/shared';
 import { registerRequirement, retireRequirement, startAgentPlan } from './actions';
+import { ActionDialog } from './console-controls';
 import { api, readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
 import { ActionFeedback, SubmitButton } from './task-feedback';
@@ -55,8 +56,7 @@ export async function TaskRequirements({ project, taskId, result, repositories, 
   const feedback = notice ?? (result && Object.hasOwn(issues, result) ? issues[result] : undefined);
 
   return <>
-    <details id="task-requirements" open={Boolean(result || error)}>
-      <summary>已批准的需求来源</summary>
+    <ActionDialog title="已批准的需求来源" actionKey="requirements" openOnLoad={Boolean(result && result !== 'refresh')}>
       {feedback && <ActionFeedback key={result} message={feedback} error={!notice} />}
       {error ? <p className="feedback" role="alert">{error} <a href={retryUrl}>重新加载需求来源</a></p> : sources?.length ? <ul className="members">{sources.map((source) => <li key={source.id}>
         <div>
@@ -79,8 +79,8 @@ export async function TaskRequirements({ project, taskId, result, repositories, 
         <label>批准内容摘录<textarea name="excerpt" maxLength={4000} required /></label>
         <SubmitButton pendingLabel="正在登记…">登记已批准需求</SubmitButton>
       </form>}
-    </details>
-    {canWrite && repositories.length > 0 && <details><summary>用 Agent 规划需求</summary>
+    </ActionDialog>
+    {canWrite && repositories.length > 0 && <ActionDialog title="用 Agent 规划需求" actionKey="plan">
       <form className="fields" action={startAgentPlan}>
         <input type="hidden" name="projectId" value={project.id} />
         <label>目标仓库<select name="repositoryId" required>
@@ -104,6 +104,6 @@ export async function TaskRequirements({ project, taskId, result, repositories, 
         <label>需求<textarea name="request" maxLength={8000} required /></label>
         <SubmitButton pendingLabel="正在提交…">开始规划</SubmitButton>
       </form>
-    </details>}
+    </ActionDialog>}
   </>;
 }

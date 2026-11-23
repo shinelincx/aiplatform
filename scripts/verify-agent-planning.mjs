@@ -317,7 +317,12 @@ try {
   });
   assert.equal(rendered.status, 200);
   const html = await rendered.text();
-  assert(html.includes('用 Agent 规划需求') && html.includes('批准方案') && html.includes('实施步骤') && html.includes('Agent 与 Skill'));
+  assert(html.includes('用 Agent 规划需求') && html.includes('批准方案') && html.includes('实施步骤'));
+  const registryPage = await globalThis.fetch(new URL(`/?project=${first.id}&section=agents`, web), {
+    headers: { Cookie: `ado_session=${token}` },
+  });
+  assert.equal(registryPage.status, 200);
+  assert((await registryPage.text()).includes('Agent 与 Skill'));
   assert(html.includes(requirement.referenceUrl) && html.includes('规划使用的批准摘录'));
 
   await request(`${taskPath}/transition`, {
@@ -473,7 +478,7 @@ try {
   });
   assert.equal(metricsPage.status, 200);
   const metricsHtml = await metricsPage.text();
-  assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('执行队列'));
+  assert(metricsHtml.includes('fixture-pm-resolved') && metricsHtml.includes('最近审计记录') && metricsHtml.includes('累计 TOKENS'));
   assert(metricsHtml.includes('月度费用与预算') && metricsHtml.includes('暂无估算'));
 
   const cancelled = await planning.start(account, first.id, { ...input, requirementId: null, request: 'Cancel during inference',

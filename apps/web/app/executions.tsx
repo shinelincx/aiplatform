@@ -3,6 +3,7 @@ import { executionQualityGate, independentCheckStatuses, workerDiskPressure, typ
   type VerificationCheck, type WorkerReport } from '@ado/shared';
 import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
   reviewExecution, startExecution, stopExecution } from './actions';
+import { ActionDialog } from './console-controls';
 import { read, readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
 import { RefreshExecution } from './refresh-execution';
@@ -87,7 +88,7 @@ function WorkerChoice({ workers, selected }: { workers?: WorkerReport[]; selecte
 }
 
 function CheckResults({ checks }: { checks: CheckResult[] }) {
-  return <ul className="members">{checks.map((check) => <li key={check.name}>
+  return <ul className="check-list">{checks.map((check) => <li key={check.name} data-status={check.status}>
     <div>
       <span>{check.name} · {checkLabels[check.status]}</span>
       {check.reason && <div><small>{checkReasons[check.reason]}</small></div>}
@@ -108,8 +109,8 @@ function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
   </li>)}</ul>;
 }
 
-export async function Executions({ project, task, checks, independentChecks, autoDraftPr, planned }: {
-  project: Project; task: Task; checks: VerificationCheck[]; independentChecks: IndependentCheck[]; autoDraftPr: boolean; planned: boolean;
+export async function Executions({ project, task, checks, independentChecks, autoDraftPr, planned, approvals }: {
+  project: Project; task: Task; checks: VerificationCheck[]; independentChecks: IndependentCheck[]; autoDraftPr: boolean; planned: boolean; approvals: boolean;
 }) {
   const url = `/projects/${project.id}/tasks/${task.id}/executions`;
   const [runsResult, workersResult] = await Promise.all([
@@ -150,41 +151,51 @@ export async function Executions({ project, task, checks, independentChecks, aut
       status === 'online' && capabilities && !workerDiskPressure(capabilities)
       && (!latest.requestedWorkerId || latest.requestedWorkerId === id));
   const workerName = (id: string) => workers.find((worker) => worker.id === id)?.name ?? id.slice(0, 8);
+  const dispatchLabel = revising ? '派发修订' : latest ? '重试执行' : '派发任务';
+  const publishLabel = latest?.delivery ? '重试发布' : '发布分支并创建草稿 PR';
   const identity = <>
     <input type="hidden" name="projectId" value={project.id} />
     <input type="hidden" name="taskId" value={task.id} />
+    {approvals && <input type="hidden" name="section" value="approvals" />}
   </>;
 
-  return <section aria-labelledby="execution-heading" className="repository-form">
-    <h4 id="execution-heading">Codex 执行</h4>
+  return <section aria-labelledby="execution-heading" className="execution-block">
+    <header className="execution-head">
+      <h4 id="execution-heading">Codex 执行</h4>
+      {latest && <span className="badge" data-status={latest.status}>{stateLabels[latest.status]}</span>}
+    </header>
     {(active || publishing || (checkingQa && project.status === 'active')) && <RefreshExecution />}
     {workersResult.issue && <SectionReadError label="执行 Worker 列表" issue={workersResult.issue} />}
-    {canStart && <form action={startExecution} className="fields">
+    {canStart && <ActionDialog title={dispatchLabel} actionKey="dispatch" renderClosed>
+          <form action={startExecution} className="fields">
       {identity}{revising && <input type="hidden" name="revisionOf" value={latest.id} />}
       <WorkerChoice workers={candidates} /><SubmitButton pendingLabel="正在请求派发…">{revising ? '按驳回意见派发修订' : latest ? '重试执行' : '派发任务'}</SubmitButton>
-    </form>}
+    </form>
+        </ActionDialog>}
     {!latest && <p className="muted">暂无执行记录。</p>}
     {latest && <>
-      <p role="status">{latest.cancelRequested && active ? '正在取消'
+      <p role="status" className="execution-state" data-state={latest.status}>{latest.cancelRequested && active ? '正在取消'
         : latest.status === 'succeeded' && latest.report?.passed ? '检查已通过' : stateLabels[latest.status]}</p>
       {waitingForMaven && <p className="feedback">当前分配范围内没有可领取任务的 Maven Worker。</p>}
       {owner && awaitingChecks && !hasChecks && <p className="muted">配置仓库检查计划后可重新派发。</p>}
-      {latest.requestedWorkerId && <p>指定 Worker · {workerName(latest.requestedWorkerId)}</p>}
-      {latest.workerId && <p>领取 Worker · {workerName(latest.workerId)}</p>}
+      {latest.requestedWorkerId && <p className="meta-line">指定 Worker · {workerName(latest.requestedWorkerId)}</p>}
+      {latest.workerId && <p className="meta-line">领取 Worker · {workerName(latest.workerId)}</p>}
       {latest.revision && <div>
         <p>修订来源 · 执行 {latest.revision.runId.slice(0, 8)} · 补丁 <code title={latest.revision.patchHash}>{latest.revision.patchHash.slice(0, 12)}</code></p>
         <p className="description">{latest.revision.reason}</p>
       </div>}
-      {owner && project.status === 'active' && latest.status === 'queued' && <form action={changeExecutionWorker} className="fields">
-        {identity}<input type="hidden" name="runId" value={latest.id} />
-        <WorkerChoice key={latest.requestedWorkerId} workers={candidates} selected={latest.requestedWorkerId} />
-        <button className="secondary">更新分配</button>
-      </form>}
+      {owner && project.status === 'active' && latest.status === 'queued' && <ActionDialog title="调整 Worker 分配" actionKey="worker-assignment">
+        <form action={changeExecutionWorker} className="fields">
+          {identity}<input type="hidden" name="runId" value={latest.id} />
+          <WorkerChoice key={latest.requestedWorkerId} workers={candidates} selected={latest.requestedWorkerId} />
+          <div className="form-actions"><button>更新分配</button></div>
+        </form>
+      </ActionDialog>}
       {latest.threadId && <p className="description">线程 ID {latest.threadId}</p>}
       {owner && active && !latest.cancelRequested && <form action={stopExecution}>
         {identity}<input type="hidden" name="runId" value={latest.id} /><button className="secondary">取消执行</button>
       </form>}
-      {latest.report && <div>
+      {latest.report && <div className="report-block">
         <h5>第 {latest.report.attempt} 次检查报告</h5>
         <CheckResults checks={latest.report.checks} />
         {earlierChecks?.map(({ sequence, payload }) => Array.isArray(payload.checks) &&
@@ -195,9 +206,9 @@ export async function Executions({ project, task, checks, independentChecks, aut
       </div>}
       {latest.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${latest.id}`}>下载受测补丁</a>
         {' '}<small>{Math.ceil(latest.artifact.size / 1024)} KB</small></p>}
-      {latest.qa && <div>
+      {latest.qa && <div className="qa-block">
         <h5>QA Agent · v{latest.qa.version} · {latest.qa.model}</h5>
-        <p role="status">{qaLabels[latest.qa.state]}</p>
+        <p role="status" className="execution-state" data-state={latest.qa.state}>{qaLabels[latest.qa.state]}</p>
         {latest.qa.partialPatch && <p>QA 审查了补丁开头的 64 KiB。</p>}
         {latest.qa.assessment && <>
           <p><strong>{qaRecommendations[latest.qa.assessment.recommendation]}</strong></p>
@@ -218,7 +229,8 @@ export async function Executions({ project, task, checks, independentChecks, aut
         {!gate.workerReady && <p>等待匹配当前归档的 Worker 检查通过。</p>}
         <ul>{gate.checks.map(check => <li key={check.name}>{check.name} · {check.status === 'missing' ? '待登记' : checkLabels[check.status]}</li>)}</ul>
         {canRecordEvidence && (latest.evidence ?? []).filter(entry => entry.check).length < 100
-          && <form action={addExecutionEvidence} className="fields" aria-label="登记独立复验">
+          && <ActionDialog title="登记独立复验" actionKey="independent-evidence" renderClosed>
+          <form action={addExecutionEvidence} className="fields" aria-label="登记独立复验">
             {identity}<input type="hidden" name="runId" value={latest.id} />
             <input type="hidden" name="patchHash" value={canRecordEvidence.sha256} />
             <label>复验项目<select name="checkName" required defaultValue="">
@@ -234,24 +246,28 @@ export async function Executions({ project, task, checks, independentChecks, aut
             <label>报告链接（可选）<input type="url" name="url" maxLength={1000} /></label>
             <p>结果须来自对当前归档的独立复验。</p>
             <SubmitButton pendingLabel="正在登记…">登记独立复验</SubmitButton>
-          </form>}
+          </form>
+        </ActionDialog>}
       </section>}
       {(Boolean(latest.evidence?.length) || canRecordEvidence) && <div>
         <h5>复验证据</h5>
         <EvidenceList entries={latest.evidence} />
-        {canRecordEvidence && (latest.evidence ?? []).filter(entry => !entry.check).length < 10 && <form action={addExecutionEvidence} className="fields">
+        {canRecordEvidence && (latest.evidence ?? []).filter(entry => !entry.check).length < 10 && <ActionDialog title="添加复验证据" actionKey="evidence">
+          <form action={addExecutionEvidence} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
           <input type="hidden" name="patchHash" value={canRecordEvidence.sha256} />
           <label>复验结果<textarea name="summary" required maxLength={2000} /></label>
           <label>证据链接（可选）<input type="url" name="url" maxLength={1000} /></label>
           <button className="secondary">保存复验证据</button>
-        </form>}
+        </form>
+        </ActionDialog>}
       </div>}
       {latest.review ? <div>
         <p>人工审核 · {latest.review.decision === 'approved' ? '已批准' : '已驳回'} · {latest.review.reviewer}</p>
         {latest.review.comment && <p className="description">{latest.review.comment}</p>}
       </div> : owner && project.status === 'active' && task.status === 'REVIEW' && latest.report?.passed
-        && <form action={reviewExecution} className="fields">
+        && <ActionDialog title="人工审核" actionKey="review" renderClosed>
+          <form action={reviewExecution} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
           {autoDraftPr && latest.artifact && <p>批准变更后将自动发布分支并创建草稿 PR。</p>}
           <label>审核意见<textarea name="comment" maxLength={1500} placeholder="驳回时请填写原因" /></label>
@@ -259,7 +275,8 @@ export async function Executions({ project, task, checks, independentChecks, aut
             <SubmitButton name="decision" value="approved" pendingLabel="正在提交…" disabled={gate?.ready === false}>批准变更</SubmitButton>
             <SubmitButton name="decision" value="rejected" className="secondary" pendingLabel="正在提交…">驳回变更</SubmitButton>
           </div>
-        </form>}
+        </form>
+        </ActionDialog>}
       {latest.delivery && <div>
         <p role="status">{waitingOnGithub ? '等待 GitHub App 配置' : deliveryLabels[latest.delivery.state]}
           {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
@@ -274,16 +291,18 @@ export async function Executions({ project, task, checks, independentChecks, aut
       </div>}
       {owner && project.status === 'active' && task.status === 'REVIEW' && latest.review?.decision === 'approved'
         && latest.report?.passed && latest.artifact && gate?.ready !== false && (!latest.delivery || latest.delivery.state === 'failed')
-        && <form action={publishExecution} className="fields">
+        && <ActionDialog title={publishLabel} actionKey="publish">
+          <form action={publishExecution} className="fields">
           {identity}<input type="hidden" name="runId" value={latest.id} />
           <button>{latest.delivery ? '重试发布' : '发布分支并创建草稿 PR'}</button>
-        </form>}
+        </form>
+        </ActionDialog>}
       {events?.length ? <ol className="members">
         {events.map((event) => (
           <li key={event.sequence}>
             <div><span>{label(event)}</span>
               {event.kind === 'result' && Array.isArray(event.payload.files) &&
-                <ul>{event.payload.files.filter((name): name is string => typeof name === 'string')
+                <ul className="file-chips">{event.payload.files.filter((name): name is string => typeof name === 'string')
                   .map((name, i) => <li key={i}>{name}</li>)}</ul>}
               {event.kind === 'result' && event.payload.usage !== null && typeof event.payload.usage === 'object' &&
                 'inputTokens' in event.payload.usage && 'outputTokens' in event.payload.usage &&
@@ -294,9 +313,9 @@ export async function Executions({ project, task, checks, independentChecks, aut
           </li>
         ))}
       </ol> : null}
-      {runs.length > 1 && <details>
-        <summary>较早的执行</summary>
-        <ul className="members">{runs.slice(1).map((run) => <li key={run.id}>
+      {runs.length > 1 && <details className="drawer">
+        <summary><span>较早的执行</span><small>{runs.length - 1} 条</small></summary>
+        <ul className="member-list">{runs.slice(1).map((run) => <li key={run.id}>
           <div><span>执行 {run.id.slice(0, 8)} · {stateLabels[run.status]}</span>
             {run.review && <p>{run.review.decision === 'rejected' ? '已驳回' : '已批准'} · {run.review.reviewer}</p>}
             {run.review?.comment && <p className="description">{run.review.comment}</p>}

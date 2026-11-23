@@ -1,145 +1,208 @@
-import { checkApiHealth, type Account, type Project, type ProjectMember, type ProjectOverview } from '@ado/shared';
+import { checkApiHealth, type Account, type Project, type ProjectMember, type ProjectOperations, type ProjectOverview,
+  type RepositoryBinding, type Task, type WorkerReport } from '@ado/shared';
 import Link from 'next/link';
-import { login, logout } from './actions';
+import { redirect } from 'next/navigation';
+import { AccountFooter } from './account-footer';
+import { login } from './actions';
 import { Agents } from './agents';
 import { read, readSection } from './api-client';
+import { CommandButton, CommandPalette, ConsoleClock, MobileMenu, ProjectSwitcher, type ConsoleCommand } from './console-controls';
+import { Dashboard, Metric, Telemetry } from './dashboard';
+import { issues, notices } from './feedback';
+import { BootMark, BrandMark, Icon, IconSprite } from './icons';
 import { KnowledgePanel } from './knowledge';
-import { Operations } from './operations';
-import { CreateAccount, ProjectDetails, ProjectSidebar } from './projects';
-import { Repositories } from './repositories';
 import { DataPanel, SectionReadError } from './section-feedback';
+import { Operations } from './operations';
+import { ProjectDetails } from './projects';
+import { Repositories } from './repositories';
 import { Tasks } from './tasks';
+import { ThemeToggle } from './theme';
 import { Workers } from './workers';
+import { settingsHref, settingsPath, workspaceHref, workspaceViews, type WorkspaceView } from './workspace';
 
 export const dynamic = 'force-dynamic';
 
-const issues: Record<string, string> = {
-  login: '登录失败，请检查邮箱和密码。',
-  expired: '会话已失效，请重新登录。',
-  offline: '无法连接控制面 API，请稍后重试。',
-  forbidden: '当前账号没有执行此操作的权限。',
-  conflict: '数据已存在或项目已归档，请检查后重试。',
-  project: '无法保存项目，请检查输入。',
-  user: '无法创建账号，请检查输入。',
-  member: '无法更新成员，请刷新页面后重试。',
-  repository: '无法绑定仓库，请确认 GitHub App 的仓库权限和分支名。',
-  verification: '检查配置保存失败。请核对 JSON、检查名称、工作目录和命令参数。',
-  review: '审核提交失败。选择驳回时请填写原因。',
-  revision: '修订派发失败。请核对最新驳回记录，并确认有支持读取前序归档的 Worker。',
-  evidence: '证据保存失败。请核对当前补丁、证据数量和链接格式。',
-  'quality-gate': '必需检查尚未通过。请打开当前归档的质量门禁查看缺项。',
-  delivery: '发布请求失败。请确认当前补丁已归档并通过检查和审核。',
-  'delivery-refresh': '无法同步 GitHub PR 状态。请检查 GitHub App 和目标仓库访问权限。',
-  'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',
-  task: '无法保存任务，请检查输入、任务关联和当前状态。',
-  'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
-  'worker-assignment': '无法分配 Worker，请检查任务是否仍在排队，以及 Worker 的项目授权和执行能力。',
-  'model-rate': '无法保存费率，请核对模型标识、美元费率和 HTTPS 来源链接。',
-  'agent-config': '请配置规划 Agent 的 API 密钥和模型。',
-  'agent-plan': '无法运行 Agent 规划，请检查仓库、需求和规划角色配置。',
-  'agent-settings': '无法保存 Agent 或 Skill 配置，请检查模型、版本和输入。',
-  'agent-skill-binding': '无法启用此配置。请确认项目未归档，所绑定的 Skill 版本可用。',
-  'agent-qa': '无法重试 QA，请检查当前任务及检查报告。',
-};
+type Query = { project?: string; issue?: string; notice?: string; installation?: string;
+  task?: string; section?: string; lane?: string; create?: string; dialog?: string; month?: string; requirementResult?: string;
+  skill?: string; skillVersion?: string; skillResult?: string; knowledgeQuery?: string; knowledgeKind?: string;
+  knowledgeHistory?: string; knowledgeEntry?: string; knowledgeVersion?: string; knowledgeResult?: string };
 
-export default async function Home({ searchParams }: {
-  searchParams: Promise<{ project?: string; issue?: string; notice?: string; installation?: string; task?: string; section?: string; month?: string;
-    requirementResult?: string; skill?: string; skillVersion?: string; skillResult?: string; knowledgeQuery?: string;
-    knowledgeKind?: string; knowledgeHistory?: string; knowledgeEntry?: string; knowledgeVersion?: string; knowledgeResult?: string }>;
+function resolveView(query: Query): WorkspaceView {
+  const view = workspaceViews.find(({ id }) => id === query.section);
+  if (view?.id === 'knowledge' || view?.id === 'operations') return view.id;
+  if (query.task) return view?.id === 'approvals' ? 'approvals' : 'tasks';
+  if (query.installation || query.notice === 'checks-saved') return 'repositories';
+  if (query.create === 'task') return 'tasks';
+  return view?.id ?? 'overview';
+}
+
+function LoginScreen({ reachable, issue, passwordChanged }: { reachable: boolean; issue?: string; passwordChanged: boolean }) {
+  return <main className="boot">
+    <div className="boot__grid" aria-hidden="true" />
+    <div className="boot__theme"><ThemeToggle /></div>
+    <section className="boot__core">
+      <div className="boot__mark"><BootMark /></div>
+      <p className="boot__kicker">AI DEVELOPMENT ORGANIZATION</p>
+      <h1 className="boot__title">CONTROL<br />PLANE</h1>
+      <p className="live" data-offline={!reachable}><i />{reachable ? '控制面 API · 连接正常' : '控制面 API · 连接失败'}</p>
+      {issue && Object.hasOwn(issues, issue) && <p role="alert" className="feedback">{issues[issue]}</p>}
+      {passwordChanged && <p role="status" className="notice">{notices['password-changed']}</p>}
+      <form className="fields login-form" action={login}>
+        <label>邮箱<input name="email" type="email" autoComplete="username" maxLength={255} required /></label>
+        <label>密码<input name="password" type="password" autoComplete="current-password" maxLength={256} required /></label>
+        <div className="form-actions"><button className="boot__enter">进入控制面 <Icon name="arrow" /></button></div>
+      </form>
+      <footer className="boot__foot"><span>ADO · CONTROL PLANE</span><span>使用平台账号登录</span></footer>
+    </section>
+  </main>;
+}
+
+function WorkspaceNav({ project, section, overview }: {
+  project: Project; section: WorkspaceView; overview: ProjectOverview | null;
 }) {
+  return <nav className="nav" aria-label="工作区">
+    {workspaceViews.map(({ id, label, caption, icon }, index) => {
+      const badge = id === 'tasks' ? overview?.tasks.open : id === 'approvals' ? overview?.tasks.approval : undefined;
+      return <Link className="nav__item" href={workspaceHref(project.id, id)} key={id} aria-current={section === id ? 'page' : undefined}>
+        <span className="nav__idx" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span><Icon name={icon} />
+        <span className="nav__text"><b>{label}</b><small>{caption}</small></span>
+        {Boolean(badge) && <span className="nav__badge" data-tone={id === 'approvals' ? 'amber' : 'mute'}>{badge}</span>}
+      </Link>;
+    })}
+  </nav>;
+}
+
+export default async function Home({ searchParams }: { searchParams: Promise<Query> }) {
   const query = await searchParams;
+  if (query.section === 'system') {
+    const section = query.dialog === 'project-create' ? 'projects' : query.dialog === 'accounts' ? 'accounts' : 'account';
+    const params = new URLSearchParams();
+    for (const field of ['dialog', 'issue', 'notice'] as const) {
+      if (typeof query[field] === 'string') params.set(field, query[field]);
+    }
+    redirect(`${settingsPath(section)}${params.size ? `?${params}` : ''}`);
+  }
   const [connection, accountResult] = await Promise.allSettled([
     checkApiHealth(process.env.API_BASE_URL ?? 'http://127.0.0.1:3101'),
     read<Account>('/auth/session'),
   ]);
   const reachable = connection.status === 'fulfilled' && connection.value;
   const account = accountResult.status === 'fulfilled' ? accountResult.value : null;
-  const admin = account?.systemRole === 'admin';
-  const projects = account ? await read<Project[]>('/projects') : null;
-  const selected = projects?.find((project) => project.id === query.project) ?? projects?.[0];
-  const [members, users, overviewResult] = await Promise.all([
-    selected?.role === 'owner' ? read<ProjectMember[]>(`/projects/${selected.id}/members`) : null,
-    admin ? read<Account[]>('/users') : null,
-    selected ? readSection<ProjectOverview>(`/projects/${selected.id}/operations/overview`,
-      (data) => Boolean(data.tasks && data.workers && data.executions && Array.isArray(data.alerts))) : null,
-  ]);
-  const overview = overviewResult?.data;
 
-  return (
-    <>
-      <header className="app-header">
-        <div className="brand"><strong>ADO</strong><span>研发管理平台</span></div>
-        {account && selected && <nav className="top-nav" aria-label="工作台导航">
-          <a href="#project-heading">项目</a>
-          <a href="#tasks-heading">任务</a>
-          <a href="#tasks-heading">审批</a>
-          <Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}` : ''}&section=knowledge#project-knowledge`}>项目知识</Link>
-          <a href="#agent-heading">Agent</a>
-          <a href="#workers-heading">Worker</a>
-        </nav>}
-        {account && <form className="header-session" action={logout}>
-          <span>{account.name}</span><button className="secondary">退出</button>
-        </form>}
-      </header>
-      <main className={account ? 'workspace' : undefined}>
-        {!account && <div className="heading">
-          <h1>{account ? '项目工作台' : '登录研发平台'}</h1>
-          <p className="connection" data-offline={!reachable}>
-            控制面 API · {reachable ? '连接正常' : '连接失败'}
-          </p>
+  if (!account) return <>
+    <title>登录 · ADO 控制面</title><IconSprite /><LoginScreen reachable={reachable} issue={query.issue}
+      passwordChanged={query.notice === 'password-changed'} />
+  </>;
+
+  const admin = account.systemRole === 'admin';
+  const projects = await read<Project[]>('/projects') ?? [];
+  const section = resolveView(query);
+  const selected = projects.find((project) => project.id === query.project) ?? projects[0];
+  const feedback = query.issue && Object.hasOwn(issues, query.issue) ? issues[query.issue] : undefined;
+  const notice = query.notice && Object.hasOwn(notices, query.notice) ? notices[query.notice] : undefined;
+  const overviewPage = section === 'overview';
+  const projectPath = selected && `/projects/${selected.id}`;
+  const [overviewResult, bindingsResult, members, users, tasksResult, operationsResult, workersResult] = await Promise.all([
+    projectPath ? readSection<ProjectOverview>(`${projectPath}/operations/overview`, data => Boolean(data.tasks && data.executions && data.workers && Array.isArray(data.alerts))) : null,
+    projectPath ? readSection<RepositoryBinding[]>(`${projectPath}/repositories`, Array.isArray) : null,
+    projectPath && overviewPage && selected.role === 'owner' ? read<ProjectMember[]>(`${projectPath}/members`) : null,
+    admin && overviewPage && selected?.role === 'owner' ? read<Account[]>('/users') : null,
+    projectPath && (overviewPage || section === 'tasks' || section === 'approvals') ? readSection<Task[]>(`${projectPath}/tasks`, Array.isArray) : null,
+    projectPath && overviewPage ? readSection<ProjectOperations>(`${projectPath}/operations`, data => Array.isArray(data.usage)) : null,
+    projectPath && overviewPage ? readSection<WorkerReport[]>(`${projectPath}/workers`, Array.isArray) : null,
+  ]);
+  const overview = overviewResult?.data ?? null;
+  const bindings = bindingsResult?.data ?? [];
+  const tasks = tasksResult?.data ?? [];
+  const operations = operationsResult?.data ?? null;
+  const workers = workersResult?.data;
+  const createHref = selected?.status === 'active' && selected.role !== 'viewer'
+    ? workspaceHref(selected.id, 'tasks', { create: 'task' }) : undefined;
+  const commands: ConsoleCommand[] = selected ? workspaceViews.map(({ id, label, caption, icon }) => ({
+    label, hint: caption, icon, href: workspaceHref(selected.id, id),
+  })) : [];
+  commands.push({ label: '设置', hint: 'SETTINGS', icon: 'shield', href: settingsHref });
+  if (createHref) commands.push({ label: '新建任务', hint: 'NEW TASK', icon: 'plus', href: createHref });
+  for (const project of projects) {
+    if (project.id !== selected?.id) commands.push({ label: project.name, hint: project.code, icon: 'layers',
+      href: workspaceHref(project.id, section) });
+  }
+
+  return <>
+    <title>{selected ? `${selected.name} · ADO` : '工作台 · ADO'}</title><IconSprite />
+    <div className="shell" data-view={section}>
+      <header className="topbar">
+        <Link href={selected ? workspaceHref(selected.id) : '/'} className="brand" aria-label="ADO 控制面首页">
+          <BrandMark /><span className="brand__text"><strong>ADO</strong><small>CONTROL PLANE</small></span>
+        </Link>
+        {projects.length > 0 && <ProjectSwitcher value={selected ? workspaceHref(selected.id, section) : ''}
+          projects={projects.map(({ id, name, code }) => ({ name, code, href: workspaceHref(id, section) }))} />}
+        {selected && <div className="topstats" aria-label="项目指标">
+          <Metric label="OPEN">{overview?.tasks.open ?? '—'}</Metric>
+          <Metric label="ACTIVE">{overview ? overview.executions.running + overview.executions.queued : '—'}</Metric>
+          <Metric label="NODES">{overview?.workers.online ?? '—'}{overview && <i>/{overview.workers.total}</i>}</Metric>
+          <Metric label="APPROVAL" tone="amber">{overview?.tasks.approval ?? '—'}</Metric>
         </div>}
-        {query.issue && Object.hasOwn(issues, query.issue) && <p role="alert" className="feedback">{issues[query.issue]}</p>}
-        {query.notice === 'user-created' && account && <p role="status">账号已创建。</p>}
-        {query.notice === 'checks-saved' && account && <p role="status">检查与交付设置已保存。</p>}
-        {account ? (
-          <div className="workspace-grid">
-            <div className="workspace-sidebar">
-              <div className="workspace-title"><h1>项目工作台</h1><p className="connection" data-offline={!reachable}>控制面 API · {reachable ? '连接正常' : '连接失败'}</p></div>
-              <ProjectSidebar projects={projects ?? []} selected={selected} admin={admin} />
-            </div>
-            <div className="workspace-panels">
-              {selected && <ProjectDetails key={selected.id} project={selected} members={members ?? []} users={users ?? []}
-                overview={overview ?? null} overviewFeedback={overviewResult?.issue &&
-                  <SectionReadError label="项目运行概览" issue={overviewResult.issue} />} taskId={query.task} live={!query.task && query.section !== 'operations'} />}
-              {selected && query.section === 'operations' && <div className="inline-fields"><Link href={`/?project=${selected.id}${query.task ? `&task=${encodeURIComponent(query.task)}#task-detail` : '#tasks-heading'}`}>返回项目工作台</Link></div>}
-              {selected && query.section === 'operations' && <DataPanel key={selected.id} id="operations"
-                headingId="operations-heading" title="项目用量与审计">
-                <Operations project={selected} month={query.month} task={query.task} issue={query.issue} notice={query.notice} />
-              </DataPanel>}
-              {selected && <Tasks project={selected} selectedId={query.task} requirementResult={query.requirementResult} notice={query.notice} />}
-              {selected && query.section === 'knowledge' && <DataPanel key={`knowledge:${selected.id}`} id="project-knowledge"
-                headingId="knowledge-heading" title="项目知识">
-                <KnowledgePanel project={selected} taskId={query.task} search={query.knowledgeQuery} kind={query.knowledgeKind}
-                  history={query.knowledgeHistory} entryId={query.knowledgeEntry} versionId={query.knowledgeVersion} result={query.knowledgeResult} />
-              </DataPanel>}
-              {selected && <DataPanel key={`repositories:${selected.id}:${query.installation ?? ''}`} headingId="repository-heading" title="GitHub 仓库">
-                <Repositories project={selected} installation={query.installation}
-                  manage={admin && selected.role === 'owner' && selected.status === 'active'} />
-              </DataPanel>}
-              {selected && <DataPanel key={`agents:${selected.id}`} id="agent-registry" headingId="agent-heading" title="Agent 与 Skill">
-                <Agents project={selected} selectedSkill={query.skill} selectedVersion={query.skillVersion} skillResult={query.skillResult} />
-              </DataPanel>}
-              {selected && <DataPanel key={`workers:${selected.id}`} headingId="workers-heading" title="项目 Worker">
-                <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />
-              </DataPanel>}
-              {admin && <CreateAccount users={users ?? []} />}
-            </div>
-            {selected && overview && <aside className="status-sidebar" aria-label="运行状态">
-              <h2>运行状态</h2>
-              <section><h3>任务</h3><dl><div><dt>进行中</dt><dd>{overview.tasks.open} 项</dd></div><div><dt>已完成</dt><dd>{overview.tasks.completed} 项</dd></div></dl></section>
-              <section><h3>审批</h3><dl><div><dt>待审批方案</dt><dd>{overview.tasks.approval} 项</dd></div></dl></section>
-              <section><h3>Agent</h3><dl><div><dt>已启用</dt><dd>{overview.agentsEnabled} 个</dd></div></dl></section>
-              <section><h3>Worker</h3><dl><div><dt>在线</dt><dd>{overview.workers.online} / {overview.workers.total}</dd></div></dl></section>
-            </aside>}
+        <div className="topbar__right">
+          <ThemeToggle /><CommandButton /><ConsoleClock />
+          {selected && <MobileMenu><WorkspaceNav project={selected} section={section} overview={overview} /></MobileMenu>}
+        </div>
+      </header>
+      <aside className="rail" aria-label="项目与导航">
+        {selected && <>
+          <div className="rail__proj">
+            <p className="rail__label">PROJECT</p>
+            <Link className="rail__projcard" href={workspaceHref(selected.id)}>
+              <strong className="rail__projcode">{selected.code}</strong>
+              <p title={selected.name}>{bindings?.[0]?.fullName ?? selected.name}</p>
+              <div className="rail__projmeta">
+                <span><i className={reachable ? 'led led--on' : 'led'} />{bindings?.[0]?.defaultBranch ?? (selected.status === 'active' ? 'ACTIVE' : 'ARCHIVED')}</span>
+                {overview && <span>{overview.tasks.open} OPEN</span>}
+              </div>
+            </Link>
           </div>
-        ) : (
-          <form className="panel fields login" action={login}>
-            <label>邮箱<input name="email" type="email" autoComplete="username" maxLength={255} required /></label>
-            <label>密码<input name="password" type="password" autoComplete="current-password" maxLength={256} required /></label>
-            <button>登录</button>
-          </form>
-        )}
+          <div><p className="rail__label">WORKSPACE</p><WorkspaceNav project={selected} section={section} overview={overview} /></div>
+        </>}
+        <div className="rail__quick">
+          <p className="rail__label">QUICK</p>
+          {createHref && <Link className="quickbtn" href={createHref} scroll={false}><Icon name="plus" /><span>新建任务</span><kbd>N</kbd></Link>}
+          <CommandButton quick />
+        </div>
+      </aside>
+
+      <main className="main" id="workspace">
+        <div className="page" key={selected?.id}>
+          {feedback && <p role="alert" className="feedback workspace-feedback">{feedback}</p>}
+          {notice && <p role="status" className="notice workspace-feedback">{notice}</p>}
+          {selected ? <>
+            {overviewPage && <>
+              {overviewResult?.issue && <SectionReadError label="项目运行概览" issue={overviewResult.issue} />}
+              <Dashboard project={selected} tasks={tasks} overview={overview} operations={operations} workers={workers ?? []} reachable={reachable} />
+              <ProjectDetails project={selected} members={members ?? []} users={users ?? []} overview={overview} live reachable={reachable} />
+            </>}
+            {(section === 'tasks' || section === 'approvals') && <Tasks project={selected} tasks={tasks} taskIssue={tasksResult?.issue}
+              repositories={bindings} repositoryIssue={bindingsResult?.issue} selectedId={query.task} lane={query.lane}
+              create={query.create === 'task'} approvals={section === 'approvals'} feedback={feedback} notice={notice} requirementResult={query.requirementResult}
+              workerUnavailable={overview?.alerts.some(alert => alert.taskId === query.task && alert.kind === 'worker_unavailable')} />}
+            {section === 'repositories' && <Repositories project={selected} bindings={bindings} bindingIssue={bindingsResult?.issue} installation={query.installation}
+              manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
+            {section === 'agents' && <Agents project={selected} selectedSkill={query.skill} selectedVersion={query.skillVersion} skillResult={query.skillResult} />}
+            {section === 'workers' && <Workers project={selected} manage={admin && selected.role === 'owner' && selected.status === 'active'} />}
+            {section === 'knowledge' && <DataPanel id="project-knowledge" headingId="knowledge-heading" title="项目知识">
+              <KnowledgePanel project={selected} taskId={query.task} search={query.knowledgeQuery} kind={query.knowledgeKind}
+                history={query.knowledgeHistory} entryId={query.knowledgeEntry} versionId={query.knowledgeVersion} result={query.knowledgeResult} />
+            </DataPanel>}
+            {section === 'operations' && <Operations project={selected} month={query.month} task={query.task} />}
+          </> : <section className="panel">
+            <p className="eyebrow">PROJECT</p><h1>还没有可用项目</h1>
+            <p className="muted">{admin ? '请在项目目录中创建项目。' : '获得项目授权后即可查看任务与执行。'}</p>
+            {admin && <Link className="utility-btn" href={settingsPath('projects')}>项目目录</Link>}
+          </section>}
+        </div>
       </main>
-    </>
-  );
+      <Telemetry project={selected} overview={overview} reachable={reachable} workers={workers ?? undefined} events={operations?.audit} />
+      <AccountFooter account={account} />
+    </div>
+    <CommandPalette commands={commands} createHref={createHref} />
+  </>;
 }

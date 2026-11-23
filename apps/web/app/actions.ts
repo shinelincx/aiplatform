@@ -3,17 +3,24 @@
 import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, isWorkerId, type AgentPlan, type Project, type Session, type WorkerCredential } from '@ado/shared';
+import { agentRoleLabels, budgetAmountPattern, budgetMonthPattern, isWorkerId, type AgentPlan, type Session, type WorkerCredential } from '@ado/shared';
 import { api, sessionCookie } from './api-client';
+import { settingsHref, settingsPath } from './workspace';
 
 async function execute(path: string, options: RequestInit, authenticated = true) {
-  return api(path, options, authenticated).catch(() => null);
+  const response = await api(path, options, authenticated).catch(() => null);
+  if (response?.ok && path !== '/auth/session') revalidatePath('/');
+  return response;
 }
 
 function projectPath(form: FormData) {
   const id = String(form.get('projectId') ?? '');
   if (!/^[a-f0-9-]{36}$/i.test(id)) redirect('/');
   return { query: `/?project=${id}`, endpoint: `/projects/${id}` };
+}
+
+function atDialog(query: string, key: string) {
+  return `${query}${query.includes('?') ? '&' : '?'}dialog=${encodeURIComponent(key)}`;
 }
 
 function issue(response: Response | null, fallback: string) {
@@ -48,16 +55,42 @@ export async function logout() {
   redirect('/');
 }
 
+export async function updateProfile(form: FormData) {
+  const target = atDialog(settingsPath('account'), 'profile');
+  const response = await execute('/auth/profile', {
+    method: 'PATCH', body: JSON.stringify({ name: form.get('name') }),
+  });
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'profile')}`);
+  revalidatePath(settingsHref, 'layout');
+  redirect(`${target}&notice=profile-saved`);
+}
+
+export async function changePassword(form: FormData) {
+  const target = atDialog(settingsPath('account'), 'password');
+  const currentPassword = form.get('currentPassword');
+  const newPassword = form.get('newPassword');
+  if (newPassword !== form.get('confirmPassword')) redirect(`${target}&issue=password-confirm`);
+  if (currentPassword === newPassword) redirect(`${target}&issue=password-same`);
+  const response = await execute('/auth/password', {
+    method: 'PATCH', body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!response?.ok) redirect(`${target}&issue=${response?.status === 403 ? 'current-password' : issue(response, 'password')}`);
+  (await cookies()).delete(sessionCookie);
+  redirect('/?notice=password-changed');
+}
+
 export async function createProject(form: FormData) {
+  const path = settingsPath('projects');
+  const target = atDialog(path, 'project-create');
   const response = await execute('/projects', {
     method: 'POST',
     body: JSON.stringify({
       code: form.get('code'), name: form.get('name'), description: form.get('description'),
     }),
   });
-  if (!response?.ok) redirect(`/?issue=${issue(response, 'project')}`);
-  const project = await response.json() as Project;
-  redirect(`/?project=${project.id}`);
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'project')}`);
+  revalidatePath(path);
+  redirect(`${target}&notice=project-created`);
 }
 
 export async function updateProject(form: FormData) {
@@ -66,8 +99,8 @@ export async function updateProject(form: FormData) {
     method: 'PATCH',
     body: JSON.stringify({ name: form.get('name'), description: form.get('description') }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'project')}`);
-  redirect(query);
+  if (!response?.ok) redirect(`${atDialog(query, 'project-edit')}&issue=${issue(response, 'project')}`);
+  redirect(`${atDialog(query, 'project-edit')}&notice=project-saved`);
 }
 
 function operationsTarget(form: FormData) {
@@ -80,7 +113,8 @@ function operationsTarget(form: FormData) {
 }
 
 export async function saveModelRate(form: FormData) {
-  const { target, endpoint } = operationsTarget(form);
+  const { target: operations, endpoint } = operationsTarget(form);
+  const target = atDialog(operations, 'rates');
   const model = String(form.get('model') ?? '').trim();
   if (!/^[\w.-]{1,100}$/.test(model)) redirect(`${target}&issue=model-rate#operations`);
   const response = await execute(`${endpoint}/operations/rates/${encodeURIComponent(model)}`, { method: 'PUT', body: JSON.stringify({
@@ -92,7 +126,8 @@ export async function saveModelRate(form: FormData) {
 }
 
 export async function saveMonthlyBudget(form: FormData) {
-  const { endpoint, target, month } = operationsTarget(form);
+  const { endpoint, target: operations, month } = operationsTarget(form);
+  const target = atDialog(operations, 'budget');
   const amount = String(form.get('amountUsd') ?? '').trim();
   if (!budgetMonthPattern.test(month) || (amount && (!budgetAmountPattern.test(amount) || Number(amount) <= 0))) {
     redirect(`${target}&issue=monthly-budget#budget-heading`);
@@ -107,19 +142,22 @@ export async function saveMonthlyBudget(form: FormData) {
 export async function archiveProject(form: FormData) {
   const { query, endpoint } = projectPath(form);
   const response = await execute(`${endpoint}/archive`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'project')}`);
-  redirect(query);
+  if (!response?.ok) redirect(`${atDialog(query, 'project-archive')}&issue=${issue(response, 'project')}`);
+  redirect(`${query}&notice=project-archived`);
 }
 
 export async function createUser(form: FormData) {
+  const path = settingsPath('accounts');
+  const target = atDialog(path, 'accounts');
   const response = await execute('/users', {
     method: 'POST',
     body: JSON.stringify({
       name: form.get('name'), email: form.get('email'), password: form.get('password'),
     }),
   });
-  if (!response?.ok) redirect(`/?issue=${issue(response, 'user')}`);
-  redirect('/?notice=user-created');
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'user')}`);
+  revalidatePath(path);
+  redirect(`${target}&notice=user-created`);
 }
 
 export async function changeMember(form: FormData) {
@@ -129,12 +167,13 @@ export async function changeMember(form: FormData) {
   const response = await execute(`${endpoint}/members/${userId}`, role === 'remove'
     ? { method: 'DELETE' }
     : { method: 'PUT', body: JSON.stringify({ role }) });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'member')}`);
-  redirect(query);
+  if (!response?.ok) redirect(`${atDialog(query, 'project-members')}&issue=${issue(response, 'member')}`);
+  redirect(`${atDialog(query, 'project-members')}&notice=member-saved`);
 }
 
 export async function bindRepository(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const query = `${projectQuery}&section=repositories`;
   const response = await execute(`${endpoint}/repositories`, {
     method: 'POST',
     body: JSON.stringify({
@@ -143,14 +182,20 @@ export async function bindRepository(form: FormData) {
       defaultBranch: form.get('defaultBranch'),
     }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'repository')}`);
-  redirect(query);
+  if (!response?.ok) {
+    const chosen = String(form.get('installationId') ?? '');
+    const installation = /^[0-9]+$/.test(chosen) ? `&installation=${chosen}` : '';
+    redirect(`${atDialog(query, 'repo-bind')}${installation}&issue=${issue(response, 'repository')}`);
+  }
+  redirect(`${atDialog(query, 'repo-bind')}&notice=repository-bound`);
 }
 
 export async function updateRepositoryChecks(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const query = `${projectQuery}&section=repositories`;
   const repositoryId = form.get('repositoryId');
   if (!isWorkerId(repositoryId)) redirect(query + '&issue=verification');
+  const target = atDialog(query, `checks:${repositoryId}`);
   let checks: unknown;
   let independentChecks: unknown;
   try {
@@ -158,21 +203,21 @@ export async function updateRepositoryChecks(form: FormData) {
     const rawIndependent = form.get('independentChecks');
     if (typeof rawIndependent === 'string') independentChecks = JSON.parse(rawIndependent);
   } catch {
-    redirect(query + '&issue=verification');
+    redirect(target + '&issue=verification');
   }
   const response = await execute(`${endpoint}/repositories/${repositoryId}/checks`, {
     method: 'PATCH', body: JSON.stringify({ checks, independentChecks, autoDraftPr: form.get('autoDraftPr') === 'on' }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'verification')}`);
-  revalidatePath('/');
-  redirect(`${query}&notice=checks-saved`);
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'verification')}`);
+  redirect(`${target}&notice=checks-saved`);
 }
 
 function taskPath(form: FormData) {
   const { query, endpoint } = projectPath(form);
   const id = String(form.get('taskId') ?? '');
   if (id && !/^[a-f0-9-]{36}$/i.test(id)) redirect(query);
-  return { query: id ? `${query}&task=${id}` : query, endpoint: `${endpoint}/tasks${id ? `/${id}` : ''}`, id };
+  const taskQuery = `${query}&section=${form.get('section') === 'approvals' ? 'approvals' : 'tasks'}`;
+  return { query: id ? `${taskQuery}&task=${id}` : taskQuery, endpoint: `${endpoint}/tasks${id ? `/${id}` : ''}`, id };
 }
 
 function taskIssue(response: Response | null) {
@@ -180,14 +225,15 @@ function taskIssue(response: Response | null) {
 }
 
 export async function startAgentPlan(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const query = `${projectQuery}&section=tasks`;
   const response = await execute(`${endpoint}/agent-plans`, {
     method: 'POST', body: JSON.stringify({
       request: form.get('request'), repositoryId: form.get('repositoryId'), requirementId: form.get('requirementId') || null,
       knowledgeVersionIds: form.getAll('knowledgeVersionIds'),
     }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'agent-config'
+  if (!response?.ok) redirect(`${atDialog(query, 'plan')}&issue=${response?.status === 503 ? 'agent-config'
     : response?.status === 409 ? 'agent-plan' : issue(response, 'agent-plan')}`);
   const plan = await response.json() as AgentPlan;
   redirect(`${query}&task=${plan.taskId}#task-detail`);
@@ -247,22 +293,22 @@ export async function registerRequirement(form: FormData) {
   });
   if (!response?.ok) {
     const result = issue(response, response && response.status >= 500 ? 'offline' : 'requirement');
-    redirect(`${query}&requirementResult=${result}#task-requirements`);
+    redirect(`${atDialog(query, 'requirements')}&requirementResult=${result}#task-requirements`);
   }
-  redirect(`${query}&requirementResult=registered#task-requirements`);
+  redirect(`${atDialog(query, 'requirements')}&requirementResult=registered#task-requirements`);
 }
 
 export async function retireRequirement(form: FormData) {
   const { endpoint } = projectPath(form);
   const { query } = taskPath(form);
   const id = form.get('requirementId');
-  if (!isWorkerId(id)) redirect(`${query}&requirementResult=requirement#task-requirements`);
+  if (!isWorkerId(id)) redirect(`${atDialog(query, 'requirements')}&requirementResult=requirement#task-requirements`);
   const response = await execute(`${endpoint}/requirements/${id}`, { method: 'DELETE' });
   if (!response?.ok) {
     const result = issue(response, response && response.status >= 500 ? 'offline' : 'requirement');
-    redirect(`${query}&requirementResult=${result}#task-requirements`);
+    redirect(`${atDialog(query, 'requirements')}&requirementResult=${result}#task-requirements`);
   }
-  redirect(`${query}&requirementResult=retired#task-requirements`);
+  redirect(`${atDialog(query, 'requirements')}&requirementResult=retired#task-requirements`);
 }
 
 export async function retryAgentPlan(form: FormData) {
@@ -283,7 +329,8 @@ export async function retryExecutionQa(form: FormData) {
 }
 
 export async function updateAgent(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const query = `${projectQuery}&section=agents`;
   const role = String(form.get('role') ?? '');
   if (!Object.hasOwn(agentRoleLabels, role)) redirect(query);
   const operation = form.get('operation');
@@ -299,12 +346,14 @@ export async function updateAgent(form: FormData) {
   const response = await execute(`${endpoint}/agent-registry/agents/${role}${createVersion ? '/versions' : ''}`, {
     method: createVersion ? 'POST' : 'PUT', body: JSON.stringify(body),
   });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'agent-skill-binding' : issue(response, 'agent-settings')}#agent-registry`);
-  redirect(`${query}#agent-registry`);
+  const target = atDialog(query, `agent:${role}`);
+  if (!response?.ok) redirect(`${target}&issue=${response?.status === 409 ? 'agent-skill-binding' : issue(response, 'agent-settings')}`);
+  redirect(`${target}&notice=agent-saved#agent-registry`);
 }
 
 export async function updateSkill(form: FormData) {
-  const { query, endpoint } = projectPath(form);
+  const { query: projectQuery, endpoint } = projectPath(form);
+  const query = `${projectQuery}&section=agents`;
   const id = form.get('skillId');
   if (id && !isWorkerId(id)) redirect(query);
   const toggle = id && form.get('operation') === 'toggle';
@@ -314,9 +363,9 @@ export async function updateSkill(form: FormData) {
   const response = await execute(`${endpoint}/agent-registry/skills${path}`, {
     method: toggle ? 'PUT' : 'POST', body: JSON.stringify(body),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'agent-settings')}`);
+  if (!response?.ok) redirect(`${atDialog(query, id ? `skill:${id}` : 'skill-create')}&issue=${issue(response, 'agent-settings')}`);
   const saved = await response.json() as { id: string; version?: number; enabled: boolean };
-  const target = `${query}&skill=${saved.id}`;
+  const target = `${atDialog(query, `skill:${saved.id}`)}&skill=${saved.id}`;
   const fragment = `#skill-${saved.id}`;
   if (toggle) redirect(`${target}&skillResult=${saved.enabled ? 'enabled' : 'disabled'}${fragment}`);
   redirect(`${target}&skillVersion=${saved.version}&skillResult=version-created${fragment}-v${saved.version}`);
@@ -339,7 +388,7 @@ export async function reviewSkillVersion(form: FormData) {
   }
   const result = response?.ok ? (step === 'evaluation' ? 'evaluated' : decision === 'approved' ? 'approved' : 'rejected')
     : response?.status === 409 ? 'review-conflict' : 'review-failed';
-  redirect(`${query}&skill=${id}&skillVersion=${version}&skillResult=${result}#skill-${id}-v${version}`);
+  redirect(`${atDialog(`${query}&section=agents`, `skill:${id}`)}&skill=${id}&skillVersion=${version}&skillResult=${result}#skill-${id}-v${version}`);
 }
 
 export async function saveTask(form: FormData) {
@@ -353,9 +402,9 @@ export async function saveTask(form: FormData) {
       acceptanceCriteria: String(form.get('acceptanceCriteria') ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
+  if (!response?.ok) redirect(`${id ? atDialog(query, 'task-edit') : `${query}&create=task`}&issue=${taskIssue(response)}`);
   const task = await response.json() as { id: string };
-  redirect(`${id ? query : `${query}&task=${task.id}&notice=task-created`}#task-detail`);
+  redirect(`${id ? `${atDialog(query, 'task-edit')}&notice=task-saved` : `${query}&task=${task.id}&notice=task-created`}#task-detail`);
 }
 
 export async function transitionTask(form: FormData) {
@@ -372,21 +421,21 @@ export async function archiveTask(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
   const response = await execute(`${endpoint}/archive`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${taskIssue(response)}`);
-  redirect(`${query}#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, 'task-archive')}&issue=${taskIssue(response)}`);
+  redirect(`${query}&notice=task-archived#task-detail`);
 }
 
 export async function startExecution(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
   const workerId = form.get('workerId') || null;
-  if (workerId && !isWorkerId(workerId)) redirect(`${query}&issue=worker-assignment#task-detail`);
+  if (workerId && !isWorkerId(workerId)) redirect(`${atDialog(query, 'dispatch')}&issue=worker-assignment#task-detail`);
   const revisionOf = form.get('revisionOf') || null;
-  if (revisionOf && !isWorkerId(revisionOf)) redirect(`${query}&issue=revision#task-detail`);
+  if (revisionOf && !isWorkerId(revisionOf)) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
   const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId, revisionOf }) });
-  if (!response?.ok && revisionOf) redirect(`${query}&issue=revision#task-detail`);
-  if (!response?.ok) redirect(`${query}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
-  redirect(`${query}&notice=execution-requested#task-detail`);
+  if (!response?.ok && revisionOf) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, 'dispatch')}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
+  redirect(`${query}&notice=execution-started#task-detail`);
 }
 
 export async function changeExecutionWorker(form: FormData) {
@@ -394,10 +443,10 @@ export async function changeExecutionWorker(form: FormData) {
   const runId = form.get('runId');
   const workerId = form.get('workerId') || null;
   if (!id || !isWorkerId(runId)) redirect(query);
-  if (workerId && !isWorkerId(workerId)) redirect(`${query}&issue=worker-assignment#task-detail`);
+  if (workerId && !isWorkerId(workerId)) redirect(`${atDialog(query, 'worker-assignment')}&issue=worker-assignment#task-detail`);
   const response = await execute(`${endpoint}/executions/${runId}/worker`, { method: 'POST', body: JSON.stringify({ workerId }) });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'worker-assignment' : issue(response, 'worker-assignment')}#task-detail`);
-  redirect(`${query}#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, 'worker-assignment')}&issue=${response?.status === 409 ? 'worker-assignment' : issue(response, 'worker-assignment')}#task-detail`);
+  redirect(`${atDialog(query, 'worker-assignment')}&notice=worker-assigned#task-detail`);
 }
 
 export async function stopExecution(form: FormData) {
@@ -416,7 +465,7 @@ export async function reviewExecution(form: FormData) {
   const response = await execute(`${endpoint}/executions/${runId}/review`, {
     method: 'POST', body: JSON.stringify({ decision: form.get('decision'), comment: form.get('comment') }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${await verificationIssue(response, 'review')}#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, 'review')}&issue=${await verificationIssue(response, 'review')}#task-detail`);
   redirect(`${query}&notice=execution-reviewed#task-detail`);
 }
 
@@ -431,7 +480,7 @@ export async function addExecutionEvidence(form: FormData) {
       ...(checkName && { check: { name: checkName, status: form.get('checkStatus'), environment: form.get('environment'), source: 'archive' } }),
     }),
   });
-  if (!response?.ok) redirect(`${query}&issue=${issue(response, 'evidence')}#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, form.get('checkName') ? 'independent-evidence' : 'evidence')}&issue=${issue(response, 'evidence')}#task-detail`);
   const saved = await response.json() as { recordedAt: string };
   revalidatePath('/');
   redirect(`${query}&notice=execution-evidence-saved&evidenceAt=${encodeURIComponent(saved.recordedAt)}#task-detail`);
@@ -447,7 +496,7 @@ export async function publishExecution(form: FormData) {
   const runId = form.get('runId');
   if (!id || !isWorkerId(runId)) redirect(query);
   const response = await execute(`${endpoint}/executions/${runId}/delivery`, { method: 'POST' });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 503 ? 'github-delivery-config' : await verificationIssue(response, 'delivery')}#task-detail`);
+  if (!response?.ok) redirect(`${atDialog(query, 'publish')}&issue=${response?.status === 503 ? 'github-delivery-config' : await verificationIssue(response, 'delivery')}#task-detail`);
   redirect(`${query}#task-detail`);
 }
 
@@ -486,7 +535,6 @@ export async function changeWorkerAccess(_: WorkerAccessState, form: FormData): 
     return { error: '请输入有效的 Worker ID。' };
   }
   if (!response?.ok) return { error: '操作失败，请检查项目权限和 Worker 状态。' };
-  revalidatePath('/');
   if (operation === 'create' || operation === 'rotate') {
     return { credential: await response.json() as WorkerCredential };
   }

@@ -123,10 +123,46 @@ assert.equal(dashboard.status, 200);
 const dashboardHtml = await dashboard.text();
 assert(dashboardHtml.includes('Fitbest integration'));
 assert(!dashboardHtml.includes('ADO integration'));
+assert.match(dashboardHtml, /aria-label="Integration Viewer，打开设置"/);
+const settings = (path, session = cookie.split(';')[0]) => globalThis.fetch(new URL(path, web), {
+  headers: { Cookie: session },
+  redirect: 'manual',
+  signal: globalThis.AbortSignal.timeout(30000),
+});
+const settingsHome = await settings('/settings');
+assert.equal(settingsHome.status, 307);
+assert.equal(settingsHome.headers.get('location'), '/settings/account');
+const profile = await settings('/settings/account');
+assert.equal(profile.status, 200);
+assert.match(await profile.text(), /修改密码/);
+for (const [path, title] of [['projects', '项目目录'], ['accounts', '账号管理']]) {
+  const restricted = await settings(`/settings/${path}`);
+  assert.equal(restricted.status, 307);
+  assert.equal(restricted.headers.get('location'), '/settings/account?issue=forbidden');
+  const management = await settings(`/settings/${path}`, `ado_session=${admin}`);
+  assert.equal(management.status, 200);
+  assert((await management.text()).includes(title));
+}
 
 await request(`${fitbestPath}/archive`, { token: admin, method: 'POST', status: 204 });
 assert.equal((await request(fitbestPath, { token: viewer })).status, 'archived');
 await request(fitbestPath, { token: admin, method: 'PATCH', body: { name: 'Archived' }, status: 409 });
 await request('/auth/session', { token: viewer, method: 'DELETE', status: 204 });
 await request('/projects', { token: viewer, status: 401 });
-console.log('Project isolation, session revocation, Web login, and task state checks passed');
+
+const { token: profileSession } = await login(credentials);
+const updatePassword = (body, status) => request('/auth/password', {
+  token: profileSession, method: 'PATCH', body, status,
+});
+assert.equal((await request('/auth/profile', {
+  token: profileSession, method: 'PATCH', body: { name: 'Renamed Viewer' },
+})).name, 'Renamed Viewer');
+const newPassword = randomBytes(24).toString('hex');
+await updatePassword({ currentPassword: 'wrong-password', newPassword }, 403);
+await updatePassword({ currentPassword: credentials.password, newPassword }, 204);
+await request('/auth/session', { token: profileSession, status: 401 });
+const webToken = cookie.split(';')[0].slice('ado_session='.length);
+await request('/auth/session', { token: webToken, status: 401 });
+await login(credentials, 401);
+await login({ ...credentials, password: newPassword });
+console.log('Project isolation, account settings, session revocation, Web login, and task state checks passed');

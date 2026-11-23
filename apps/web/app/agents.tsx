@@ -1,10 +1,12 @@
-import { agentRoleLabels, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, type AgentPlan,
-  type AgentRegistry, type Project, type SkillVersion, type SkillVersionStatus } from '@ado/shared';
+import { agentRoleLabels, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, type AgentPlan, type AgentRegistry, type Project, type SkillVersion, type SkillVersionStatus } from '@ado/shared';
 import { retryAgentPlan, reviewSkillVersion, updateAgent, updateSkill } from './actions';
 import { readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
-import { RefreshExecution } from './refresh-execution';
 import { ActionFeedback, SubmitButton } from './task-feedback';
+import { ActionDialog } from './console-controls';
+import { Icon } from './icons';
+import { StatusDistribution } from './metrics';
+import { RefreshExecution } from './refresh-execution';
 
 const skillStatuses: Record<SkillVersionStatus, string> = {
   pending_evaluation: '待评估', evaluation_failed: '评估未通过', awaiting_approval: '待批准',
@@ -69,95 +71,156 @@ export async function Agents({ project, selectedSkill, selectedVersion, skillRes
   project: Project; selectedSkill?: string; selectedVersion?: string; skillResult?: string;
 }) {
   const { data: registry, issue } = await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
-    (data) => Array.isArray(data.agents) && Array.isArray(data.skills));
+    data => Array.isArray(data.agents) && Array.isArray(data.skills));
   if (issue) return <SectionReadError label="Agent 与 Skill" issue={issue} />;
   const { agents, skills } = registry;
+  const enabled = agents.filter((agent) => agent.enabled).length;
   const manage = project.role === 'owner' && project.status === 'active';
   const projectInput = <input type="hidden" name="projectId" value={project.id} />;
-  const allowedRefs = new Set(skills.flatMap((s) => s.versions.filter(isUsableSkillVersion).map((v) => `${s.id}:${v.version}`)));
+  const allowedRefs = new Set(skills.flatMap(skill => skill.versions.filter(isUsableSkillVersion).map(version => `${skill.id}:${version.version}`)));
+  const skillNames = new Map(skills.map(({ id, name }) => [id, name]));
+
   return (
-    <>
-      {!registry.modelConfigured && <p className="muted">规划 API 密钥尚未配置。</p>}
-      {agents.length === 0 && skills.length === 0 && <p className="muted">暂无 Agent 或 Skill。</p>}
-      {agents.map((agent) => {
-        const active = agent.versions.find(({ version }) => version === agent.activeVersion)!;
-        const roleInput = <>{projectInput}<input type="hidden" name="role" value={agent.role} /></>;
-        return <details key={agent.role}>
-          <summary>{agentRoleLabels[agent.role]} · v{agent.activeVersion} · {agent.enabled ? '已启用' : '已停用'}</summary>
-          <p className="description">{agent.template}</p>
-          {active.instructions && <p className="description">{active.instructions}</p>}
-          <p className="muted">模型 · {active.model || '使用服务默认模型'}</p>
-          {manage && <div className="fields">
-            <form className="inline-fields" action={updateAgent}>
-              {roleInput}
-              <input type="hidden" name="enabled" value={String(!agent.enabled)} />
-              <button className="secondary" name="operation" value="toggle">{agent.enabled ? '停用' : '启用'}</button>
-            </form>
-            {agent.versions.length > 1 && <form className="inline-fields" action={updateAgent}>
-              {roleInput}
-              <label>历史版本<select name="version" defaultValue={active.version}>
-                {agent.versions.map(({ version, model, skills: refs }) => {
-                  const unavailable = refs.some(({ id, version }) => !allowedRefs.has(`${id}:${version}`));
-                  return <option key={version} value={version} disabled={unavailable}>
-                    v{version}{model && ` · ${model}`}{unavailable && ' · 技能版本不可用'}
-                  </option>;
-                })}
-              </select></label>
-              <button className="secondary" name="operation" value="activate">启用所选版本</button>
-            </form>}
-            <form className="fields" action={updateAgent}>
-              {roleInput}
-              <label>模型标识<input name="model" maxLength={100} defaultValue={active.model} /></label>
-              <label>项目指令<textarea name="instructions" maxLength={8000} defaultValue={active.instructions} /></label>
-              {skills.map((skill) => {
-                const linked = active.skills.find(({ id }) => id === skill.id);
-                return (
-                <label key={skill.id}>{skill.name}{!skill.enabled && '（已停用）'}
-                  <select name="skills" defaultValue={linked ? `${skill.id}:${linked.version}` : ''}>
-                    <option value="">无</option>
-                    {skill.versions.map((version) => <option key={version.version} value={`${skill.id}:${version.version}`}
-                      disabled={!isUsableSkillVersion(version)}>v{version.version} · {skillStatuses[version.status]}</option>)}
-                  </select>
-                </label>
-                );
-              })}
-              <button name="operation" value="publish">发布 Agent 版本</button>
-            </form>
-          </div>}
-        </details>;
-      })}
-      {skills.map((skill) => (
-        <details key={skill.id} id={`skill-${skill.id}`} open={selectedSkill === skill.id || undefined}>
-          <summary>Skill · {skill.name} · {skill.enabled ? '已启用' : '已停用'}</summary>
-          {selectedSkill === skill.id && !selectedVersion && <SkillFeedback result={skillResult} />}
-          <ul>
-            {skill.versions.map((version) => <SkillVersionEntry key={version.version} version={version}
-              id={skill.id} projectId={project.id} manage={manage}
-              result={selectedSkill === skill.id && selectedVersion === String(version.version) ? skillResult : undefined} />)}
-          </ul>
-          {manage && <div className="fields">
-            <form action={updateSkill}>
-              {projectInput}<input type="hidden" name="skillId" value={skill.id} />
-              <input type="hidden" name="enabled" value={String(!skill.enabled)} />
-              <button className="secondary" name="operation" value="toggle">{skill.enabled ? '停用 Skill' : '启用 Skill'}</button>
-            </form>
+    <section id="agent-registry" aria-labelledby="agent-heading">
+      <header className="page__head">
+        <div>
+          <p className="eyebrow">{project.code} / AGENT REGISTRY</p>
+          <h1 id="agent-heading">Agent 与 Skill</h1>
+        </div>
+        {!registry.modelConfigured && <span className="module-tag" data-tone="amber">规划 API 未配置</span>}
+      </header>
+      <section className="panel fleet-distribution" aria-labelledby="agent-status-heading">
+        <header className="panel__head"><h2 className="panel__title" id="agent-status-heading"><Icon name="agents" />岗位状态</h2>
+          <span className="panel__meta">{agents.length} 个岗位</span></header>
+        <StatusDistribution label="Agent 岗位分布" parts={[
+          { label: '启用', tone: 'mint', value: enabled },
+          { label: '停用', tone: 'mute', value: agents.length - enabled },
+        ]} />
+      </section>
+      <ul className="agent-grid">
+        {agents.map((agent) => {
+          const active = agent.versions.find(({ version }) => version === agent.activeVersion);
+          if (!active) return null;
+          const name = agentRoleLabels[agent.role];
+          const roleInput = <>{projectInput}<input type="hidden" name="role" value={agent.role} /></>;
+          return <li className="panel resource agent-module" key={agent.role} data-enabled={agent.enabled}>
+            <header className="resource__head">
+              <span className="resource__icon"><Icon name="agents" /></span>
+              <div><h2>{name}</h2><small>{active.model || '默认模型'}</small></div>
+              <span className="worker-status" data-status={agent.enabled ? 'online' : undefined}>{agent.enabled ? '已启用' : '已停用'}</span>
+            </header>
+            <div className="module-tags">
+              <span className="module-tag">v{active.version}</span>
+              {active.skills.slice(0, 3).map(({ id, version }) => <span className="module-tag" key={id}>
+                {skillNames.get(id) ?? 'Skill'} · v{version}
+              </span>)}
+              {active.skills.length > 3 && <span className="module-tag">+{active.skills.length - 3} Skill</span>}
+            </div>
+            <footer className="module-foot">
+              <span>{active.skills.length} 个 Skill</span>
+              <ActionDialog title={`${name} · Agent`} actionKey={`agent:${agent.role}`} trigger={manage ? '配置' : '详情'}>
+                <dl className="modal-facts">
+                  <div><dt>模型</dt><dd>{active.model || '默认模型'}</dd></div>
+                  <div><dt>当前版本</dt><dd>v{active.version}</dd></div>
+                  <div><dt>状态</dt><dd>{agent.enabled ? '已启用' : '已停用'}</dd></div>
+                  <div><dt>Skill</dt><dd>{active.skills.map(({ id, version }) => `${skillNames.get(id) ?? 'Skill'} v${version}`).join('、') || '—'}</dd></div>
+                </dl>
+                <details className="subdrawer">
+                  <summary>岗位指令</summary>
+                  <div className="drawer-body"><p className="description">{agent.template}</p>
+                    {!manage && active.instructions && <p className="description">{active.instructions}</p>}
+                  </div>
+                </details>
+                {manage && <>
+                  <div className="modal-group modal-group--inline">
+                    <form action={updateAgent}>
+                      {roleInput}<input type="hidden" name="enabled" value={String(!agent.enabled)} />
+                      <button className="secondary" name="operation" value="toggle">{agent.enabled ? '停用 Agent' : '启用 Agent'}</button>
+                    </form>
+                    {agent.versions.length > 1 && <form className="inline-fields" action={updateAgent}>
+                      {roleInput}
+                      <label>历史版本<select name="version" defaultValue={active.version} key={active.version}>
+                        {agent.versions.map(({ version, model, skills: refs }) => {
+                          const unavailable = refs.some(ref => !allowedRefs.has(`${ref.id}:${ref.version}`));
+                          return <option key={version} value={version} disabled={unavailable}>
+                            v{version}{model && ` · ${model}`}{unavailable && ' · 技能版本不可用'}
+                          </option>;
+                        })}
+                      </select></label>
+                      <button className="secondary" name="operation" value="activate">启用所选版本</button>
+                    </form>}
+                  </div>
+                  <form className="fields modal-group" action={updateAgent} key={active.version}>
+                    <h3>发布新版本</h3>
+                    {roleInput}
+                    <label>模型标识<input name="model" maxLength={100} defaultValue={active.model} /></label>
+                    <label>项目指令<textarea name="instructions" maxLength={8000} defaultValue={active.instructions} /></label>
+                    {skills.length > 0 && <fieldset className="check-grid"><legend>关联 Skill</legend>
+                      {skills.map((skill) => {
+                        const linked = active.skills.find(({ id }) => id === skill.id);
+                        return <label key={skill.id}>{skill.name}{!skill.enabled && '（停用）'}
+                          <select name="skills" defaultValue={linked ? `${skill.id}:${linked.version}` : ''}>
+                            <option value="">无</option>
+                            {skill.versions.map(version => <option key={version.version} value={`${skill.id}:${version.version}`}
+                              disabled={!isUsableSkillVersion(version)}>v{version.version} · {skillStatuses[version.status]}</option>)}
+                          </select>
+                        </label>;
+                      })}
+                    </fieldset>}
+                    <div className="form-actions"><button name="operation" value="publish">发布 Agent 版本</button></div>
+                  </form>
+                </>}
+              </ActionDialog>
+            </footer>
+          </li>;
+        })}
+      </ul>
+      {(skills.length > 0 || manage) && <section className="skill-library" aria-labelledby="skill-heading">
+        <header className="panel__head">
+          <h2 className="panel__title" id="skill-heading"><Icon name="layers" />Skill 库 <em>{skills.length}</em></h2>
+          {manage && <ActionDialog title="新建 Skill" actionKey="skill-create">
             <form className="fields" action={updateSkill}>
-              {projectInput}<input type="hidden" name="skillId" value={skill.id} />
-              <label>指令<textarea name="instructions" maxLength={4000} defaultValue={skill.versions[0]?.instructions} required /></label>
-              <button>发布 Skill 版本</button>
+              {projectInput}
+              <label>名称<input name="name" maxLength={100} required /></label>
+              <label>指令<textarea name="instructions" maxLength={4000} required /></label>
+              <div className="form-actions"><button>创建 Skill</button></div>
             </form>
-          </div>}
-        </details>
-      ))}
-      {manage && <details><summary>新建 Skill</summary>
-        <form className="fields" action={updateSkill}>
-          {projectInput}
-          <label>名称<input name="name" maxLength={100} required /></label>
-          <label>指令<textarea name="instructions" maxLength={4000} required /></label>
-          <button>创建 Skill</button>
-        </form>
-      </details>}
-    </>
+          </ActionDialog>}
+        </header>
+        {skills.length ? <ul className="agent-grid">{skills.map((skill) => (
+          <li className="panel resource" key={skill.id}>
+            <header className="resource__head">
+              <span className="resource__icon"><Icon name="layers" /></span>
+              <div><h3>{skill.name}</h3><small>{skill.versions.length} 个版本</small></div>
+              <span className="worker-status" data-status={skill.enabled ? 'online' : undefined}>{skill.enabled ? '已启用' : '已停用'}</span>
+            </header>
+            <footer className="module-foot">
+              <span>v{skill.versions[0]?.version ?? '—'}</span>
+              <ActionDialog title={`${skill.name} · Skill`} actionKey={`skill:${skill.id}`} openOnLoad={selectedSkill === skill.id} trigger={manage ? '配置' : '详情'}>
+                <div className="skill-versions"><h3>版本记录</h3>
+                  {selectedSkill === skill.id && !selectedVersion && <SkillFeedback result={skillResult} />}
+                  <ul className="member-list">{skill.versions.map(version => <SkillVersionEntry key={version.version} version={version}
+                    id={skill.id} projectId={project.id} manage={manage}
+                    result={selectedSkill === skill.id && selectedVersion === String(version.version) ? skillResult : undefined} />)}</ul>
+                </div>
+                {manage && <>
+                  <form className="modal-group" action={updateSkill}>
+                    {projectInput}<input type="hidden" name="skillId" value={skill.id} />
+                    <input type="hidden" name="enabled" value={String(!skill.enabled)} />
+                    <button className="secondary" name="operation" value="toggle">{skill.enabled ? '停用 Skill' : '启用 Skill'}</button>
+                  </form>
+                  <form className="fields modal-group" action={updateSkill} key={skill.versions[0]?.version}>
+                    {projectInput}<input type="hidden" name="skillId" value={skill.id} />
+                    <label>新版本指令<textarea name="instructions" maxLength={4000} defaultValue={skill.versions[0]?.instructions} required /></label>
+                    <div className="form-actions"><button name="operation" value="publish">发布 Skill 版本</button></div>
+                  </form>
+                </>}
+              </ActionDialog>
+            </footer>
+          </li>
+        ))}</ul> : <p className="empty">暂无 Skill</p>}
+      </section>}
+    </section>
   );
 }
 
@@ -178,8 +241,11 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
     ? planningFailureMessages[isPlanningFailureCategory(plan.failureCategory) ? plan.failureCategory : 'unknown']
     : null;
   return (
-    <section aria-labelledby="agent-plan-heading">
-      <h4 id="agent-plan-heading">Agent 规划</h4>
+    <section aria-labelledby="agent-plan-heading" className="plan-block">
+      <header className="plan-head">
+        <h4 id="agent-plan-heading">Agent 规划</h4>
+        <span className="badge" data-status={plan.state}>{planStates[plan.state]}</span>
+      </header>
       {plan.requirement && <>
         <p>需求来源 · <a href={plan.requirement.referenceUrl} rel="noreferrer">{plan.requirement.title}</a></p>
         <details>
@@ -188,6 +254,9 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
           <small>登记人 · {plan.requirement.approvedBy}</small>
         </details>
       </>}
+      <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
+      {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
+      {diagnosis && <p><strong>{diagnosis.label}</strong> · {diagnosis.hint}</p>}
         {Boolean(plan.knowledge?.length) && <details>
           <summary>本次规划使用的项目知识</summary>
           <ul>{plan.knowledge?.map(version => <li key={version.id}>
@@ -197,9 +266,6 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
             <p className="description">{version.excerpt}</p>
           </li>)}</ul>
         </details>}
-      <p role="status">{planStates[plan.state]}{plan.stage && plan.state !== 'cancelled' && ` · ${agentRoleLabels[plan.stage]}`}</p>
-      {(plan.state === 'queued' || plan.state === 'running') && <RefreshExecution />}
-      {diagnosis && <p><strong>{diagnosis.label}</strong> · {diagnosis.hint}</p>}
       {plan.state === 'failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}
       {plan.state === 'failed' && canRetry && <form action={retryAgentPlan}>
         <input type="hidden" name="projectId" value={projectId} />
