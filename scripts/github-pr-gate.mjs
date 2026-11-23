@@ -3,15 +3,12 @@ import { Buffer } from 'node:buffer';
 import { sign } from 'node:crypto';
 import process from 'node:process';
 import { URL, URLSearchParams } from 'node:url';
+import { databaseReviewReasons } from './ado-database-changes.mjs';
 
 const repo = 'shinelincx/aiplatform';
 const repositoryId = 1462649547;
 const checkName = 'ado-merge-gate';
 const sha = /^[0-9a-f]{40}$/;
-const allow = new Set([
-  'apps/web/app/agent-version-editor.tsx', 'apps/web/app/task-activity.tsx',
-  'apps/web/app/task-board.tsx', 'apps/web/app/task-detail-tabs.tsx',
-]);
 const env = process.env;
 const event = JSON.parse(await readFile(env.GITHUB_EVENT_PATH, 'utf8'));
 let token;
@@ -108,11 +105,21 @@ if (manual) {
 
 const internal = pull.head.repo?.id === repositoryId && /^ado\/[0-9a-f-]{36}$/.test(pull.head.ref)
   && pull.user.type === 'Bot' && pull.user.login === 'aiplatformapp[bot]';
-const files = internal && pull.changed_files > 0 && pull.changed_files <= allow.size
-  ? await github(`${pullPath}/files?per_page=100`) : [];
-if (!internal || !pull.changed_files || files.length !== pull.changed_files
-  || files.some((file) => file.status !== 'modified' || !allow.has(file.filename))) {
+if (!internal) {
   await publishCheck(head, run, null, 'Owner authorization is required for this PR.');
+  process.exit(0);
+}
+const base = pull.base.sha;
+const comparison = sha.test(base) && pull.changed_files > 0 && pull.changed_files <= 300
+  ? await github(`/repos/${repo}/compare/${base}...${head}?per_page=1`) : null;
+if (!comparison?.files || comparison.files.length !== pull.changed_files) {
+  await publishCheck(head, run, null, 'Owner authorization is required because the full PR diff could not be checked.');
+  process.exit(0);
+}
+const databaseReasons = databaseReviewReasons(comparison.files);
+if (databaseReasons.length) {
+  const matches = databaseReasons.slice(0, 20).map(({ filename, reason }) => `${filename}: ${reason}`);
+  await publishCheck(head, run, null, `Owner authorization is required for database changes or unverifiable files.\n\n${matches.join('\n')}`);
   process.exit(0);
 }
 const proof = await candidateProof(pull);
@@ -126,7 +133,9 @@ if (reviews.length >= 100 || reviews.some((review) => review.state === 'CHANGES_
   process.exit(0);
 }
 const current = await github(pullPath);
-if (current.head.sha !== head || current.base.ref !== 'main' || current.state !== 'open') throw new Error('PR changed during validation');
+if (current.head.sha !== head || current.base.sha !== base || current.base.ref !== 'main' || current.state !== 'open') {
+  throw new Error('PR changed during validation');
+}
 if (current.draft) {
   const result = await github('/graphql', { method: 'POST', body: {
     query: 'mutation($id: ID!) { markPullRequestReadyForReview(input:{pullRequestId:$id}) { pullRequest { isDraft } } }',
