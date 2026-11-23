@@ -21,7 +21,7 @@ it('lists authorized repositories and narrows the branch token to one repository
     .mockResolvedValueOnce(Response.json({ token: 'repo-only' }))
     .mockResolvedValueOnce(Response.json({ name: 'release/v1' }))
     .mockResolvedValueOnce(Response.json({ token: 'pull-read' }))
-    .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 42 } } }))
+    .mockResolvedValueOnce(Response.json({ number: 13, merged: true, merge_commit_sha: 'a'.repeat(40), base: { repo: { id: 42 } } }))
     .mockResolvedValueOnce(Response.json({ token: 'pull-read' }))
     .mockResolvedValueOnce(Response.json({ number: 13, merged: true, base: { repo: { id: 43 } } }))
     .mockResolvedValueOnce(Response.json([
@@ -51,7 +51,9 @@ it('lists authorized repositories and narrows the branch token to one repository
   });
   expect(mock.mock.calls[3][0]).toBe('https://api.github.com/repos/org/project/branches/release%2Fv1');
   expect(new Headers(mock.mock.calls[3][1]?.headers).get('Authorization')).toBe('Bearer repo-only');
-  await expect(github.readPull(7, 42, repository.fullName, 13)).resolves.toMatchObject({ number: 13, merged: true });
+  await expect(github.readPull(7, 42, repository.fullName, 13)).resolves.toMatchObject({
+    number: 13, merged: true, merge_commit_sha: 'a'.repeat(40),
+  });
   await expect(github.readPull(7, 42, repository.fullName, 13)).rejects.toThrow('does not match');
   expect(JSON.parse(String(mock.mock.calls[4][1]?.body))).toEqual({
     repository_ids: [42], permissions: { contents: 'read' },
@@ -59,6 +61,8 @@ it('lists authorized repositories and narrows the branch token to one repository
   expect(mock.mock.calls[5][0]).toBe('https://api.github.com/repos/org/project/pulls/13');
   expect(mock.mock.calls[5][1]?.method).toBe('GET');
   expect(new Headers(mock.mock.calls[5][1]?.headers).get('Authorization')).toBe('Bearer pull-read');
+  expect(new Headers(mock.mock.calls[5][1]?.headers).get('X-GitHub-Api-Version')).toBe('2022-11-28');
+  expect(new Headers(mock.mock.calls[3][1]?.headers).get('X-GitHub-Api-Version')).toBe('2026-03-10');
   expect(await github.installations()).toEqual([
     { id: 7, account: 'org', canReadContents: true, canPublish: true },
     { id: 8, account: 'read-only', canReadContents: true, canPublish: false },

@@ -76,14 +76,14 @@ export class GitHubApp {
     }
   }
 
-  private async request<T>(path: string, token: string, body?: object) {
+  private async request<T>(path: string, token: string, body?: object, apiVersion = '2026-03-10') {
     const response = await fetch(`https://api.github.com${path}`, {
       method: body ? 'POST' : 'GET',
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2026-03-10',
+        'X-GitHub-Api-Version': apiVersion,
       },
       body: body ? JSON.stringify(body) : undefined,
       redirect: 'error',
@@ -137,7 +137,8 @@ export class GitHubApp {
   async readPull(installationId: number, repositoryId: number, repository: string, number: number) {
     const token = await this.installationToken(installationId, repositoryId);
     const repositoryPath = repository.split('/').map(encodeURIComponent).join('/');
-    const { data } = await this.request<PullResponse>(`/repos/${repositoryPath}/pulls/${number}`, token);
+    // The 2026-03-10 response can omit the merged commit SHA used for delivery closeout.
+    const { data } = await this.request<PullResponse>(`/repos/${repositoryPath}/pulls/${number}`, token, undefined, '2022-11-28');
     if (data?.number !== number || data.base?.repo?.id !== repositoryId || typeof data.merged !== 'boolean') {
       throw new BadGatewayException('GitHub pull request does not match the published repository and number');
     }
@@ -147,8 +148,11 @@ export class GitHubApp {
   async verifyMergedDelivery(installationId: number, repositoryId: number, repository: string, pull: PullResponse) {
     const mergeSha = pull.merge_commit_sha ?? '';
     const headSha = pull.head.sha;
-    if (pull.state !== 'closed' || pull.merged !== true || !githubSha.test(mergeSha) || !githubSha.test(headSha)) {
+    if (pull.state !== 'closed' || pull.merged !== true) {
       throw new ConflictException({ code: 'delivery_not_merged', message: 'The linked pull request is not merged' });
+    }
+    if (!githubSha.test(mergeSha) || !githubSha.test(headSha)) {
+      throw new ConflictException({ code: 'delivery_merge_evidence_missing', message: 'GitHub omitted a verifiable merge commit' });
     }
     const token = await this.installationToken(installationId, repositoryId);
     const endpoint = '/repos/' + repository.split('/').map(encodeURIComponent).join('/');

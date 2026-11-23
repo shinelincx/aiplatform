@@ -575,6 +575,7 @@ export async function closeDelivery(form: FormData) {
     const codes: Record<string, string> = {
       delivery_not_merged: 'delivery-not-merged', delivery_not_closed: 'delivery-not-closed',
       delivery_pr_mismatch: 'delivery-pr-mismatch', delivery_ci_missing: 'delivery-ci-missing',
+      delivery_merge_evidence_missing: 'delivery-merge-evidence-missing',
       delivery_clearance_missing: 'delivery-clearance-missing', delivery_state_changed: 'delivery-state-changed',
       task_archive_dependency: 'delivery-active-dependents',
     };
