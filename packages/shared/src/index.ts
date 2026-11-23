@@ -29,6 +29,7 @@ export type { DesignEvidence, KnowledgeEntry, KnowledgeKind, KnowledgeSnapshot, 
 export interface ApiHealth {
   service: 'ado-api';
   status: 'ok';
+  revision?: string;
 }
 
 export async function checkApiHealth(baseUrl: string): Promise<boolean> {

@@ -1,10 +1,10 @@
-import { executionQualityGate, independentCheckStatuses, workerDiskPressure, type CheckFailureReason, type CheckResult,
+import { executionQualityGate, independentCheckStatuses, workerDiskPressure, type ApiHealth, type CheckFailureReason, type CheckResult,
   type ExecutionEvent, type ExecutionRun, type IndependentCheck, type Project, type ReviewEvidence, type Task,
   type VerificationCheck, type WorkerReport } from '@ado/shared';
 import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
   reviewExecution, startExecution } from './actions';
 import { ActionDialog } from './console-controls';
-import { readSection } from './api-client';
+import { read, readSection } from './api-client';
 import { SectionReadError } from './section-feedback';
 import { RefreshExecution } from './refresh-execution';
 import { TaskActivity, type ActivityItem } from './task-activity';
@@ -124,6 +124,29 @@ function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
   </li>)}</ul>;
 }
 
+async function stagingStatus(pullNumber: number) {
+  const health = await read<ApiHealth>('/health').catch(() => null);
+  const deployed = health?.revision;
+  if (!deployed || !/^[0-9a-f]{40}$/.test(deployed)) return '预发布部署待核对';
+  const request = async (path: string) => {
+    const response = await fetch(`https://api.github.com/repos/shinelincx/aiplatform/${path}`, {
+      redirect: 'error', signal: AbortSignal.timeout(2500), next: { revalidate: 120 },
+    });
+    return response.ok ? response.json() : null;
+  };
+  try {
+    const pull = await request(`pulls/${pullNumber}`);
+    const merged = pull?.merge_commit_sha;
+    if (pull?.merged !== true || typeof merged !== 'string' || !/^[0-9a-f]{40}$/.test(merged)) return '预发布部署待核对';
+    if (merged === deployed) return '已部署预发布';
+    const comparison = await request(`compare/${merged}...${deployed}`);
+    if (comparison?.status === 'ahead' || comparison?.status === 'identical') return '已部署预发布';
+    return comparison ? '待部署预发布' : '预发布部署待核对';
+  } catch {
+    return '预发布部署待核对';
+  }
+}
+
 export async function Executions({ project, task, runsResult, checks, independentChecks, autoDraftPr, planned, approvals }: {
   project: Project; task: Task; runsResult: Awaited<ReturnType<typeof readSection<ExecutionRun[]>>>;
   checks: VerificationCheck[]; independentChecks: IndependentCheck[]; autoDraftPr: boolean; planned: boolean; approvals: boolean;
@@ -132,9 +155,13 @@ export async function Executions({ project, task, runsResult, checks, independen
   if (runsResult.issue) return <div id="execution-heading"><SectionReadError label="任务执行" issue={runsResult.issue} /></div>;
   const runs = runsResult.data;
   const latest = runs[0];
-  const [workersResult, eventsResult] = await Promise.all([
+  const pull = latest?.delivery;
+  const deployment = project.code === 'ADO' && pull?.pullState === 'merged' && pull.pullNumber && pull.baseBranch === 'main'
+    && pull.pullUrl === `https://github.com/shinelincx/aiplatform/pull/${pull.pullNumber}` ? stagingStatus(pull.pullNumber) : null;
+  const [workersResult, eventsResult, deploymentStatus] = await Promise.all([
     readSection<WorkerReport[]>(`/projects/${project.id}/workers`, Array.isArray),
     latest ? readSection<ExecutionEvent[]>(`${url}/${latest.id}/events`, Array.isArray) : null,
+    deployment,
   ]);
   const workers = workersResult.data ?? [];
   const scheduledChecks = latest?.status === 'queued' ? latest.checkPlan ?? checks : checks;
@@ -352,6 +379,7 @@ export async function Executions({ project, task, runsResult, checks, independen
         <h5>交付</h5>
         <p role="status">{waitingOnGithub ? '等待 GitHub App 配置' : deliveryLabels[latest.delivery.state]}
           {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
+        {deploymentStatus && <p>预发布 · {deploymentStatus}</p>}
         <p className="description">{latest.delivery.branch} → {latest.delivery.baseBranch}</p>
         {latest.delivery.pullUrl && <p><a href={latest.delivery.pullUrl}>查看 GitHub PR #{latest.delivery.pullNumber}</a></p>}
         {owner && project.status === 'active' && latest.delivery.state === 'published' && latest.delivery.pullState !== 'merged' &&

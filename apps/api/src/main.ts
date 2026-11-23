@@ -25,7 +25,8 @@ import { WorkersController, WorkersService } from './workers';
 class HealthController {
   @Get('health')
   health(): ApiHealth {
-    return { service: 'ado-api', status: 'ok' };
+    const revision = process.env.ADO_RELEASE_SHA;
+    return { service: 'ado-api', status: 'ok', ...(/^[0-9a-f]{40}$/.test(revision ?? '') && { revision }) };
   }
 }
 
