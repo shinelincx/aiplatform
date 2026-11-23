@@ -12,7 +12,7 @@
 
 ## 自动部署
 
-`main` 的 CI 构建并以生产启动方式检查镜像。主分支的 `publish` 作业发布同一个受测镜像到 GHCR。启用仓库变量 `STAGING_CD_ENABLED=true` 后，`deploy-staging` 把镜像 digest 交给预发布主机。
+`main` 的 CI 构建并以生产启动方式检查镜像。主分支的 `publish` 作业发布同一个受测镜像到 GHCR。启用仓库变量 `STAGING_CD_ENABLED=true` 后，`deploy-staging` 经 SSH 传送镜像归档和 GHCR digest。预发布主机校验归档 SHA-256，导入本地镜像层，再用 GHCR digest 核对并启动版本。
 
 `staging` 环境仅允许 `main`。环境变量 `STAGING_SSH_HOST_KEY` 保存已核验的 SSH 主机公钥。环境机密 `STAGING_SSH_KEY` 对应独立的服务器公钥，服务端为它配置 `restrict,command="/opt/ado-staging/config/deploy-staging-release.sh"`。服务端安装审阅过的发布脚本，并保留现有 Compose 启动器和回退版本。
 
