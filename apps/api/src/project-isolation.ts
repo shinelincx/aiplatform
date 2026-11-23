@@ -138,8 +138,9 @@ export const projectIsolation = `
 // Reapply after a restore that deliberately omits cluster roles and ACLs.
 export const runtimePermissions = `
   DROP POLICY IF EXISTS self_service_audit_write ON public.audit_logs;
-  CREATE POLICY self_service_audit_write ON public.audit_logs FOR INSERT TO ado_api WITH CHECK (
-    project_id IS NULL AND actor_id = resource_id AND actor_id::text = current_setting('ado.audit_account', true)
+  CREATE POLICY self_service_audit_write ON public.audit_logs FOR INSERT WITH CHECK (
+    current_user = 'ado_api'
+    AND project_id IS NULL AND actor_id = resource_id AND actor_id::text = current_setting('ado.audit_account', true)
     AND action IN ('user.profile_updated', 'user.password_changed')
     AND EXISTS (SELECT 1 FROM public.users u WHERE u.id = actor_id AND u.status = 'active')
   );
