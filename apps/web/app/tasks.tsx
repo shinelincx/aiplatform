@@ -195,8 +195,10 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
           </section>
         ))}
       </div> : <TaskBoard key={project.id} projectId={project.id} canWrite={canWrite} lane={lane}
-        items={tasks.map(({ id, code, title, status, priority, archivedAt, createdAt }) => ({
+        items={tasks.map(({ id, code, title, status, priority, archivedAt, createdAt, executionFailure, decisions }) => ({
           id, code, title, status, priority, archivedAt, createdAt,
+          failure: executionFailure?.code === 'needs_decisions' ? null : taskFailureLabel({ status, executionFailure, decisions }),
+          pending: decisions?.filter(({ answer }) => !answer).length ?? 0,
         }))} />}
 
       {create && canWrite && !task && <TaskDrawer label="新建研发任务" closeHref={closeHref}>

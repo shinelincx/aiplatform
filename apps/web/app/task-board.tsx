@@ -6,7 +6,10 @@ import { taskPriorities, type Task, type TaskPriority } from '@ado/shared';
 import { Icon } from './icons';
 import { laneForStatus, taskLanes, workspaceHref, type TaskLane } from './workspace';
 
-type BoardTask = Pick<Task, 'id' | 'code' | 'title' | 'priority' | 'status' | 'archivedAt' | 'createdAt'>;
+type BoardTask = Pick<Task, 'id' | 'code' | 'title' | 'priority' | 'status' | 'archivedAt' | 'createdAt'> & {
+  failure?: string | null;
+  pending?: number;
+};
 
 const titleSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' });
 const boardDate = new Intl.DateTimeFormat('sv-SE', {
@@ -74,6 +77,8 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
                   {cutoff === undefined ? task.title : `${task.title.slice(0, cutoff)}…`}
                 </h3>
                 <time dateTime={task.createdAt}>{createdAt.slice(0, 4) === currentYear ? createdAt.slice(5) : createdAt}</time>
+                {task.failure && <p className="tcard__reason">{task.failure}</p>}
+                {!!task.pending && <p className="tcard__reason warning-text">{task.pending} 项待人工确认</p>}
               </Link>;
             })}
             {!tasks.length && <p className="lane__empty">暂无任务</p>}

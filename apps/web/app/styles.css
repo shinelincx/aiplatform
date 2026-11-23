@@ -693,6 +693,7 @@ summary::-webkit-details-marker { display: none; }
 .tcard:hover { border-color: var(--tone); background: var(--raise); }
 .tcard h3 { font-size: 13px; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
 .tcard time { color: var(--ink-3); font: 10px var(--mono); white-space: nowrap; }
+.tcard__reason { flex-basis: 100%; margin: 0; font-size: 0.75rem; overflow-wrap: anywhere; }
 .decision-review { padding: 1rem 1.4rem; border-block: 1px solid var(--line); overflow-wrap: anywhere; }
 .decision-question { display: grid; gap: 0.25rem; }
 .decision-question p { margin: 0; }
