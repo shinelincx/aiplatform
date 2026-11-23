@@ -9,15 +9,20 @@ import json, re, sys
 data = json.load(sys.stdin)
 for key, pattern in {
   "sha": "[a-f0-9]{40}", "image": r"ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}",
-  "user": "[A-Za-z0-9_\\[\\]-]{1,80}", "token": "[A-Za-z0-9_.-]{20,1024}"
+  "user": "[A-Za-z0-9_\\[\\]-]{1,80}", "token": "[A-Za-z0-9_.-]{20,1024}",
+  "archive_sha": "[a-f0-9]{64}"
 }.items():
     value = data.get(key)
     if not isinstance(value, str) or not re.fullmatch(pattern, value):
         sys.exit("Invalid deployment request")
     print(value)
+size = data.get("archive_size")
+if type(size) is not int or not 1 <= size <= 2 * 1024**3:
+    sys.exit("Invalid deployment archive size")
+print(size)
 ')
 unset payload
-[[ ${#request[@]} == 4 ]]
+[[ ${#request[@]} == 6 ]]
 revision=${request[0]} image=${request[1]}
 root=/opt/ado-staging
 compose="$root/compose.sh"
@@ -68,17 +73,28 @@ trap finish EXIT
 
 assert_main
 public "https://$domain/health" -o /dev/null
+archive="$scratch/image.tar.gz"
+timeout 27m head -c "${request[5]}" > "$archive"
+test "$(stat -c %s "$archive")" = "${request[5]}"
+printf '%s  %s\n' "${request[4]}" "$archive" | sha256sum -c -
 if [[ $current == "$release" ]] && [[ $(docker inspect -f '{{.Config.Image}}' ado-staging-api-1) == "$image" &&
   $(docker inspect -f '{{.Config.Image}}' ado-staging-web-1) == "$image" ]]; then
   printf 'Release %s is already active.\n' "$revision"
   exit 0
 fi
+local_image="ado-platform-release:$revision"
+docker load --input "$archive"
+test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$local_image")" = "$revision"
+loaded_id=$(docker image inspect -f '{{.Id}}' "$local_image")
+rm -- "$archive"
 printf '%s' "${request[3]}" | docker login ghcr.io --username "${request[2]}" --password-stdin >/dev/null
 unset request
 docker pull "$image"
 docker logout ghcr.io >/dev/null
+test "$(docker image inspect -f '{{.Id}}' "$image")" = "$loaded_id"
 test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$revision"
 test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")" = https://github.com/shinelincx/aiplatform
+docker image rm --no-prune "$local_image" >/dev/null
 
 if [[ ! -d $release ]]; then
   temp_release=$(mktemp -d "$root/releases/.cd-XXXXXXXX")
