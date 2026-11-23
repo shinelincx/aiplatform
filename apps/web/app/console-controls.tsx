@@ -207,12 +207,14 @@ export function ActionDialog({ title, trigger, children, className = 'utility-bt
   </>;
 }
 
-export function TaskDrawer({ children, closeHref, label }: { children: ReactNode; closeHref: string; label: string }) {
+export function TaskDrawer({ children, closeHref, label, heading }: {
+  children: ReactNode; closeHref: string; label: string; heading?: ReactNode;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const router = useRouter();
   useLayoutEffect(() => {
     const panel = dialog.current;
-    panel?.showModal();
+    if (panel && !panel.open) panel.showModal();
     return () => panel?.close();
   }, []);
 
@@ -221,7 +223,7 @@ export function TaskDrawer({ children, closeHref, label }: { children: ReactNode
     router.push(closeHref, { scroll: false });
   }
 
-  return <dialog ref={dialog} className="task-overlay" aria-label={label}
+  return <dialog ref={dialog} className={heading ? 'task-overlay task-overlay--detail' : 'task-overlay'} aria-label={label}
     onCancel={(event) => {
       if (event.target !== event.currentTarget) return;
       event.preventDefault();
@@ -230,11 +232,11 @@ export function TaskDrawer({ children, closeHref, label }: { children: ReactNode
     onClick={(event) => { if (event.target === event.currentTarget) dismiss(); }}>
     <div className="task-overlay__inner">
       <header className="task-overlay__bar">
-        <span className="eyebrow">{label}</span>
         <Link href={closeHref} scroll={false} className="icon-button" aria-label="关闭任务面板"
           onClick={(event) => {
             if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) dialog.current?.close();
           }}><Icon name="x" /></Link>
+        {heading ?? <span className="eyebrow">{label}</span>}
       </header>
       {children}
     </div>

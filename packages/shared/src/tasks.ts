@@ -1,4 +1,6 @@
 import type { AgentAssignment } from './agents';
+import type { TaskDecision } from './decisions';
+import type { ExecutionFailure } from './executions';
 
 export const taskTransitions = {
   CREATED: ['PLANNING', 'CANCELLED'],
@@ -41,6 +43,8 @@ export interface Task {
   archivedAt: string | null;
   createdAt: string;
   developer?: Pick<AgentAssignment, 'role' | 'version' | 'model'> | null;
+  executionFailure?: ExecutionFailure | null;
+  decisions?: TaskDecision[];
 }
 
 export interface TaskDetail extends Task {

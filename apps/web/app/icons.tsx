@@ -1,4 +1,4 @@
-export type IconName = 'agents' | 'arrow' | 'chart' | 'chevron' | 'git' | 'grid' | 'layers' | 'moon' | 'plus' | 'search' | 'shield' | 'sun' | 'tasks' | 'terminal' | 'workers' | 'x';
+export type IconName = 'agents' | 'arrow' | 'chart' | 'chevron' | 'clock' | 'git' | 'grid' | 'layers' | 'moon' | 'plus' | 'search' | 'shield' | 'sun' | 'tasks' | 'terminal' | 'workers' | 'x';
 
 export function Icon({ name }: { name: IconName }) {
   return <svg className="ic" aria-hidden="true"><use href={`#i-${name}`} /></svg>;
@@ -20,6 +20,7 @@ export function IconSprite() {
       <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="12" r="2.4"/><path d="M6 8.4v7.2M8.4 6H14a4 4 0 014 4v.2"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7.5v5l3 2"/></symbol>
       <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4m0-14.2-1.4 1.4M6.3 17.7l-1.4 1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.7 15A8.7 8.7 0 0 1 9 3.3 8.8 8.8 0 1 0 20.7 15Z"/></symbol>

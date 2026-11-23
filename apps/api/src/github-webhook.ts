@@ -1,13 +1,14 @@
 import {
-  BadRequestException, Controller, Headers, HttpCode, Inject, Post, Req, ServiceUnavailableException,
+  BadRequestException, Controller, Get, Headers, HttpCode, Inject, Post, Query, Req, ServiceUnavailableException,
   UnauthorizedException, type RawBodyRequest,
 } from '@nestjs/common';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { isWorkerId } from '@ado/shared';
 import { Database } from './database';
 import { DeliveriesService, publishedPullColumns, type PublishedPull } from './deliveries';
 import { TasksService } from './tasks';
+import { qualityGateColumns, requireQualityGate, type QualityGateRun } from './quality-gate';
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -20,6 +21,36 @@ export class GitHubWebhookController {
     @Inject(DeliveriesService) private readonly deliveries: DeliveriesService,
     @Inject(TasksService) private readonly tasks: TasksService,
   ) {}
+
+  @Get()
+  async releaseCandidate(@Headers('authorization') authorization: string | undefined,
+    @Query('pull') pull: string, @Query('head') head: string) {
+    const secret = process.env.ADO_RELEASE_GATE_SECRET;
+    const project = process.env.ADO_RELEASE_PROJECT_ID;
+    if (!secret || !isWorkerId(project)) throw new ServiceUnavailableException();
+    const hash = (value: string) => createHash('sha256').update(value).digest();
+    if (!authorization || !timingSafeEqual(hash(authorization), hash(`Bearer ${secret}`))) throw new UnauthorizedException();
+    if (typeof pull !== 'string' || !/^[1-9][0-9]{0,8}$/.test(pull) || typeof head !== 'string' || !/^[0-9a-f]{40}$/.test(head)) {
+      throw new BadRequestException('Invalid release candidate');
+    }
+    const { rows: [candidate] } = await this.db.projectQuery<QualityGateRun & { runId: string; patchHash: string }>(project,
+      `SELECT d.run_id AS "runId", d.patch_hash AS "patchHash", ${qualityGateColumns}
+       FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
+       JOIN tasks t ON t.id = r.task_id AND t.project_id = r.project_id AND t.status = 'REVIEW' AND t.archived_at IS NULL
+       JOIN execution_reviews h ON h.run_id = r.id AND h.decision = 'approved'
+       JOIN execution_artifacts a ON a.run_id = r.id AND a.sha256 = d.patch_hash
+       JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
+       JOIN projects p ON p.id = r.project_id AND p.status = 'active'
+       WHERE r.project_id = $1 AND g.github_repository_id = 1462649547 AND d.pull_number = $2
+         AND d.commit_sha = $3 AND d.state = 'published' AND d.pull_state = 'open' AND d.base_branch = 'main'
+         AND d.branch = 'ado/' || r.id::text AND r.status = 'succeeded'
+         AND r.verification_report->>'passed' = 'true' AND r.verification_report->>'patchHash' = d.patch_hash
+         AND r.id = (SELECT newest.id FROM execution_runs newest WHERE newest.task_id = t.id AND newest.project_id = $1
+           ORDER BY newest.created_at DESC, newest.id DESC LIMIT 1)`, [project, Number(pull), head]);
+    if (!candidate) return { eligible: false };
+    requireQualityGate(candidate, candidate.patchHash);
+    return { eligible: true, runId: candidate.runId, patchHash: candidate.patchHash };
+  }
 
   @Post()
   @HttpCode(204)

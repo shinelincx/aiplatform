@@ -4,7 +4,8 @@ import {
 } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { canTransitionTask, developerRoles, taskPriorities, type Account, type AgentAssignment, type ArchitecturePlan,
-  type AgentRole, type DeveloperRole, type KnowledgeSnapshot, type ModelUsage, type RequirementContent, type Task, type TaskDetail,
+  type AgentRole, type DecisionQuestion, type DeveloperRole, type KnowledgeSnapshot, type ModelUsage,
+  type RequirementContent, type Task, type TaskDecision, type TaskDetail,
   type TaskEvent, type TaskPriority, type TaskStatus } from '@ado/shared';
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -18,6 +19,70 @@ const taskColumns = `id, project_id AS "projectId", task_code AS code, title, de
   CASE WHEN approved_developer IS NOT NULL THEN jsonb_build_object(
     'role', approved_developer->'role', 'version', approved_developer->'version', 'model', approved_developer->'model'
   ) END AS developer`;
+export const runFailure = `CASE WHEN r.status IN ('failed', 'timed_out') THEN
+  COALESCE((SELECT e.payload FROM execution_events e
+    WHERE e.run_id = r.id AND e.sequence = r.last_sequence AND e.kind = 'failed'),
+    jsonb_build_object('code', CASE
+      WHEN r.status = 'timed_out' THEN 'worker_timeout'
+      WHEN r.verification_report->>'passed' = 'false' THEN 'checks_failed'
+      ELSE 'worker_error' END))
+  || jsonb_build_object('runId', r.id) END`;
+const taskReadColumns = `${taskColumns},
+  CASE WHEN tasks.status IN ('FAILED', 'TIMEOUT') THEN
+    (SELECT ${runFailure} FROM execution_runs r WHERE r.project_id = tasks.project_id AND r.task_id = tasks.id
+     ORDER BY r.created_at DESC, r.id DESC LIMIT 1) END AS "executionFailure",
+  (SELECT p.steps->2->'output' FROM task_agent_plans p WHERE p.project_id = tasks.project_id
+   AND p.task_id = tasks.id AND p.state = 'completed') AS architecture,
+  (SELECT e.payload->'decisions' FROM task_events e WHERE e.project_id = tasks.project_id AND e.task_id = tasks.id
+   AND e.event_type = 'task.decisions_submitted' AND NOT EXISTS (
+     SELECT 1 FROM task_events reset WHERE reset.project_id = e.project_id AND reset.task_id = e.task_id
+       AND reset.id > e.id AND reset.event_type = 'task.status_changed' AND reset.payload->>'to' = 'PLANNING'
+   ) ORDER BY e.id DESC LIMIT 1) AS "submittedDecisions"`;
+
+type TaskRead = {
+  architecture: ArchitecturePlan | null;
+  submittedDecisions: TaskDecision[] | null;
+};
+
+function legacyDecisions(plan: ArchitecturePlan): DecisionQuestion[] {
+  const questions = plan.steps.flatMap((step) => {
+    const match = /^(?:提交人工审批|待人工确认|实施前待确认)[:：]\s*(?:确认)?([^。]+)/u.exec(step);
+    return match ? match[1].split(/、|，(?:以及)?|；/u).map((question) => question.trim()).filter(Boolean) : [];
+  });
+  if (questions.length) {
+    for (const risk of plan.risks) {
+      const match = /^([^。；]{1,150}?)(?:待确认|未确认)(?=[。；]|$)/u.exec(risk);
+      if (match) questions.push(match[1]);
+    }
+  }
+  return [...new Set(questions)].slice(0, 8).map((question) => ({
+    question, options: ['本期暂缓，沿用现有行为', '仅核实现状并记录差异，具体改动另行确认'],
+  }));
+}
+
+function withDecisions<T extends Task>({ architecture, submittedDecisions, ...task }: T & TaskRead) {
+  const failure = task.executionFailure;
+  const checkLegacy = ['WAITING_APPROVAL', 'READY'].includes(task.status)
+    || (task.status === 'FAILED' && failure?.code === 'no_changes');
+  const planned = architecture?.decisions ?? (architecture && checkLegacy ? legacyDecisions(architecture) : []);
+  const decisions = new Map((submittedDecisions ?? []).map((item) => [item.question, item]));
+  for (const [index, item] of planned.entries()) {
+    if (!decisions.has(item.question)) decisions.set(item.question, { ...item, id: `plan:${index}` });
+  }
+  if (task.status === 'FAILED' && failure?.decisions) {
+    for (const [index, item] of failure.decisions.entries()) {
+      const id = `${failure.runId}:${index}`;
+      if (decisions.get(item.question)?.id !== id) decisions.set(item.question, { ...item, id });
+    }
+  }
+  return { ...task, decisions: [...decisions.values()] };
+}
+
+export function requireTaskDecisions(task: Task) {
+  if (task.decisions?.some(({ answer }) => !answer)) {
+    throw new ConflictException({ code: 'pending-decisions', message: 'Resolve outstanding decisions before approval or dispatch' });
+  }
+}
 const editable = new Set<TaskStatus>(['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED']);
 const userTransitions = new Set<TaskStatus>(['PLANNING', 'WAITING_APPROVAL', 'READY', 'REJECTED', 'CANCELLED']);
 const running = new Set<TaskStatus>(['QUEUED', 'RUNNING', 'TESTING', 'REVIEW', 'MERGED', 'RETRYING']);
@@ -61,22 +126,22 @@ export class TasksService {
 
   async list(actor: Account, projectId: string) {
     await this.projects.access(actor.id, projectId);
-    const { rows } = await this.db.projectQuery<Task>(projectId,
-      `SELECT ${taskColumns} FROM tasks WHERE project_id = $1
+    const { rows } = await this.db.projectQuery<Task & TaskRead>(projectId,
+      `SELECT ${taskReadColumns} FROM tasks WHERE project_id = $1
        ORDER BY archived_at NULLS FIRST, priority, created_at DESC`, [projectId],
     );
-    return rows;
+    return rows.map((row) => withDecisions<Task>(row));
   }
 
   async find(projectId: string, id: string, client?: PoolClient): Promise<TaskDetail> {
     if (!client) return this.db.projectTransaction(projectId, (scoped) => this.find(projectId, id, scoped));
-    const { rows: [task] } = await client.query<TaskDetail>(
-      `SELECT ${taskColumns}, ARRAY(SELECT d.depends_on_task_id FROM task_dependencies d
+    const { rows: [task] } = await client.query<TaskDetail & TaskRead>(
+      `SELECT ${taskReadColumns}, ARRAY(SELECT d.depends_on_task_id FROM task_dependencies d
          WHERE d.project_id = $1 AND d.task_id = $2 ORDER BY d.depends_on_task_id) AS dependencies
        FROM tasks WHERE project_id = $1 AND id = $2`, [projectId, id],
     );
     if (!task) throw new NotFoundException('Task not found');
-    return task;
+    return withDecisions<TaskDetail>(task);
   }
 
   async get(actor: Account, projectId: string, id: string) {
@@ -199,6 +264,7 @@ export class TasksService {
       }
       let approved: AgentAssignment | undefined;
       if (to === 'READY') {
+        requireTaskDecisions(task);
         const blocked = await client.query(
           `SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_task_id
            WHERE d.project_id = $1 AND d.task_id = $2 AND t.status <> 'COMPLETED' LIMIT 1`, [projectId, id],
@@ -216,7 +282,36 @@ export class TasksService {
          WHERE project_id = $1 AND id = $2 RETURNING ${taskColumns}`, [projectId, id, to, approved ?? null]);
       await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to,
         ...(updated.developer && { developer: updated.developer.role, developerVersion: updated.developer.version }) });
-      return { ...updated, dependencies: task.dependencies };
+      return { ...updated, dependencies: task.dependencies, decisions: task.decisions, executionFailure: task.executionFailure };
+    });
+  }
+
+  async submitDecisions(actor: Account, projectId: string, id: string, body: unknown) {
+    const { answers } = objectInput(body);
+    if (!Array.isArray(answers) || answers.length > 16) throw new BadRequestException('Invalid decision answers');
+    return this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { write: true, active: true }, client);
+      const task = await this.find(projectId, id, client);
+      const pending = (task.decisions ?? []).filter(({ answer }) => !answer);
+      if (task.archivedAt || !['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)
+        || !pending.length || answers.length !== pending.length) {
+        throw new ConflictException('Task decisions changed or cannot be submitted');
+      }
+      const byId = new Map(answers.map((entry) => {
+        const { id, answer } = objectInput(entry);
+        return [textInput(id, 'decision ID', 100), textInput(answer, 'decision answer', 1000)];
+      }));
+      if (pending.some(({ id }) => !byId.has(id))) throw new ConflictException('Task decisions changed');
+      const decisions = (task.decisions ?? []).map((item) => ({ ...item, answer: byId.get(item.id) ?? item.answer }));
+      await client.query(
+        `UPDATE tasks SET status = 'WAITING_APPROVAL', updated_at = now(), approved_developer = NULL
+         WHERE project_id = $1 AND id = $2`, [projectId, id]);
+      await this.event(client, task, 'task.decisions_submitted', {
+        actorId: actor.id, decisions, ...(task.executionFailure && { runId: task.executionFailure.runId }),
+      });
+      if (task.status !== 'WAITING_APPROVAL') {
+        await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to: 'WAITING_APPROVAL' });
+      }
     });
   }
 
@@ -338,6 +433,13 @@ export class TasksController {
   transition(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
     return this.tasks.transition(actor, projectId, id, body);
+  }
+
+  @Post(':id/decisions')
+  @HttpCode(204)
+  submitDecisions(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    return this.tasks.submitDecisions(actor, projectId, id, body);
   }
 
   @Post(':id/archive')

@@ -3,6 +3,7 @@ import type { ExecutionDelivery, PatchArtifact } from './delivery';
 import type { AgentAssignment, ArchitecturePlan } from './agents';
 import type { RequirementContent } from './projects';
 import type { KnowledgeSnapshot } from './knowledge';
+import type { DecisionQuestion } from './decisions';
 
 export interface ExecutionRevision {
   runId: string;
@@ -25,6 +26,13 @@ export interface DevelopmentHandoff {
   requirement?: RequirementContent;
   knowledge?: KnowledgeSnapshot[];
   revision?: ExecutionRevision;
+  decisions?: { question: string; answer: string }[];
+}
+
+export interface ExecutionFailure {
+  runId: string;
+  code: string;
+  decisions?: DecisionQuestion[];
 }
 
 export interface ExecutionOffer {
@@ -41,6 +49,7 @@ export interface ExecutionOffer {
   archivePatch?: boolean;
   detailedEvents?: true;
   turnUsage?: true;
+  decisionReporting?: true;
   development?: DevelopmentHandoff | null;
 }
 
@@ -65,6 +74,7 @@ export interface ExecutionRun {
   qa?: ExecutionQa | null;
   revision?: ExecutionRevision | null;
   evidence?: ReviewEvidence[];
+  failure?: ExecutionFailure | null;
 }
 
 export function executionQualityGate(

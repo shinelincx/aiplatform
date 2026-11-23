@@ -1,5 +1,6 @@
 import type { ProjectRequirement } from './projects';
 import type { KnowledgeSnapshot } from './knowledge';
+import type { DecisionQuestion } from './decisions';
 
 export const agentRoleLabels = {
   PROJECT_DIRECTOR: '项目总监',
@@ -96,6 +97,7 @@ export interface ArchitecturePlan {
   steps: string[];
   risks: string[];
   testApproach: string[];
+  decisions?: DecisionQuestion[];
 }
 export type PlanningOutput = DirectorPlan | ProductPlan | ArchitecturePlan;
 

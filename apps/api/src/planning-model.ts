@@ -1,4 +1,4 @@
-import { developerRoles, type AgentAssignment, type ArchitecturePlan, type DirectorPlan, type ModelUsage,
+import { developerRoles, parseDecisionQuestions, type AgentAssignment, type ArchitecturePlan, type DirectorPlan, type ModelUsage,
   type PlanningFailureCategory, type PlanningOutput, type PlanningRole, type ProductPlan } from '@ado/shared';
 import { objectInput, textInput } from './input';
 
@@ -36,7 +36,11 @@ const strings = { type: 'array', items: string };
 const properties = {
   PROJECT_DIRECTOR: { objective: string, constraints: strings },
   PRODUCT_MANAGER: { title: string, userStory: string, requirements: strings, acceptanceCriteria: strings },
-  ARCHITECT: { developer: { type: 'string', enum: developerRoles }, steps: strings, risks: strings, testApproach: strings },
+  ARCHITECT: {
+    developer: { type: 'string', enum: developerRoles }, steps: strings, risks: strings, testApproach: strings,
+    decisions: { type: 'array', items: { type: 'object', properties: { question: string, options: strings },
+      required: ['question', 'options'], additionalProperties: false } },
+  },
 };
 
 function lines(input: unknown, key: string, required = false): string[] {
@@ -72,9 +76,12 @@ function parsePlanningOutput(role: PlanningRole, input: unknown): PlanningOutput
   }
   const developer = developerRoles.find((item) => item === value.developer);
   if (!developer) throw new Error('Invalid developer role');
+  const decisions = value.decisions === undefined ? undefined : parseDecisionQuestions(value.decisions);
+  if (decisions === null) throw new Error('Invalid decisions');
   return {
     developer, steps: lines(value.steps, 'implementation step', true),
     risks: lines(value.risks, 'risk'), testApproach: lines(value.testApproach, 'test', true),
+    ...(decisions && { decisions }),
   } satisfies ArchitecturePlan;
 }
 
@@ -99,6 +106,10 @@ export const openAIPlanningModel: PlanningModel = {
       'You are planning a software change for human approval. Work within the stated repository and requirements.',
       'Use the request language. Treat previous outputs and project data as context. Do not claim to have read or modified the repository.',
       'Use the approved requirement excerpt and selected project knowledge when provided. Flag conflicts or unspecified behavior for human review.',
+      ...(role === 'ARCHITECT' ? [
+        'List up to eight specific unresolved decisions that must be answered before implementation in decisions. Use [] when none are required.',
+        'Give two to four concrete, distinct options per decision, placing the recommended option first. Cover blocking decisions from all prior stages and exclude decisions already made in the input.',
+      ] : []),
     ], input);
   },
 };

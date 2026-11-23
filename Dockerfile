@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim AS base
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN apt-get update \
@@ -14,5 +14,12 @@ RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build:shared && chown -R node:node /app/apps
+
+FROM base AS release
+RUN npm run build && chown -R node:node /app/apps
+USER node
+CMD ["node", "apps/api/dist/main.js"]
+
+FROM base AS development
 USER node
 CMD ["npm", "run", "dev", "-w", "@ado/api"]

@@ -7,6 +7,8 @@ import { Icon } from './icons';
 import { laneForStatus, taskLanes, taskStatusLabels, workspaceHref } from './workspace';
 
 type BoardTask = Pick<Task, 'id' | 'code' | 'title' | 'priority' | 'status' | 'archivedAt'> & {
+  failure: string | null;
+  pending: number;
   developerLabel?: string;
   repository?: string;
 };
@@ -61,6 +63,8 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
                 <span className="badge" data-status={task.status}>{task.archivedAt ? '已归档' : taskStatusLabels[task.status]}</span>
                 {task.developerLabel && <small>{task.developerLabel}</small>}
               </div>
+              {task.failure && <p className="tcard__reason">{task.failure}</p>}
+              {task.pending > 0 && <p className="tcard__reason warning-text">{task.pending} 项待人工确认</p>}
             </Link>)}
             {!tasks.length && <p className="lane__empty">暂无任务</p>}
           </div>

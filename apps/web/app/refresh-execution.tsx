@@ -14,13 +14,13 @@ export function RefreshExecution({ intervalMs = 3000 }: { intervalMs?: number })
   return null;
 }
 
-export function RetrySection({ label }: { label: string }) {
+export function RetrySection({ label, buttonLabel }: { label: string; buttonLabel?: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  return <button type="button" className="secondary" aria-disabled={pending}
+  return <button type="button" className="secondary" aria-disabled={pending} aria-label={buttonLabel ? `刷新${label}` : undefined}
     onClick={() => {
       if (!pending) startTransition(() => router.refresh());
     }}>
-    <span aria-live="polite">{pending ? `正在重新加载${label}…` : `重新加载${label}`}</span>
+    <span aria-live="polite">{pending ? (buttonLabel ? '刷新中…' : `正在重新加载${label}…`) : buttonLabel ?? `重新加载${label}`}</span>
   </button>;
 }
