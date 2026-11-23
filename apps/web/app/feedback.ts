@@ -24,6 +24,7 @@ export const issues: Record<string, string> = {
   'delivery-refresh': '无法同步 GitHub PR 状态。请检查 GitHub App 和目标仓库访问权限。',
   'delivery-closeout': '无法结案，请检查 GitHub App 对关联 PR 和 CI 的访问权限。',
   'delivery-not-merged': '关联 PR 尚未合入目标分支。',
+  'delivery-merge-evidence-missing': 'GitHub 已标记关联 PR 合并，但没有返回可核验的合并提交。',
   'delivery-not-closed': '请先在 GitHub 关闭未合并的 PR，再取消任务。',
   'delivery-pr-mismatch': 'GitHub PR 的仓库或分支与 ADO 交付记录不一致。',
   'delivery-ci-missing': '最终提交须通过 PR CI 的 checks 和 compose。',
