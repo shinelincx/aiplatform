@@ -6,6 +6,7 @@ import {
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Account, Session } from '@ado/shared';
+import type { PoolClient } from 'pg';
 import { Database, isUniqueViolation } from './database';
 import { emailInput, objectInput, passwordInput, textInput } from './input';
 
@@ -103,10 +104,7 @@ export class AuthService implements OnApplicationBootstrap {
         [actor.id, name],
       );
       if (!account) throw new UnauthorizedException();
-      await client.query(
-        "INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.profile_updated', $1)",
-        [actor.id],
-      );
+      await this.auditOwnAccount(client, actor.id, 'user.profile_updated');
       return account;
     });
   }
@@ -132,11 +130,13 @@ export class AuthService implements OnApplicationBootstrap {
       );
       if (!rowCount) throw new ConflictException('Account changed while updating password');
       await client.query('DELETE FROM sessions WHERE user_id = $1', [actor.id]);
-      await client.query(
-        "INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, 'user.password_changed', $1)",
-        [actor.id],
-      );
+      await this.auditOwnAccount(client, actor.id, 'user.password_changed');
     });
+  }
+
+  private async auditOwnAccount(client: PoolClient, accountId: string, action: 'user.profile_updated' | 'user.password_changed') {
+    await client.query("SELECT set_config('ado.audit_account', $1, true)", [accountId]);
+    await client.query('INSERT INTO audit_logs (actor_id, action, resource_id) VALUES ($1, $2, $1)', [accountId, action]);
   }
 
   async listUsers(actor: Account) {
