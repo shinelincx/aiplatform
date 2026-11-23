@@ -156,9 +156,16 @@ try {
         WHERE n.nspname = 'public' AND c.relrowsecurity) AS "protectedTables",
       has_schema_privilege('public', 'CREATE') AS ddl,
       has_table_privilege('schema_migrations', 'INSERT') AS migrations,
-      has_table_privilege('tasks', 'TRUNCATE') AS truncate
+      has_table_privilege('tasks', 'TRUNCATE') AS truncate,
+      ARRAY(SELECT column_name::text FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'users'
+          AND has_column_privilege('public.users', column_name, 'UPDATE')
+        ORDER BY column_name) AS "updatableAccountFields"
   `);
-  assert.deepEqual(grants, { role: 'ado_api', protectedTables: 25, ddl: false, migrations: false, truncate: false });
+  assert.deepEqual(grants, {
+    role: 'ado_api', protectedTables: 25, ddl: false, migrations: false, truncate: false,
+    updatableAccountFields: ['name', 'password_hash', 'updated_at'],
+  });
   const email = process.env.ADO_BOOTSTRAP_EMAIL;
   const password = process.env.ADO_BOOTSTRAP_PASSWORD;
   assert(email && password, 'Use an isolated stack with a synthetic bootstrap account');

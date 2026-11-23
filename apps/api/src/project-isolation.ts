@@ -150,6 +150,7 @@ export const runtimePermissions = `
   GRANT SELECT ON public.schema_migrations TO ado_api;
   GRANT SELECT, INSERT ON public.users, public.audit_logs, public.task_events, public.project_agent_versions,
     public.execution_events, public.execution_reviews, public.execution_artifacts, public.github_webhook_deliveries TO ado_api;
+  GRANT UPDATE (name, password_hash, updated_at) ON public.users TO ado_api;
   GRANT SELECT, INSERT, UPDATE ON public.projects, public.repositories, public.tasks, public.workers,
     public.execution_runs, public.execution_deliveries, public.project_agent_settings, public.project_skills,
     public.project_skill_versions, public.task_agent_plans, public.execution_qa, public.project_requirements,
