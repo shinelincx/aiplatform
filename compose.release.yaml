@@ -1,0 +1,9 @@
+services:
+  migrate:
+    volumes: !reset []
+  api:
+    command: [node, apps/api/dist/main.js]
+    volumes: !reset []
+  web:
+    command: [npm, run, start, -w, '@ado/web', --, --hostname, 0.0.0.0]
+    volumes: !reset []

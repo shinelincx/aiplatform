@@ -1,0 +1,37 @@
+name: ADO merge gate
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pull:
+        description: PR number the repository owner authorizes for human merge
+        required: true
+      head:
+        description: Exact 40-character PR commit SHA
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: ado-merge-${{ github.event.workflow_run.pull_requests[0].number || inputs.pull || github.run_id }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: release-gate
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/github-pr-gate.mjs
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_KEY: ${{ secrets.RELEASE_APP_KEY }}
+          RELEASE_GATE_SECRET: ${{ secrets.RELEASE_GATE_SECRET }}

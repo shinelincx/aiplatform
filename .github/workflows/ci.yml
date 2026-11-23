@@ -1,5 +1,10 @@
 name: CI
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 
@@ -10,8 +15,8 @@ jobs:
     env:
       NEXT_TELEMETRY_DISABLED: 1
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -25,15 +30,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      COMPOSE_FILE: compose.yaml:compose.staging.yaml
+      COMPOSE_FILE: compose.yaml:compose.staging.yaml:compose.release.yaml
       ADO_BOOTSTRAP_EMAIL: ci@example.test
       ADO_BOOTSTRAP_PASSWORD: ci-local-password-only
       POSTGRES_PASSWORD: ci-local-database-owner-only
       ADO_DATABASE_PASSWORD: ci-local-database-api-only
       GITHUB_WEBHOOK_SECRET: ci-local-webhook-only
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version-file: .nvmrc
       - name: Generate staging TLS fixture
@@ -47,7 +52,8 @@ jobs:
           echo "CURL_CA_BUNDLE=$tls_dir/tls.crt" >> "$GITHUB_ENV"
       - name: Build the release image
         run: |
-          docker build -t ado-platform-staging:local \
+          docker build --target release -t ado-platform-staging:local \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "io.ado.git.tree=$(git rev-parse 'HEAD^{tree}')" .
       - run: docker compose up --no-build --wait --wait-timeout 240
@@ -118,7 +124,7 @@ jobs:
           docker tag ado-platform-staging:local "ado-platform-release:$GITHUB_SHA"
           docker save "ado-platform-release:$GITHUB_SHA" | gzip -1 > image.tar.gz
           sha256sum image.tar.gz > SHA256SUMS
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: ado-release-${{ github.sha }}
@@ -132,3 +138,64 @@ jobs:
         run: |
           docker compose -p ado-ci-restore down --volumes
           docker compose down
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [checks, compose]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ado-release-${{ github.sha }}
+      - id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          docker load -i image.tar.gz
+          local_image="ado-platform-release:$GITHUB_SHA"
+          test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$local_image")" = "$GITHUB_SHA"
+          registry="ghcr.io/$GITHUB_REPOSITORY"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$local_image" "$registry:$GITHUB_SHA"
+          docker push "$registry:$GITHUB_SHA"
+          image="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$registry:$GITHUB_SHA" | grep -m1 -F "$registry@sha256:")"
+          [[ "$image" =~ ^ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}$ ]]
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+
+  deploy-staging:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.STAGING_CD_ENABLED == 'true'
+    needs: [publish]
+    environment:
+      name: staging
+      url: https://ado.thinkfiter.com
+    concurrency:
+      group: ado-staging-deploy
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      packages: read
+    steps:
+      - env:
+          RELEASE_IMAGE: ${{ needs.publish.outputs.image }}
+          STAGING_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_HOST_KEY: ${{ vars.STAGING_SSH_HOST_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_IMAGE" =~ ^ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}$ ]]
+          umask 077
+          printf '%s\n' "$STAGING_KEY" > "$RUNNER_TEMP/staging-key"
+          printf '%s\n' "$STAGING_HOST_KEY" > "$RUNNER_TEMP/staging-host"
+          trap 'rm -f "$RUNNER_TEMP/staging-key" "$RUNNER_TEMP/staging-host"' EXIT
+          jq -nc '{sha:env.GITHUB_SHA,image:env.RELEASE_IMAGE,user:env.GITHUB_ACTOR,token:env.GH_TOKEN}' |
+            ssh -T -i "$RUNNER_TEMP/staging-key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/staging-host" \
+              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 root@ado.thinkfiter.com deploy-ado

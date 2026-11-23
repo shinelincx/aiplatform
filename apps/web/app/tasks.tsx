@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { agentRoleLabels, canTransitionTask, developerRoles, taskPriorities, type Project, type RepositoryBinding, type Task,
-  type AgentPlan, type AgentRegistry, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
-import { archiveTask, saveTask, transitionTask } from './actions';
+  type AgentPlan, type AgentRegistry, type ExecutionRun, type TaskDetail, type TaskEvent, type TaskStatus } from '@ado/shared';
+import { archiveTask, saveTask, stopExecution, submitTaskDecisions, transitionTask } from './actions';
 import { PlanProgress } from './agents';
-import { read, readSection, type ReadIssue } from './api-client';
+import { readSection, type ReadIssue } from './api-client';
 import { Executions } from './executions';
 import { SectionReadError } from './section-feedback';
 import { SubmitButton } from './task-feedback';
@@ -13,7 +13,9 @@ import { ActionDialog, TaskDrawer } from './console-controls';
 import { Metric } from './dashboard';
 import { Icon } from './icons';
 import { TaskBoard } from './task-board';
-import { taskStatusLabels as statusLabels, workspaceHref } from './workspace';
+import { TaskActivity, type ActivityItem } from './task-activity';
+import { TaskDetailTabs, type TaskDetailTab } from './task-detail-tabs';
+import { taskFailureLabel, taskStatusLabels as statusLabels, workspaceHref } from './workspace';
 
 const taskActions: { status: TaskStatus; label: string; ownerOnly?: boolean }[] = [
   { status: 'PLANNING', label: '进入规划' },
@@ -25,11 +27,30 @@ const taskActions: { status: TaskStatus; label: string; ownerOnly?: boolean }[] 
 const editable = ['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED'];
 const canManageStates = [...editable, 'WAITING_APPROVAL', 'READY', 'FAILED', 'TIMEOUT'];
 const eventLabels: Record<string, string> = {
-  'task.created': '创建', 'task.updated': '编辑', 'task.archived': '归档',
+  'task.created': '创建任务', 'task.updated': '编辑任务', 'task.archived': '归档任务',
+  'task.status_changed': '任务状态更新',
+  'task.decisions_submitted': '补充决策并送审',
   'agent.plan_queued': 'Agent 规划入队', 'agent.plan_started': 'Agent 规划开始',
   'agent.model_usage': '模型用量', 'agent.step_completed': '规划步骤完成',
   'agent.plan_failed': '规划失败', 'agent.plan_cancelled': '规划取消',
 };
+
+function eventStatus(value: unknown): value is TaskStatus {
+  return typeof value === 'string' && Object.hasOwn(statusLabels, value);
+}
+
+function taskActivity(event: TaskEvent): ActivityItem {
+  const { to, from } = event.payload;
+  const planning = event.eventType.startsWith('agent.');
+  const failed = ['FAILED', 'TIMEOUT', 'BLOCKED', 'REJECTED'].includes(String(to)) || event.eventType.endsWith('_failed');
+  return {
+    id: event.id, at: event.createdAt,
+    label: to === 'READY' ? '批准方案 · 待派发' : eventStatus(to) ? statusLabels[to] : eventLabels[event.eventType] ?? event.eventType,
+    group: failed ? '异常' : planning ? '规划' : eventStatus(to) ? '状态' : '任务',
+    tone: failed ? 'rose' : undefined,
+    detail: eventStatus(from) && eventStatus(to) ? `${statusLabels[from]} → ${statusLabels[to]}` : undefined,
+  };
+}
 
 function shortCode(code: string) {
   return code.length > 20 ? `${code.slice(0, 8)}…${code.slice(-4)}` : code;
@@ -87,13 +108,19 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const path = `/projects/${project.id}/tasks`;
   const selected = tasks.find(({ id }) => selectedId === id);
   const canWrite = project.status === 'active' && project.role !== 'viewer';
-  const [task, events, planning] = await Promise.all([
-    selected ? read<TaskDetail>(`${path}/${selected.id}`) : null,
-    selected ? read<TaskEvent[]>(`${path}/${selected.id}/events`) : null,
-    selected ? read<{ plan: AgentPlan | null }>(`${path}/${selected.id}/agent-plan`).catch(() => null) : null,
+  const [taskResult, eventResult, planResult, runsResult] = await Promise.all([
+    selected ? readSection<TaskDetail>(`${path}/${selected.id}`, (data) => data.id === selected.id) : null,
+    selected ? readSection<TaskEvent[]>(`${path}/${selected.id}/events`, Array.isArray) : null,
+    selected ? readSection<{ plan: AgentPlan | null }>(`${path}/${selected.id}/agent-plan`, (data) => 'plan' in data) : null,
+    selected ? readSection<ExecutionRun[]>(`${path}/${selected.id}/executions`, Array.isArray) : null,
   ]);
+  const task = taskResult?.data;
+  const events = eventResult?.data ?? [];
   const manageRequirements = project.role === 'owner' && project.status === 'active';
-  const plan = planning?.plan;
+  const plan = planResult?.data?.plan;
+  const pendingDecisions = task?.decisions?.filter(({ answer }) => !answer) ?? [];
+  const confirmedDecisions = task?.decisions?.filter(({ answer }) => Boolean(answer)) ?? [];
+  const failure = task && taskFailureLabel(task);
   const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
   const chooseDeveloper = manageRequirements && task?.status === 'WAITING_APPROVAL' && plan?.state !== 'completed';
   const registry = chooseDeveloper ? await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
@@ -114,6 +141,22 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const plans = tasks.filter(({ archivedAt, status }) => !archivedAt && status === 'WAITING_APPROVAL');
   const reviews = tasks.filter(({ archivedAt, status }) => !archivedAt && status === 'REVIEW');
   const repositoryNames = new Map(repositories.map(({ id, fullName }) => [id, fullName]));
+  const available = task && canWrite && !task.archivedAt;
+  const transitions = available && canManageStates.includes(task.status)
+    ? taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
+      && (!managedPlan || status === 'CANCELLED') && (!ownerOnly || project.role === 'owner')) : [];
+  const canEdit = available && !managedPlan && editable.includes(task.status);
+  const canArchive = available && project.role === 'owner' && ['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status);
+  const hasRelations = task && (task.parentTaskId || task.dependencies.length > 0);
+  const latestRun = runsResult?.data?.[0];
+  const canStopRun = latestRun && project.role === 'owner' && !latestRun.cancelRequested
+    && (latestRun.status === 'queued' || latestRun.status === 'running');
+  const canStopQa = latestRun && project.role === 'owner' && project.status === 'active' && task?.status === 'TESTING'
+    && latestRun.qa && ['queued', 'running', 'failed'].includes(latestRun.qa.state);
+  const stopTitle = canStopRun ? '取消执行' : '取消任务';
+  const initialTab: TaskDetailTab = pendingDecisions.length || (task && ['READY', 'QUEUED', 'RUNNING', 'RETRYING', 'TESTING', 'REVIEW',
+    'FAILED', 'TIMEOUT', 'BLOCKED', 'REJECTED', 'MERGED', 'COMPLETED'].includes(task.status)) ? 'execution'
+    : plan && task && ['PLANNING', 'WAITING_APPROVAL'].includes(task.status) ? 'plan' : 'summary';
 
   return (
     <section className="task-section" aria-labelledby="tasks-heading">
@@ -153,8 +196,10 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
           </section>
         ))}
       </div> : <TaskBoard projectId={project.id} canWrite={canWrite} lane={lane}
-        items={tasks.map(({ id, code, title, status, priority, archivedAt, developer, repositoryId }) => ({
+        items={tasks.map(({ id, code, title, status, priority, archivedAt, developer, repositoryId, executionFailure, decisions }) => ({
           id, code, title, status, priority, archivedAt,
+          failure: executionFailure?.code === 'needs_decisions' ? null : taskFailureLabel({ status, executionFailure, decisions }),
+          pending: decisions?.filter(({ answer }) => !answer).length ?? 0,
           developerLabel: developer ? agentRoleLabels[developer.role] : undefined,
           repository: repositoryId ? repositoryNames.get(repositoryId) : undefined,
         }))} />}
@@ -168,105 +213,156 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
 
 
 
-      {selectedId && !task && <p role="status" className="empty">该任务在当前项目中不可用。</p>}
-      {task && <TaskDrawer key={task.id} label={`任务详情 · ${shortCode(task.code)}`} closeHref={closeHref}>
-        <article id="task-detail" className="task-detail">
-          {feedback && <p className="feedback" role="alert">{feedback}</p>}
-          {workerUnavailable && <p className="feedback">暂无符合条件的在线 Worker</p>}
-          {registry?.issue && <SectionReadError label="责任 Agent" issue={registry.issue} />}
-          {notice && <p className="notice" role="status">{notice}</p>}
-          <header className="detail-head">
-            <div>
-              <p className="eyebrow">Task record / {shortCode(task.code)}</p>
-              <h3>{task.title}</h3>
-              <p className="detail-meta">
-                <span>优先级 {task.priority}</span>
-                {task.developer && <span>责任 Agent · {agentRoleLabels[task.developer.role]} v{task.developer.version}</span>}
-                {task.archivedAt && <span>已归档</span>}
-              </p>
-            </div>
-            <span className="badge badge--lg" data-status={task.status}>{statusLabels[task.status]}</span>
-          </header>
-
-          <nav className="detail-tabs" aria-label="任务详情导航">
-            <a href="#task-summary">概览</a>
-            {plan && <a href="#task-plan">规划</a>}
-            <a href="#execution-heading">执行</a>
-            <a href="#task-events">记录</a>
-          </nav>
-          <div className="detail-grid" id="task-summary">
-            <section>
-              <h4>任务说明</h4>
-              <p className="description">{task.description}</p>
-            </section>
-            {task.acceptanceCriteria.length > 0 && <section>
-              <h4>验收条件</h4>
-              <ul className="criterion-list">{task.acceptanceCriteria.map((criterion, i) =>
-                <li key={i}><span>{String(i + 1).padStart(2, '0')}</span>{criterion}</li>)}</ul>
-            </section>}
+      {taskResult?.issue && <SectionReadError label="任务详情" issue={taskResult.issue} />}
+      {selectedId && !selected && <p role="status" className="empty">该任务在当前项目中不可用。</p>}
+      {task && runsResult && <TaskDrawer key={task.id} label={`任务详情 · ${shortCode(task.code)}`} closeHref={closeHref}
+        heading={<div className="task-detail__heading">
+          <div className="task-detail__identity">
+            <span className="task-detail__code">{task.code}</span>
+            <span className="badge" data-status={task.status}>{statusLabels[task.status]}</span>
+            <span className="task-priority" data-priority={task.priority} aria-label={`优先级 ${task.priority}`}>{task.priority}</span>
+            {task.archivedAt && <span className="task-priority">已归档</span>}
           </div>
-
-          {(task.parentTaskId || task.dependencies.length > 0) && <div className="relation-row">
-            {task.parentTaskId && <p>父任务 <Link href={taskLink(task.parentTaskId)}>{labels.get(task.parentTaskId)}</Link></p>}
-            {task.dependencies.length > 0 && <p>前置任务 {task.dependencies.map((id) => (
-              <Link key={id} href={taskLink(id)} className="task-link">{labels.get(id)}</Link>
-            ))}</p>}
+          <h2>{task.title}</h2>
+          <dl className="task-detail__facts" aria-label="任务信息">
+            <div title="仓库">
+              <dt><Icon name="git" /><span className="sr-only">仓库</span></dt>
+              <dd>{boundRepository?.fullName ?? (task.repositoryId ? '详情暂不可用' : '未绑定')}</dd>
+            </div>
+            <div title="责任 Agent">
+              <dt><Icon name="agents" /><span className="sr-only">责任 Agent</span></dt>
+              <dd>{task.developer ? `${agentRoleLabels[task.developer.role]} · v${task.developer.version}` : '未分配'}</dd>
+            </div>
+            <div title="创建时间">
+              <dt><Icon name="clock" /><span className="sr-only">创建时间</span></dt>
+              <dd><time dateTime={task.createdAt}>{new Date(task.createdAt)
+                .toLocaleString('zh-CN', { timeZone: 'Asia/Singapore', dateStyle: 'medium', timeStyle: 'short' })}</time></dd>
+            </div>
+          </dl>
+          {(transitions.length > 0 || canEdit || canArchive || hasRelations || canStopRun || canStopQa) &&
+            <div className="task-detail__actions" role="group" aria-label="任务操作">
+              <div className="task-detail__primary">
+                {transitions.filter(({ status }) => status !== 'REJECTED' && status !== 'CANCELLED').map(({ status, label }) => {
+                  const blocked = status === 'READY' && pendingDecisions.length > 0;
+                  if (blocked) return <button key={status} type="button" className="task-detail__cta" disabled>{label}</button>;
+                  const approve = status === 'READY' && chooseDeveloper;
+                  return approve ? <ActionDialog key={status} title={label} actionKey="task-approve" className="task-detail__cta">
+                    <form action={transitionTask} className="fields">{taskIdentity}
+                      <input type="hidden" name="confirmTransition" value="1" />
+                      {developers.length ? <label>责任 Agent<select name="developerRole"
+                        defaultValue={developers.includes('BACKEND_DEVELOPER') ? 'BACKEND_DEVELOPER' : developers[0]}>
+                        {developers.map((role) => <option key={role} value={role}>{agentRoleLabels[role]}</option>)}
+                      </select></label> : <p className="warning-text">请先启用开发 Agent。</p>}
+                      <SubmitButton name="status" value={status} pendingLabel="正在批准…" disabled={!developers.length}>{label}</SubmitButton>
+                    </form>
+                  </ActionDialog> : <form key={status} action={transitionTask}>{taskIdentity}
+                    <SubmitButton name="status" value={status} pendingLabel="正在提交…">{label}</SubmitButton>
+                  </form>;
+                })}
+              </div>
+              <div className="task-detail__secondary">
+                {hasRelations && <ActionDialog title="关联任务">
+                  <div className="task-detail__relations">
+                    {task.parentTaskId && <div><strong>父任务</strong><Link href={taskLink(task.parentTaskId)}>
+                      {labels.get(task.parentTaskId) ?? shortCode(task.parentTaskId)}</Link></div>}
+                    {task.dependencies.length > 0 && <div><strong>前置任务</strong>{task.dependencies.map((id) => (
+                      <Link key={id} href={taskLink(id)}>{labels.get(id) ?? shortCode(id)}</Link>
+                    ))}</div>}
+                  </div>
+                </ActionDialog>}
+                {canEdit && <ActionDialog title="编辑任务" actionKey="task-edit">
+                  <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories} />
+                </ActionDialog>}
+                {transitions.filter(({ status }) => status === 'REJECTED' || status === 'CANCELLED').map(({ status, label }) => (
+                  <ActionDialog key={status} title={label} actionKey={status === 'REJECTED' ? 'task-reject' : 'task-cancel'}
+                    className={status === 'CANCELLED' ? 'utility-btn task-detail__cancel' : undefined}>
+                    <form action={transitionTask} className="fields">{taskIdentity}
+                      <input type="hidden" name="confirmTransition" value="1" />
+                      <p>{status === 'REJECTED' ? '驳回后，任务会退回规划流程。' : '取消后，任务将结束当前流程。'}</p>
+                      <div className="form-actions">
+                        <SubmitButton name="status" value={status} className="btn-danger" pendingLabel="正在提交…">确认{label}</SubmitButton>
+                      </div>
+                    </form>
+                  </ActionDialog>
+                ))}
+                {canArchive && <ActionDialog title="归档任务" actionKey="task-archive">
+                  <form action={archiveTask} className="fields">{taskIdentity}
+                    <p>归档后可通过「显示已归档」查看。</p>
+                    <div className="form-actions"><SubmitButton className="btn-danger" pendingLabel="正在归档…">确认归档</SubmitButton></div>
+                  </form>
+                </ActionDialog>}
+                {(canStopRun || canStopQa) && <ActionDialog title={stopTitle} actionKey="execution-stop" className="utility-btn task-detail__cancel">
+                  <form action={stopExecution} className="fields">
+                    {taskIdentity}<input type="hidden" name="runId" value={latestRun.id} />
+                    <p>{canStopRun ? '取消后将停止当前执行，已产生的记录仍可查看。' : '取消后将结束当前验收流程。'}</p>
+                    <SubmitButton className="btn-danger" pendingLabel="正在请求取消…">确认取消</SubmitButton>
+                  </form>
+                </ActionDialog>}
+              </div>
+            </div>}
+        </div>}>
+        <article id="task-detail" className="task-detail" tabIndex={-1}>
+          {(feedback || workerUnavailable || registry?.issue || notice) && <div className="task-detail__feedback">
+            {feedback && <p className="feedback" role="alert">{feedback}</p>}
+            {workerUnavailable && <p className="feedback" role="status">暂无符合条件的在线 Worker</p>}
+            {registry?.issue && <SectionReadError label="责任 Agent" issue={registry.issue} />}
+            {notice && <p className="notice" role="status">{notice}</p>}
           </div>}
 
-          {plan && <div id="task-plan"><PlanProgress projectId={project.id} plan={plan} showDiagnosis={project.role === 'owner'}
-            canRetry={canWrite && task.status === 'PLANNING'} /></div>}
-
-          {canWrite && !task.archivedAt && <>
-            {!managedPlan && editable.includes(task.status) && <div className="task-secondary">
-              <ActionDialog title="编辑任务" actionKey="task-edit">
-                <TaskForm projectId={project.id} task={task} tasks={tasks} repositories={repositories} />
-              </ActionDialog>
-            </div>}
-            {canManageStates.includes(task.status) && <div className="action-bar">
-              {taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
-                && (!managedPlan || status === 'CANCELLED')
-                && (!ownerOnly || project.role === 'owner')).map(({ status, label }) => (
-                <form action={transitionTask} key={status} className={status === 'READY' && chooseDeveloper ? 'fields inline-action' : 'inline-action'}>
-                  {taskIdentity}
-                  {status === 'READY' && chooseDeveloper && (
-                    developers.length ? <label>责任 Agent<select name="developerRole" defaultValue={developers.includes('BACKEND_DEVELOPER')
-                      ? 'BACKEND_DEVELOPER' : developers[0]}>
-                      {developers.map((role) => <option key={role} value={role}>{agentRoleLabels[role]}</option>)}
-                    </select></label> : <p className="warning-text">请先启用开发 Agent。</p>
-                  )}
-                  <button name="status" value={status} className={status === 'CANCELLED' ? 'btn-danger' : status === 'REJECTED' ? 'secondary' : undefined}
-                    disabled={status === 'READY' && chooseDeveloper && !developers.length}>{label}</button>
-                </form>
-              ))}
-            </div>}
-            {project.role === 'owner' && ['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status) &&
-              <div className="task-secondary"><ActionDialog title="归档任务" actionKey="task-archive">
-                <form action={archiveTask} className="fields">{taskIdentity}
-                  <p>归档后可通过「显示已归档」查看。</p>
-                  <div className="form-actions"><button className="btn-danger">确认归档</button></div>
-                </form>
-              </ActionDialog></div>}
-          </>}
-
-          <Executions project={project} task={task}
-            checks={boundRepository?.checks ?? []} independentChecks={boundRepository?.independentChecks ?? []} autoDraftPr={boundRepository?.autoDraftPr === true}
-            planned={plan?.state === 'completed'} approvals={approvals} />
-
-          <details id="task-events" className="drawer">
-            <summary><span>任务记录</span><small>{events?.length ?? 0} 条</small></summary>
-            <div className="drawer-body">
-              <ol className="timeline">
-                {events?.map(({ id, eventType, payload, createdAt }) => (
-                  <li key={id}>
-                    <span>{typeof payload.to === 'string' && Object.hasOwn(statusLabels, payload.to)
-                      ? statusLabels[payload.to as TaskStatus]
-                      : eventLabels[eventType] ?? eventType}</span>
-                    <time dateTime={createdAt}>{new Date(createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Singapore' })}</time>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          </details>
+          <TaskDetailTabs initialTab={initialTab} panels={{
+            summary: <div id="task-summary" className="task-detail__brief">
+              <section className="task-detail__card">
+                <h3>任务说明</h3><p className="description">{task.description}</p>
+              </section>
+              <section className="task-detail__card">
+                <h3>验收条件 <small>{task.acceptanceCriteria.length} 项</small></h3>
+                {task.acceptanceCriteria.length > 0 ? <ol className="criterion-list">{task.acceptanceCriteria.map((criterion, index) =>
+                  <li key={index}><span aria-hidden="true">{index + 1}</span>{criterion}</li>)}</ol>
+                  : <p className="muted">暂无验收条件。</p>}
+              </section>
+            </div>,
+            plan: <div id="task-plan">
+              {planResult?.issue ? <SectionReadError label="Agent 规划" issue={planResult.issue} />
+                : plan ? <PlanProgress projectId={project.id} plan={plan} showDiagnosis={project.role === 'owner'}
+                  canRetry={canWrite && task.status === 'PLANNING'} />
+                  : <p className="task-detail__empty">此任务暂无 Agent 规划。</p>}
+            </div>,
+            execution: <div className="execution-block">
+              {failure && <p className="feedback" role="status"><strong>执行结果</strong> · {failure}</p>}
+              {(pendingDecisions.length > 0 || confirmedDecisions.length > 0) &&
+                <section id="task-decisions" className="task-detail__card decision-review" aria-labelledby="decision-heading">
+                  <h4 id="decision-heading">{pendingDecisions.length ? '待人工确认' : '已记录的人工决策'}</h4>
+                  {confirmedDecisions.length > 0 && <dl className="decision-answers">{confirmedDecisions.map(({ id, question, answer }) =>
+                    <div key={id}><dt>{question}</dt><dd>{answer}</dd></div>)}</dl>}
+                  {pendingDecisions.length > 0 && <>
+                    <p className="warning-text">请明确以下事项并送审。项目所有者批准后才能派发。</p>
+                    {canWrite && !task.archivedAt && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)
+                      ? <form action={submitTaskDecisions} className="fields">
+                        {taskIdentity}
+                        {pendingDecisions.map(({ id, question, options }, index) => <div className="decision-question" key={id}>
+                          <label>{question}
+                            <input name={`decision:${id}`} list={`decision-options-${index}`}
+                              aria-describedby={`decision-recommendation-${index}`} autoComplete="off"
+                              placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required />
+                          </label>
+                          <datalist id={`decision-options-${index}`}>{options.map((option) => <option key={option} value={option} />)}</datalist>
+                          <p className="muted" id={`decision-recommendation-${index}`}>推荐 · {options[0]}</p>
+                        </div>)}
+                        <div className="form-actions"><SubmitButton pendingLabel="正在提交…">补充决策并重新送审</SubmitButton></div>
+                      </form>
+                      : <ul>{pendingDecisions.map(({ id, question, options }) =>
+                        <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p></li>)}</ul>}
+                  </>}
+                </section>}
+              <Executions project={project} task={task} runsResult={runsResult}
+                checks={boundRepository?.checks ?? []} independentChecks={boundRepository?.independentChecks ?? []}
+                autoDraftPr={boundRepository?.autoDraftPr === true} planned={plan?.state === 'completed'} approvals={approvals} />
+            </div>,
+            activity: <div id="task-events">
+              {eventResult?.issue ? <SectionReadError label="任务活动" issue={eventResult.issue} />
+                : <TaskActivity title="任务活动" items={[...events].reverse().map(taskActivity)} />}
+            </div>,
+          }} />
         </article>
       </TaskDrawer>}
     </section>

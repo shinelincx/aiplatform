@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+[[ ${SSH_ORIGINAL_COMMAND:-} == deploy-ado ]]
+IFS= read -r -n 2048 payload
+mapfile -t request < <(printf '%s' "$payload" | python3 -c '
+import json, re, sys
+data = json.load(sys.stdin)
+for key, pattern in {
+  "sha": "[a-f0-9]{40}", "image": r"ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}",
+  "user": "[A-Za-z0-9_\\[\\]-]{1,80}", "token": "[A-Za-z0-9_.-]{20,1024}"
+}.items():
+    value = data.get(key)
+    if not isinstance(value, str) or not re.fullmatch(pattern, value):
+        sys.exit("Invalid deployment request")
+    print(value)
+')
+unset payload
+[[ ${#request[@]} == 4 ]]
+revision=${request[0]} image=${request[1]}
+root=/opt/ado-staging
+compose="$root/compose.sh"
+release="$root/releases/$revision"
+domain=ado.thinkfiter.com
+exec 9>"$root/.release.lock"
+flock -w 180 9
+current=$(readlink -f "$root/current")
+[[ $current =~ ^/opt/ado-staging/releases/[a-f0-9]{40}$ ]]
+scratch=$(mktemp -d "$root/.cd.XXXXXXXX")
+export DOCKER_CONFIG="$scratch/registry"
+temp_release=
+switched=0
+
+db() { docker exec -i ado-staging-postgres-1 psql -XqAt -v ON_ERROR_STOP=1 -U ado -d ado "$@"; }
+stateful() { docker inspect --format '{{.Id}}' ado-staging-postgres-1 ado-staging-redis-1 ado-staging-storage-1; }
+queue() {
+  db -c "SELECT (SELECT count(*) FROM task_agent_plans WHERE state IN ('queued','running')) +
+    (SELECT count(*) FROM execution_runs WHERE status IN ('queued','running')) +
+    (SELECT count(*) FROM execution_qa WHERE state IN ('queued','running')) +
+    (SELECT count(*) FROM execution_deliveries WHERE state IN ('queued','publishing'))"
+}
+select_release() {
+  ln -s -- "$1" "$scratch/link"
+  mv -Tf -- "$scratch/link" "$root/current"
+}
+recreate() { "$compose" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 85 "$@"; }
+public() { curl -fsS --noproxy '*' --resolve "$domain:443:127.0.0.1" --max-time 12 "$@"; }
+assert_main() {
+  curl -fsS --max-time 15 https://api.github.com/repos/shinelincx/aiplatform/git/ref/heads/main |
+    python3 -c 'import json,sys; assert json.load(sys.stdin)["object"]["sha"] == sys.argv[1], "Revision is no longer main"' "$revision"
+}
+finish() {
+  local status=$?
+  trap - EXIT
+  if (( status && switched )); then
+    if select_release "$current" && recreate api && recreate web && public "https://$domain/health" -o /dev/null; then
+      printf 'Rolled back to %s.\n' "${current##*/}"
+    else
+      printf 'Rollback requires inspection.\n' >&2
+    fi
+  fi
+  if [[ $temp_release == "$root/releases/.cd-"* ]]; then rm -rf -- "$temp_release"; fi
+  rm -rf -- "$scratch"
+  exit "$status"
+}
+trap finish EXIT
+
+assert_main
+public "https://$domain/health" -o /dev/null
+if [[ $current == "$release" ]] && [[ $(docker inspect -f '{{.Config.Image}}' ado-staging-api-1) == "$image" &&
+  $(docker inspect -f '{{.Config.Image}}' ado-staging-web-1) == "$image" ]]; then
+  printf 'Release %s is already active.\n' "$revision"
+  exit 0
+fi
+printf '%s' "${request[3]}" | docker login ghcr.io --username "${request[2]}" --password-stdin >/dev/null
+unset request
+docker pull "$image"
+docker logout ghcr.io >/dev/null
+test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$revision"
+test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")" = https://github.com/shinelincx/aiplatform
+
+if [[ ! -d $release ]]; then
+  temp_release=$(mktemp -d "$root/releases/.cd-XXXXXXXX")
+  docker run --rm --network none --read-only --entrypoint tar "$image" -C /app \
+    --exclude=node_modules --exclude=.next --exclude=dist -cf - . | tar --no-same-owner -xf - -C "$temp_release"
+  for path in compose.staging.yaml deploy/staging-nginx.conf apps/api/src/database.ts apps/api/src/migrate.ts; do
+    cmp -s "$current/$path" "$temp_release/$path" || { printf '%s requires a coordinated release.\n' "$path" >&2; exit 1; }
+  done
+  diff -qr "$current/apps/worker/src" "$temp_release/apps/worker/src" || { printf 'Worker source changed.\n' >&2; exit 1; }
+  cat > "$temp_release/compose.web-production.yaml" <<YAML
+services:
+  api:
+    image: $image
+    command: [node, apps/api/dist/main.js]
+    volumes: !reset []
+    environment:
+      ADO_RELEASE_SHA: $revision
+  web:
+    image: $image
+    command: [npm, run, start, -w, '@ado/web', --, --hostname, 0.0.0.0]
+    volumes: !reset []
+YAML
+  mv -T -- "$temp_release" "$release"
+  temp_release=
+fi
+grep -Fq "image: $image" "$release/compose.web-production.yaml"
+deadline=$((SECONDS + 180))
+until [[ $(queue) == 0 ]]; do
+  (( SECONDS < deadline )) || { printf 'ADO work is still in flight.\n' >&2; exit 1; }
+  sleep 10
+done
+assert_main
+workers=$(db -c "SELECT id FROM workers WHERE NOT disabled AND connection_id IS NOT NULL
+  AND last_heartbeat_at > now()-interval '50 seconds' ORDER BY id")
+state=$(stateful)
+schema=$(db -c 'SELECT max(version) FROM schema_migrations')
+started=$(date -u +%FT%TZ)
+switched=1
+docker stop --time 25 ado-staging-api-1 >/dev/null
+test "$(queue)" = 0
+select_release "$release"
+recreate api
+recreate web
+test "$(stateful)" = "$state"
+test "$(db -c 'SELECT max(version) FROM schema_migrations')" = "$schema"
+public "https://$domain/health" | python3 -c 'import json,sys; assert json.load(sys.stdin).get("revision") == sys.argv[1]' "$revision"
+public "https://$domain/" -o "$scratch/workbench.html"
+grep -q 'AI DEVELOPMENT ORGANIZATION' "$scratch/workbench.html"
+if [[ -n $workers ]]; then
+  deadline=$((SECONDS + 80))
+  while :; do
+    online=$(db -c "SELECT id FROM workers WHERE NOT disabled AND connection_id IS NOT NULL
+      AND last_heartbeat_at >= '$started'::timestamptz ORDER BY id")
+    if [[ -z $(comm -23 <(printf '%s\n' "$workers") <(printf '%s\n' "$online")) ]]; then break; fi
+    (( SECONDS < deadline )) || { printf 'A previously online Worker did not reconnect.\n' >&2; exit 1; }
+    sleep 5
+  done
+fi
+switched=0
+printf 'Staging is healthy on %s (%s).\n' "$revision" "$image"

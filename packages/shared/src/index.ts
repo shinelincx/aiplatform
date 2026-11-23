@@ -2,6 +2,8 @@ export type { Account, GitHubInstallation, GitHubRepository, Project, ProjectMem
   ProjectRequirement, RepositoryBinding, RequirementContent, Session } from './projects';
 export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
+export { parseDecisionQuestions, parseDecisionReply } from './decisions';
+export type { DecisionQuestion, TaskDecision } from './decisions';
 export { agentRoleLabels, developerRoles, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
   DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill,
@@ -10,7 +12,7 @@ export { decodeWorkerMessage, isWorkerId, workerCredentialLifetimeHours, workerD
   workerOfflineMs, workerProtocolVersion } from './workers';
 export type { WorkerCapabilities, WorkerCredential, WorkerEnvelope, WorkerHeartbeat, WorkerMessageType,
   WorkerRecovery, WorkerReport, WorkerResources } from './workers';
-export type { DevelopmentHandoff, ExecutionEvent, ExecutionOffer, ExecutionRevision, ExecutionRun, ExecutionState, ReviewEvidence } from './executions';
+export type { DevelopmentHandoff, ExecutionEvent, ExecutionFailure, ExecutionOffer, ExecutionRevision, ExecutionRun, ExecutionState, ReviewEvidence } from './executions';
 export { executionQualityGate } from './executions';
 export { maxPatchBytes } from './delivery';
 export type { ExecutionDelivery, PatchArtifact } from './delivery';
@@ -27,6 +29,7 @@ export type { DesignEvidence, KnowledgeEntry, KnowledgeKind, KnowledgeSnapshot, 
 export interface ApiHealth {
   service: 'ado-api';
   status: 'ok';
+  revision?: string;
 }
 
 export async function checkApiHealth(baseUrl: string): Promise<boolean> {
