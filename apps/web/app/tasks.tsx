@@ -140,7 +140,6 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const openTasks = tasks.filter(({ archivedAt, status }) => !archivedAt && status !== 'COMPLETED' && status !== 'CANCELLED');
   const plans = tasks.filter(({ archivedAt, status }) => !archivedAt && status === 'WAITING_APPROVAL');
   const reviews = tasks.filter(({ archivedAt, status }) => !archivedAt && status === 'REVIEW');
-  const repositoryNames = new Map(repositories.map(({ id, fullName }) => [id, fullName]));
   const available = task && canWrite && !task.archivedAt;
   const transitions = available && canManageStates.includes(task.status)
     ? taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
@@ -195,13 +194,11 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
             {!items.length && <p className="empty">队列已清空。</p>}
           </section>
         ))}
-      </div> : <TaskBoard projectId={project.id} canWrite={canWrite} lane={lane}
-        items={tasks.map(({ id, code, title, status, priority, archivedAt, developer, repositoryId, executionFailure, decisions }) => ({
-          id, code, title, status, priority, archivedAt,
+      </div> : <TaskBoard key={project.id} projectId={project.id} canWrite={canWrite} lane={lane}
+        items={tasks.map(({ id, code, title, status, priority, archivedAt, createdAt, executionFailure, decisions }) => ({
+          id, code, title, status, priority, archivedAt, createdAt,
           failure: executionFailure?.code === 'needs_decisions' ? null : taskFailureLabel({ status, executionFailure, decisions }),
           pending: decisions?.filter(({ answer }) => !answer).length ?? 0,
-          developerLabel: developer ? agentRoleLabels[developer.role] : undefined,
-          repository: repositoryId ? repositoryNames.get(repositoryId) : undefined,
         }))} />}
 
       {create && canWrite && !task && <TaskDrawer label="新建研发任务" closeHref={closeHref}>
