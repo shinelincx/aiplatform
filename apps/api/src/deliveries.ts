@@ -11,7 +11,6 @@ import { autoApprovalActor } from './auto-approval';
 import { Database } from './database';
 import { DeliveryError, pushCandidate } from './git-delivery';
 import { GitHubApp, TransientGitHubError } from './github';
-import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { qualityGateColumns, requireQualityGate, type QualityGateRun } from './quality-gate';
