@@ -52,6 +52,8 @@ function externalId(value: unknown) {
   return id;
 }
 
+export class TransientGitHubError extends BadGatewayException {}
+
 @Injectable()
 export class GitHubApp {
   get configured() {
@@ -90,7 +92,10 @@ export class GitHubApp {
       signal: AbortSignal.timeout(8000),
     }).catch(() => null);
     if (response?.status === 404) throw new NotFoundException('GitHub resource is unavailable to the App');
-    if (!response?.ok) throw new BadGatewayException('GitHub App request failed');
+    if (!response || response.status === 429 || response.status >= 500) {
+      throw new TransientGitHubError('GitHub App request failed');
+    }
+    if (!response.ok) throw new BadGatewayException('GitHub App request failed');
     return {
       data: await response.json() as T,
       hasNextPage: response.headers.get('link')?.includes('rel="next"') ?? false,

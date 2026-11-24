@@ -1,4 +1,4 @@
-export type { Account, GitHubInstallation, GitHubRepository, Project, ProjectMember, ProjectRole,
+export type { Account, AutoApprovalSettings, GitHubInstallation, GitHubRepository, Project, ProjectMember, ProjectRole,
   ProjectRequirement, RepositoryBinding, RequirementContent, Session } from './projects';
 export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';

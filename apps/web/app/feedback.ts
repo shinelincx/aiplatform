@@ -58,6 +58,7 @@ export const notices: Record<string, string> = {
   'user-updated': '账号已更新',
   'user-disabled': '账号已停用',
   'project-created': '项目已创建',
+  'auto-approval-saved': '已保存自动审批设置。',
   'project-saved': '项目已保存',
   'project-archived': '项目已归档',
   'member-saved': '成员权限已更新',

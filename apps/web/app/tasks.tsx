@@ -28,6 +28,9 @@ const editable = ['CREATED', 'PLANNING', 'BLOCKED', 'REJECTED'];
 const canManageStates = [...editable, 'WAITING_APPROVAL', 'READY', 'FAILED', 'TIMEOUT'];
 const eventLabels: Record<string, string> = {
   'task.created': '创建任务', 'task.updated': '编辑任务', 'task.archived': '归档任务',
+  'task.auto_approval_succeeded': '自动审批成功',
+  'task.auto_approval_pending_delivery': '自动审批待交付',
+  'task.auto_approval_failed': '自动审批失败',
   'task.status_changed': '任务状态更新',
   'task.decisions_submitted': '补充决策并送审',
   'agent.plan_queued': 'Agent 规划入队', 'agent.plan_started': 'Agent 规划开始',

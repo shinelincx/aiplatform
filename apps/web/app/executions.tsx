@@ -11,6 +11,12 @@ import { TaskActivity, type ActivityItem } from './task-activity';
 import { SubmitButton } from './task-feedback';
 import { executionFailureLabels } from './workspace';
 
+function autoReviewLabel(delivery: ExecutionRun['delivery']) {
+  if (delivery?.pullState === 'merged') return '自动评审 · 已合并';
+  if (delivery?.state === 'failed') return '自动交付失败 · 待人工发布';
+  return '自动评审 · 待交付';
+}
+
 const stateLabels: Record<ExecutionRun['status'], string> = {
   queued: '等待 Worker', running: '执行中', succeeded: '变更已生成，待测试',
   failed: '执行失败', cancelled: '已取消', timed_out: '执行超时',
@@ -82,6 +88,8 @@ const pullLabels = { open: '开放', closed: '已关闭', merged: '已合并', c
 const qaLabels = { queued: '等待 QA', running: 'QA 审查中', failed: 'QA 审查失败', completed: 'QA 已提交意见', cancelled: 'QA 已取消' };
 const qaRecommendations = { ready: '建议进入评审', changes_requested: '建议修改', insufficient_evidence: '证据不足' };
 const deliveryErrors: Record<string, string> = {
+  auto_approval_disabled: '自动交付开关已关闭，请人工发布。',
+  auto_approval_lease_expired: '自动交付超时，请人工发布。',
   quality_gate: '此归档未满足必需检查，发布已停止。',
   base_changed: '测试基准已不属于发布目标分支，请重新执行。',
   patch_rejected: '补丁无法应用到原始基准。',
@@ -374,7 +382,7 @@ export async function Executions({ project, task, runsResult, checks, independen
       </section>}
       {latest.review && <section className="task-detail__card">
         <h5>人工审核</h5>
-        <p>{latest.review.decision === 'approved' ? '已批准' : '已驳回'} · {latest.review.reviewer}</p>
+        <p>{latest.review.automatic ? autoReviewLabel(latest.delivery) : latest.review.decision === 'approved' ? '已批准' : '已驳回'} · {latest.review.reviewer}</p>
         {latest.review.comment && <p className="description">{latest.review.comment}</p>}
       </section>}
       {latest.delivery && <section className="task-detail__card">
@@ -415,7 +423,7 @@ export async function Executions({ project, task, runsResult, checks, independen
         <ul className="member-list">{runs.slice(1).map((run) => <li key={run.id}>
           <div><span>执行 {run.id.slice(0, 8)} · {stateLabels[run.status]}</span>
             {run.failure && <p>{executionFailureLabels[run.failure.code] ?? '执行失败，原因未记录'}</p>}
-            {run.review && <p>{run.review.decision === 'rejected' ? '已驳回' : '已批准'} · {run.review.reviewer}</p>}
+            {run.review && <p>{run.review.automatic ? autoReviewLabel(run.delivery) : run.review.decision === 'rejected' ? '已驳回' : '已批准'} · {run.review.reviewer}</p>}
             {run.review?.comment && <p className="description">{run.review.comment}</p>}
             {run.artifact && <p><a href={`/artifacts/${project.id}/${task.id}/${run.id}`}>下载补丁 {run.artifact.sha256.slice(0, 12)}</a></p>}
             <EvidenceList entries={run.evidence} />

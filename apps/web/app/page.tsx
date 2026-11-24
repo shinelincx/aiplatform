@@ -1,4 +1,4 @@
-import { checkApiHealth, type Account, type Project, type ProjectMember, type ProjectOperations, type ProjectOverview,
+import { checkApiHealth, type Account, type AutoApprovalSettings, type Project, type ProjectMember, type ProjectOperations, type ProjectOverview,
   type RepositoryBinding, type Task, type WorkerReport } from '@ado/shared';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
@@ -102,7 +102,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Que
   const notice = query.notice && Object.hasOwn(notices, query.notice) ? notices[query.notice] : undefined;
   const overviewPage = section === 'overview';
   const projectPath = selected && `/projects/${selected.id}`;
-  const [overviewResult, bindingsResult, members, users, tasksResult, operationsResult, workersResult] = await Promise.all([
+  const [overviewResult, bindingsResult, members, users, tasksResult, operationsResult, workersResult, autoApprovalResult] = await Promise.all([
     projectPath ? readSection<ProjectOverview>(`${projectPath}/operations/overview`, data => Boolean(data.tasks && data.executions && data.workers && Array.isArray(data.alerts))) : null,
     projectPath ? readSection<RepositoryBinding[]>(`${projectPath}/repositories`, Array.isArray) : null,
     projectPath && overviewPage && selected.role === 'owner' ? read<ProjectMember[]>(`${projectPath}/members`) : null,
@@ -110,6 +110,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<Que
     projectPath && (overviewPage || section === 'tasks' || section === 'approvals') ? readSection<Task[]>(`${projectPath}/tasks`, Array.isArray) : null,
     projectPath && overviewPage ? readSection<ProjectOperations>(`${projectPath}/operations`, data => Array.isArray(data.usage)) : null,
     projectPath && overviewPage ? readSection<WorkerReport[]>(`${projectPath}/workers`, Array.isArray) : null,
+    projectPath && overviewPage ? readSection<AutoApprovalSettings>(`${projectPath}/auto-approval`, settings =>
+      typeof settings.READY === 'boolean' && typeof settings.REVIEW === 'boolean') : null,
   ]);
   const overview = overviewResult?.data ?? null;
   const bindings = bindingsResult?.data ?? [];
@@ -178,7 +180,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Que
             {overviewPage && <>
               {overviewResult?.issue && <SectionReadError label="项目运行概览" issue={overviewResult.issue} />}
               <Dashboard project={selected} tasks={tasks} overview={overview} operations={operations} workers={workers ?? []} reachable={reachable} />
-              <ProjectDetails project={selected} members={members ?? []} users={users ?? []} overview={overview} live reachable={reachable} />
+              <ProjectDetails key={selected.id} project={selected} autoApproval={autoApprovalResult?.data ?? null} members={members ?? []} users={users ?? []} overview={overview} live reachable={reachable} />
             </>}
             {(section === 'tasks' || section === 'approvals') && <Tasks project={selected} tasks={tasks} taskIssue={tasksResult?.issue}
               repositories={bindings} repositoryIssue={bindingsResult?.issue} selectedId={query.task} lane={query.lane}

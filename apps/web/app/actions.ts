@@ -103,6 +103,17 @@ export async function updateProject(form: FormData) {
   redirect(`${atDialog(query, 'project-edit')}&notice=project-saved`);
 }
 
+export async function saveAutoApproval(form: FormData) {
+  const { query, endpoint } = projectPath(form);
+  const target = atDialog(query, 'auto-approval');
+  const response = await execute(`${endpoint}/auto-approval`, {
+    method: 'PUT',
+    body: JSON.stringify({ READY: form.has('READY'), REVIEW: form.has('REVIEW') }),
+  });
+  if (!response?.ok) redirect(`${target}&issue=${issue(response, 'project')}`);
+  redirect(`${target}&notice=auto-approval-saved`);
+}
+
 function operationsTarget(form: FormData) {
   const { query, endpoint } = projectPath(form);
   const month = String(form.get('month') ?? '');

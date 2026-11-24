@@ -8,6 +8,8 @@ import { Icon } from './icons';
 import { formatTokens, tokenTotal, UsageChart } from './metrics';
 
 const actions: Record<string, string> = {
+  'project.auto_approval_updated': '更新自动审批设置',
+  'execution.auto_approval_succeeded': '自动审批成功',
   'project.created': '创建项目', 'project.updated': '更新项目', 'project.archived': '归档项目',
   'agent.version_published': '发布 Agent 版本', 'agent.settings_updated': '变更 Agent 配置',
   'skill.version_published': '发布 Skill 版本', 'skill.settings_updated': '变更 Skill 配置',

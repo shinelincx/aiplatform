@@ -4,8 +4,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import type { Account, Project, ProjectAuditEntry, ProjectMember, ProjectRequirement } from '@ado/shared';
+import type { Account, AutoApprovalSettings, Project, ProjectAuditEntry, ProjectMember, ProjectRequirement } from '@ado/shared';
 import { AuthService, CurrentAccount, SessionGuard } from './auth';
+import { defaultAutoApproval, readAutoApproval } from './auto-approval';
 import { Database, isUniqueViolation } from './database';
 import { objectInput, textInput } from './input';
 
@@ -96,6 +97,32 @@ export class ProjectsService {
       );
       await this.audit(client, actor.id, projectId, 'project.updated', projectId);
       return { ...project, name, description };
+    });
+  }
+
+  async autoApproval(actor: Account, projectId: string) {
+    await this.access(actor.id, projectId);
+    const { rows: [settings] } = await this.db.projectQuery<AutoApprovalSettings>(projectId, readAutoApproval, [projectId]);
+    return settings ?? defaultAutoApproval;
+  }
+
+  async updateAutoApproval(actor: Account, projectId: string, body: unknown) {
+    const input = objectInput(body);
+    if (typeof input.READY !== 'boolean' || typeof input.REVIEW !== 'boolean'
+      || Object.keys(input).some(key => key !== 'READY' && key !== 'REVIEW')) {
+      throw new BadRequestException('Expected boolean settings for READY and REVIEW');
+    }
+    const settings = { READY: input.READY, REVIEW: input.REVIEW };
+    return this.db.transaction(async (client) => {
+      await this.access(actor.id, projectId, { owner: true, active: true }, client);
+      const { rows: [previous] } = await client.query<AutoApprovalSettings>(readAutoApproval, [projectId]);
+      await client.query(
+        "UPDATE projects SET settings = jsonb_set(settings, '{autoApproval}', $2::jsonb), updated_at = now() WHERE id = $1",
+        [projectId, settings],
+      );
+      await this.audit(client, actor.id, projectId, 'project.auto_approval_updated', projectId,
+        { autoApproval: settings, previousAutoApproval: previous });
+      return settings;
     });
   }
 
@@ -247,6 +274,16 @@ export class ProjectsController {
   retireRequirement(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string,
     @Param('requirementId', ParseUUIDPipe) requirementId: string) {
     return this.projects.retireRequirement(actor, id, requirementId);
+  }
+
+  @Get(':id/auto-approval')
+  autoApproval(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string) {
+    return this.projects.autoApproval(actor, id);
+  }
+
+  @Put(':id/auto-approval')
+  updateAutoApproval(@CurrentAccount() actor: Account, @Param('id', ParseUUIDPipe) id: string, @Body() body: unknown) {
+    return this.projects.updateAutoApproval(actor, id, body);
   }
 
   @Patch(':id')

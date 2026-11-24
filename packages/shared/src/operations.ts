@@ -1,3 +1,4 @@
+import type { AutoApprovalSettings } from './projects';
 import type { AgentRole } from './agents';
 
 export interface TokenUsage {
@@ -48,7 +49,7 @@ export interface ProjectAuditEntry {
   actor: string;
   resourceId: string;
   createdAt: string;
-  details?: { version?: number; role?: AgentRole; enabled?: boolean;
+  details?: { autoApproval?: AutoApprovalSettings; previousAutoApproval?: AutoApprovalSettings; version?: number; role?: AgentRole; enabled?: boolean;
     versionId?: string | null; previousVersionId?: string | null; excerptHash?: string;
     model?: string; sourceUrl?: string | null; effectiveAt?: string | null; month?: string; budgetUsd?: string | null;
     delivery?: {

@@ -576,9 +576,24 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   await upload(active.id, approved, Buffer.from('mismatched bytes'), 409);
   await upload(active.id, approved, patchBytes, 200);
   await upload(active.id, approved, patchBytes, 200);
+  const autoApprovalPath = `/projects/${first.id}/auto-approval`;
+  const setAutoApproval = (READY, REVIEW) => request(autoApprovalPath, { token, method: 'PUT', body: { READY, REVIEW } });
+  await setAutoApproval(false, true);
   assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
   assert.equal((await sendEvent(5, 'verification', passing)).accepted, true);
   assert.equal((await request(verified.path, { token })).status, 'REVIEW');
+  const reviewEvents = () => request(`${verified.path}/events`, { token });
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if ((await reviewEvents()).some(({ eventType }) => eventType === 'task.auto_approval_failed')) break;
+    await delay(250);
+  }
+  const skippedReview = (await reviewEvents()).filter(({ eventType }) => eventType.startsWith('task.auto_approval_'));
+  assert.equal(skippedReview.length, 1);
+  assert.equal(skippedReview[0].eventType, 'task.auto_approval_failed');
+  assert.equal(skippedReview[0].payload.reason, 'Repository automatic draft PR is disabled');
+  assert.equal((await request(verified.runs, { token }))[0].review, null);
+  assert.equal((await request(verified.path, { token })).status, 'REVIEW');
+  await setAutoApproval(false, false);
   const reviewPage = new URL(`/?project=${first.id}&task=${verified.id}`, web);
   const deliveryPath = `${verified.runs}/${active.id}/delivery`;
   await request(deliveryPath, { token, method: 'POST', status: 409 });
@@ -1079,6 +1094,26 @@ fs.writeFileSync(TMPDIR + '/probe', '');
   else assert.equal((await racingApproval.json()).decision, 'approved');
   await request(sameHashReview, approve);
   assert.equal((await request(sameHash.runs, { token }))[0].delivery, null);
+  const beforeEnable = await newTask('AUTO-BEFORE-ENABLE');
+  await setAutoApproval(true, false);
+  const automaticDispatch = await newTask('AUTO-READY');
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if ((await request(automaticDispatch.path, { token })).status === 'QUEUED') break;
+    await delay(250);
+  }
+  assert.equal((await request(automaticDispatch.path, { token })).status, 'QUEUED');
+  assert.equal((await request(automaticDispatch.runs, { token })).length, 1);
+  const autoEvents = (await request(`${automaticDispatch.path}/events`, { token }))
+    .filter(({ eventType }) => eventType === 'task.auto_approval_succeeded');
+  assert.equal(autoEvents.length, 1);
+  assert.equal(autoEvents[0].payload.from, 'READY');
+  assert.equal(autoEvents[0].payload.to, 'QUEUED');
+  assert.equal((await request(beforeEnable.path, { token })).status, 'READY');
+  assert.equal((await request(beforeEnable.runs, { token })).length, 0);
+  await setAutoApproval(false, false);
+  await request(beforeEnable.runs, { token, method: 'POST', body: {}, status: 201 });
+  await request(automaticDispatch.runs, { token, method: 'POST', body: {}, status: 409 });
+
   console.log('Independent evidence is frozen per run, gates approval and delivery, and supports audited retests');
   console.log('Rejected candidate revisions, patch-specific evidence and fresh approval passed');
   console.log('Revision artifact access, legacy Worker rejection, integrity, base, and audit checks passed');
