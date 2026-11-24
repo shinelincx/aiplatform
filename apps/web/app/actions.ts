@@ -495,8 +495,9 @@ export async function submitTaskDecisions(form: FormData) {
   const answers = [...form.entries()].flatMap(([key, answer]) => key.startsWith('decision:') && typeof answer === 'string' && answer.trim()
     ? [{ id: key.slice('decision:'.length), answer }] : []);
   const response = await execute(`${endpoint}/decisions`, { method: 'POST', body: JSON.stringify({ answers }) });
-  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'decision-submit' : issue(response, 'decision-submit')}#task-decisions`);
-  redirect(`${query}&notice=decisions-submitted#task-decisions`);
+  const anchor = form.get('decisionView') === 'plan' ? 'plan-decisions' : 'task-decisions';
+  if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'decision-submit' : issue(response, 'decision-submit')}#${anchor}`);
+  redirect(`${query}&notice=decisions-submitted#${anchor}`);
 }
 
 export async function archiveTask(form: FormData) {

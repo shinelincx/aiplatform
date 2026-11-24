@@ -323,7 +323,8 @@ export class TasksService {
       const pending = (task.decisions ?? []).filter(({ answer }) => !answer);
       const statuses = workflow ? ['PLANNING', 'FAILED'] : ['WAITING_APPROVAL', 'READY', 'FAILED'];
       if (task.archivedAt || !statuses.includes(task.status)
-        || !pending.length || !answers.length || (!workflow && answers.length !== pending.length)) {
+        || !pending.length || !answers.length || (workflow?.advisory && workflow.queue.length > 0)
+        || (!workflow && answers.length !== pending.length)) {
         throw new ConflictException('Task decisions changed or cannot be submitted');
       }
       const byId = new Map(answers.map((entry) => {
@@ -341,7 +342,7 @@ export class TasksService {
         workflow.questions = decisions;
         workflow.affected = [...new Set([...workflow.affected, ...reviewers])];
         const resume = (workflow.queue.length === 0 || task.status === 'FAILED')
-          && !workflow.blockers?.length && decisions.every(({ answer }) => answer);
+          && (workflow.advisory || decisions.every(({ answer }) => answer));
         if (resume) {
           workflow.queue = ['revise'];
           delete workflow.proposal;
@@ -355,6 +356,7 @@ export class TasksService {
         await client.query(
           `UPDATE task_agent_plans SET input = jsonb_set(input, '{workflow}', $2::jsonb),
            state = CASE WHEN $3 THEN 'queued' ELSE state END, error = CASE WHEN $3 THEN NULL ELSE error END,
+           failure_category = CASE WHEN $3 THEN NULL ELSE failure_category END,
            updated_at = now() WHERE task_id = $1`, [id, workflow, resume]);
         await this.event(client, task, 'task.decisions_submitted', {
           actorId: actor.id, decisions, ...(task.executionFailure && { runId: task.executionFailure.runId }),
@@ -463,8 +465,9 @@ export class TasksService {
   private async hasActiveAgentPlan(client: PoolClient, task: Task) {
     const plan = await client.query(
       `SELECT 1 FROM task_agent_plans WHERE task_id = $1
-       AND (state IN ('queued','running','failed') OR ($2 AND state = 'completed' AND input ? 'workflow'))`,
-      [task.id, task.status === 'REJECTED']);
+       AND (state IN ('queued','running','failed') OR (state = 'completed' AND input ? 'workflow'
+         AND ($2 OR ($3 AND input #> '{workflow,proposal}' IS NULL))))`,
+      [task.id, task.status === 'REJECTED', task.status === 'PLANNING']);
     return Boolean(plan.rowCount);
   }
 }

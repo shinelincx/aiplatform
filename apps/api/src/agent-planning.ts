@@ -11,7 +11,7 @@ import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database } from './database';
 import { GitHubApp } from './github';
-import { advancePlan, latestPlanOutput, newWorkflow, planPhases, type PlanWorkflow } from './plan-workflow';
+import { advancePlan, isAdvisoryRequest, latestPlanOutput, newWorkflow, planPhases, type PlanWorkflow } from './plan-workflow';
 import { objectInput, textInput } from './input';
 import { PLANNING_MODEL, PlanningFailure, validatePlanningOutput, type PlanningModel } from './planning-model';
 import { selectKnowledgeVersions } from './project-knowledge';
@@ -39,16 +39,19 @@ function currentRole(row: PlanRecord) {
 }
 
 function publicPlan(row: PlanRecord, showDiagnosis = false): AgentPlan {
+  const workflow = row.input.workflow;
   return {
     taskId: row.taskId, state: row.state, stage: currentRole(row) ?? null, steps: row.steps, error: row.error,
-    ...(row.input.workflow && {
-      reviewStatus: row.input.workflow.proposal ? 'ready'
+    ...(workflow && {
+      ...(workflow.advisory && { advisory: true }),
+      reviewStatus: workflow.proposal ? 'ready'
+        : workflow.advisory && row.state === 'completed' && !row.error ? 'advisory_ready'
+        : row.error === 'pending_review_decisions' ? 'waiting_decisions'
         : row.error === 'review_evidence_missing' || row.error === 'design_role_missing' ? 'waiting_evidence'
-        : row.input.workflow.questions.some(({ answer }) => !answer) ? 'waiting_decisions'
-        : row.steps.some(({ phase }) => phase === 'revise') || row.input.workflow.queue[0] === 'revise' ? 'revising' : 'reviewing',
-      blockers: row.input.workflow.blockers,
-      proposal: row.input.workflow.proposal,
-      approvedVersion: row.input.workflow.approvedVersion,
+        : workflow.queue.some((phase) => phase === 'revise' || phase.endsWith('_review')) ? 'revising' : 'reviewing',
+      blockers: workflow.blockers,
+      proposal: workflow.proposal,
+      approvedVersion: workflow.approvedVersion,
     }),
     ...(showDiagnosis && row.state === 'failed' && isPlanningFailureCategory(row.failureCategory)
       && { failureCategory: row.failureCategory }),
@@ -140,7 +143,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         [projectId, taskId, {
           request, project: project.name, repository: repository.fullName, baseBranch: repository.baseBranch, requirement, knowledge,
           workflow: newWorkflow({ repository: repository.fullName, branch: repository.baseBranch,
-            installationId: Number(repository.installationId), githubId: Number(repository.githubId) }),
+            installationId: Number(repository.installationId), githubId: Number(repository.githubId) }, isAdvisoryRequest(request)),
         }, assignments]);
       await this.tasks.event(client, task, 'task.created', { actorId: actor.id, status: task.status });
       await this.tasks.event(client, task, 'agent.plan_queued', {
@@ -167,18 +170,33 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         [projectId, taskId]);
       const workflow = row?.input.workflow;
       const refresh = Boolean(workflow?.proposal && project.role === 'owner' && ['WAITING_APPROVAL', 'READY', 'FAILED', 'REJECTED', 'TIMEOUT'].includes(task.status));
-      if (!row || task.archivedAt || (!refresh && (task.status !== 'PLANNING' || row.state !== 'failed'
-        || row.error === 'pending_review_decisions'))) throw new ConflictException('There is no plan to retry');
+      const waitingEvidence = row?.state === 'completed' && (row.error === 'review_evidence_missing'
+        || row.error === 'design_role_missing' || (workflow?.advisory && !row.error && Boolean(workflow.blockers?.length)));
+      if (!row || task.archivedAt || (!refresh && (task.status !== 'PLANNING' || (!waitingEvidence && (row.state !== 'failed'
+        || row.error === 'pending_review_decisions'))))) throw new ConflictException('There is no plan to retry');
       if (!this.model.available()) throw new ServiceUnavailableException('Planning provider is unconfigured');
 
-      const reviewerFailed = row.error === 'planning_step_failed' && ['ARCHITECT', 'UI_UX_DESIGNER'].includes(currentRole(row));
-      if (workflow && (refresh || row.error === 'review_evidence_missing' || reviewerFailed)) {
+      const reviewerFailed = row.error === 'planning_step_failed' && ['ARCHITECT', 'UI_UX_DESIGNER'].includes(currentRole(row))
+        && !row.steps.some(({ phase }) => phase === 'revise');
+      if (workflow) workflow.advisory ??= isAdvisoryRequest(row.input.request);
+      const resumeCoordination = workflow?.advisory && row.state === 'failed' && row.error === 'review_evidence_missing'
+        && !workflow.queue.length && row.steps.some(({ phase }) => phase === 'architecture')
+        && !row.steps.some(({ phase }) => phase === 'coordinate');
+      if (workflow && row.steps.length) {
+        await this.tasks.event(client, task, 'agent.plan_checkpoint', {
+          actorId: actor.id, state: row.state, error: row.error, commit: workflow.evidence?.commit,
+          blockers: workflow.blockers, questions: workflow.questions, steps: row.steps,
+        });
+      }
+      if (workflow && resumeCoordination) {
+        workflow.queue = ['coordinate'];
+      } else if (workflow && (refresh || row.error === 'review_evidence_missing' || (waitingEvidence && row.error !== 'design_role_missing') || reviewerFailed)) {
         const { rows: [binding] } = await client.query<{ branch: string }>(
           'SELECT default_branch AS branch FROM repositories WHERE project_id = $1 AND id = $2', [projectId, task.repositoryId]);
         if (!binding) throw new ConflictException('Project repository is no longer available');
         row.input.baseBranch = binding.branch;
         row.input.workflow = {
-          ...newWorkflow({ ...workflow.source, branch: binding.branch }),
+          ...newWorkflow({ ...workflow.source, branch: binding.branch }, workflow.advisory),
           questions: (task.decisions ?? workflow.questions).filter(({ answer }) => Boolean(answer)),
           evidenceHints: workflow.blockers?.join(' '),
         };
@@ -188,12 +206,11 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           await this.tasks.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to: 'PLANNING' });
         }
       }
-      if (row.error === 'design_role_missing') {
+      if (row.error === 'design_role_missing' || (workflow?.advisory && !row.assignments.UI_UX_DESIGNER)) {
         const registry = await this.registry.view(projectId, client);
         const designer = this.registry.snapshot(registry, 'UI_UX_DESIGNER', this.model.defaultModel());
-        if (!designer?.model) throw new ConflictException('Enable the UI/UX Agent before retrying');
-        row.assignments.UI_UX_DESIGNER = designer;
-        if (workflow) workflow.blockers = [];
+        if (!designer?.model && row.error === 'design_role_missing') throw new ConflictException('Enable the UI/UX Agent before retrying');
+        if (designer?.model) row.assignments.UI_UX_DESIGNER = designer;
       }
       await client.query('UPDATE task_agent_plans SET assignments = $2 WHERE task_id = $1', [taskId, row.assignments]);
       await this.saveProgress(client, row, 'queued', row.steps, null);
@@ -226,7 +243,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
       let usage: ModelUsage | undefined;
       try {
         if (workflow && role === 'UI_UX_DESIGNER' && !agent) {
-          workflow.blockers = ['此任务需要 UI/UX 评审。请启用并配置 UI/UX Agent 后重试。'];
+          workflow.blockers = [...(workflow.blockers ?? []), '此任务需要 UI/UX 评审。请启用并配置 UI/UX Agent 后重试。'];
           await this.settle(row, null, undefined, undefined, 'design_role_missing');
           return true;
         }
@@ -236,16 +253,20 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           workflow.evidence = await this.github.planningEvidence(workflow.source,
             [row.input.request, workflow.evidenceHints].filter(Boolean).join('\n'), hints).catch(() => undefined);
           if (!workflow.evidence?.files.length) {
-            workflow.blockers = ['无法读取此项目仓库的评审证据。请检查仓库绑定和 GitHub App 的读取权限后重试。'];
-            await this.settle(row, null, undefined, undefined, 'review_evidence_missing');
-            return true;
+            workflow.evidenceGap = '无法读取此项目仓库的评审证据。请检查仓库绑定和 GitHub App 的读取权限后重试。';
+            workflow.blockers = [workflow.evidenceGap];
+            if (!workflow.advisory) {
+              await this.settle(row, null, undefined, undefined, 'review_evidence_missing');
+              return true;
+            }
           }
         }
         const { requirement, knowledge, request, project, repository, baseBranch } = row.input;
         const response = await this.model.generate(role, agent, {
           request, project, repository, baseBranch, priorSteps: row.steps, availableDevelopers: developers,
           ...(workflow && {
-            phase, repositoryEvidence: workflow.evidence,
+            phase, advisory: workflow.advisory, repositoryEvidence: workflow.evidence,
+            evidenceGaps: workflow.blockers, affectedReviewers: workflow.affected,
             currentProductDraft: latestPlanOutput<ProductPlan>(row.steps, 'PRODUCT_MANAGER'),
             humanDecisions: workflow.questions,
           }),
@@ -260,7 +281,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         if (workflow && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')) {
           const review = 'review' in output ? output.review : undefined;
           if ((role === 'ARCHITECT' && (output as ArchitecturePlan).decisions?.length) || !review || review.evidence.some((path) => !workflow.evidence?.files.some((file) => file.path === path))
-            || (!review.evidence.length && !review.blockers.length)) {
+            || (!review.evidence.length && !review.blockers.length && !workflow.evidenceGap)) {
             throw new PlanningFailure('invalid_structured_output', undefined, undefined, 'Review evidence or decision format invalid');
           }
         }
@@ -306,6 +327,19 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           row.input.workflow.questions = current.rows[0].input.workflow.questions;
           row.input.workflow.affected = current.rows[0].input.workflow.affected;
         }
+        if (row.input.workflow && reason === 'design_role_missing' && row.input.workflow.advisory) {
+          row.input.workflow.evidenceGap = [...new Set([
+            row.input.workflow.evidenceGap, ...(row.input.workflow.blockers ?? []),
+          ].filter(Boolean))].join(' ');
+          row.input.workflow.queue = ['coordinate'];
+          await this.saveProgress(client, row, 'queued', row.steps, null);
+          return;
+        }
+        if (reason === 'review_evidence_missing' || reason === 'design_role_missing') {
+          await this.saveProgress(client, row, 'completed', row.steps, reason);
+          await this.tasks.event(client, task, 'agent.plan_waiting_input', { reason, blockers: row.input.workflow?.blockers });
+          return;
+        }
         await this.saveProgress(client, row, 'failed', row.steps, reason, category);
         await this.tasks.event(client, task, 'agent.plan_failed', {
           role: currentRole(row), error: reason,
@@ -322,7 +356,12 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         workflow.affected = current.rows[0].input.workflow.affected;
         const pause = advancePlan(workflow, row.steps, step);
         if (!workflow.proposal) {
-          await this.saveProgress(client, row, pause ? 'failed' : 'queued', steps, pause);
+          await this.saveProgress(client, row, pause ? 'completed' : 'queued', steps, pause === 'advisory_ready' ? null : pause);
+          if (pause) {
+            await this.tasks.event(client, task, pause === 'advisory_ready' ? 'agent.plan_advisory_ready' : 'agent.plan_waiting_input', {
+              reason: pause, commit: workflow.evidence?.commit, blockers: workflow.blockers, questions: workflow.questions,
+            });
+          }
           return;
         }
         await this.tasks.event(client, task, 'agent.plan_version_ready', {

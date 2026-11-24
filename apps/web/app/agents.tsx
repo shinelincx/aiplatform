@@ -222,7 +222,7 @@ const fieldLabels: Record<string, string> = {
 
 const reviewStates = {
   reviewing: '正在评审', waiting_decisions: '待人工决策', waiting_evidence: '缺少评审证据',
-  revising: '正在修订与复核', ready: '可送审',
+  revising: '正在修订与复核', ready: '可送审', advisory_ready: '方案已生成',
 } as const;
 
 export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagnosis }: {
@@ -234,6 +234,10 @@ export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagno
   const stages = plan.stage === 'UI_UX_DESIGNER' || plan.steps.some(({ role }) => role === 'UI_UX_DESIGNER')
     ? [...planningRoles, 'UI_UX_DESIGNER' as const] : planningRoles;
   const proposal = plan.proposal;
+  const advisory = plan.reviewStatus === 'advisory_ready';
+  const evidenceMissing = plan.reviewStatus === 'waiting_evidence' || (advisory && Boolean(plan.blockers?.length));
+  const summary = [...plan.steps].reverse().find(({ phase }) => phase === 'coordinate')?.output;
+  const draft = [...plan.steps].reverse().find(({ role }) => role === 'PRODUCT_MANAGER')?.output;
   return (
     <section aria-labelledby="agent-plan-heading" className="plan-block task-detail__card">
       <header className="plan-head">
@@ -269,8 +273,16 @@ export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagno
             <p className="description">{version.excerpt}</p>
           </li>)}</ul>
         </details>}
-      {plan.reviewStatus === 'waiting_decisions' && <p><a href="#task-decisions">查看待人工决策</a></p>}
-      {Boolean(plan.blockers?.length) && <ul className="warning-text">{plan.blockers?.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
+      {plan.reviewStatus === 'waiting_decisions' && <p><a href="#plan-decisions">查看待人工决策</a></p>}
+      {advisory && <div className="description">
+        <h5>方案概述</h5>
+        {summary && 'objective' in summary && <p>{summary.objective}</p>}
+        {draft && 'requirements' in draft && <ul>{draft.requirements.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+      </div>}
+      {Boolean(plan.blockers?.length) && <section aria-label="证据缺口">
+        <h5>证据缺口</h5>
+        <ul className="warning-text">{plan.blockers?.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
+      </section>}
       {proposal && <div className="description">
         <h5>送审方案 · {proposal.version.slice(0, 8)}</h5>
         <small>{proposal.repository} · {proposal.branch} · <code>{proposal.commit.slice(0, 12)}</code></small>
@@ -281,14 +293,14 @@ export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagno
         <h6>验收条件</h6><ol>{proposal.product.acceptanceCriteria.map((item, index) => <li key={index}>{item}</li>)}</ol>
       </div>}
       {plan.state === 'failed' && plan.error === 'planning_step_failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}
-      {((plan.state === 'failed' && canRetry && plan.error !== 'pending_review_decisions') || (proposal && canRefresh))
+      {((canRetry && (evidenceMissing || (plan.state === 'failed' && plan.error !== 'pending_review_decisions'))) || (proposal && canRefresh))
         && <form action={retryAgentPlan}>
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="taskId" value={plan.taskId} />
-        <SubmitButton pendingLabel="正在重新规划…">{proposal ? '刷新仓库证据并重新规划' : '重试规划'}</SubmitButton>
+        <SubmitButton pendingLabel="正在重新规划…">{proposal || evidenceMissing ? '刷新评审证据' : '重试规划'}</SubmitButton>
       </form>}
       {plan.steps.map(({ role, version, model, output, phase }, index) => (
-        <details key={`${role}:${index}`} open={!proposal && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')}>
+        <details key={`${role}:${index}`} open={!proposal && !advisory && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')}>
           <summary>{agentRoleLabels[role]}{phase === 'revise' ? ' · 修订' : phase === 'coordinate' ? ' · 协调' : phase?.endsWith('_review') ? ' · 复核' : ''} · v{version} · {model}</summary>
           <dl>
             {Object.entries(output).filter(([field]) => Object.hasOwn(fieldLabels, field)).map(([field, value]) => (

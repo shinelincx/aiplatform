@@ -81,6 +81,12 @@ const outputs = {
   },
   UI_UX_DESIGNER: { design: ['Show the existing empty state'], review: { ...architectureReview, evidence: ['docs/settings.md'] } },
 };
+const advisoryRequest = '项目所有者转让或委派项目管理权限，请给出方案';
+const advisoryGap = '缺少所有者转让的事务边界证据';
+const advisoryChoice = { question: '本期采用哪条路径？', options: ['先完善所有者转让', '委派项目管理权限'],
+  impact: '转让保留单一所有者；委派减少交接次数，但扩大管理权限范围。', reviewers: ['ARCHITECT'] };
+const laterChoice = { question: '如何展示委派权限？', options: ['固定权限说明', '展示逐项权限'],
+  impact: '固定说明维护简单；逐项展示更清楚。', reviewers: ['UI_UX_DESIGNER'] };
 const plannedDecision = { question: 'Who may disable an account?', options: ['Project owners only', 'All project members'] };
 let failProduct = true;
 let resumeCancelledCall;
@@ -100,6 +106,21 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
     }
     const policy = input.request === 'Confirm account policy';
     const board = input.request === '给任务看板列表增加优先级和状态显示';
+    if (input.request === advisoryRequest) {
+      if (role === 'PROJECT_DIRECTOR') {
+        return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate' ? [advisoryChoice, laterChoice] : [] });
+      }
+      if (role === 'PRODUCT_MANAGER') {
+        return modelReply(agent, { ...outputs.PRODUCT_MANAGER, needsDesign: true,
+          ...(input.phase === 'revise' && { requirements: ['记录已确认的所有者转让路径'], affectedReviewers: ['UI_UX_DESIGNER'] }),
+        });
+      }
+      if (role === 'ARCHITECT') {
+        return modelReply(agent, { ...outputs.ARCHITECT,
+          review: { ...architectureReview, blockers: [advisoryGap], decisions: input.phase === 'architecture' ? [advisoryChoice] : [] },
+        });
+      }
+    }
     if (board && role === 'PROJECT_DIRECTOR') {
       return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate' ? [] : [
         { question: '任务是否已有优先级和状态字段？', options: ['复用字段', '新增字段'],
@@ -710,6 +731,57 @@ try {
   const backendProposal = (await request(`${evidencePath}/agent-plan`, { token })).plan.proposal;
   assert.equal(backendProposal.design, undefined);
   assert(backendProposal.architecture.review.assumptions.length);
+
+  const advisory = await planning.start(account, first.id, { repositoryId: repo.id, request: advisoryRequest });
+  const advisoryPath = `${prefix}/tasks/${advisory.taskId}`;
+  assert.equal(advisory.advisory, true);
+  for (let index = 0; index < 4; index++) assert.equal(await planning.runNext(), true);
+  const beforeReplay = (await request(`${advisoryPath}/agent-plan`, { token })).plan;
+  assert.equal(beforeReplay.steps.length, 4);
+  await db.projectQuery(first.id, `UPDATE task_agent_plans SET state = 'failed', error = 'review_evidence_missing',
+    input = jsonb_set(input, '{workflow}', ((input->'workflow') - 'advisory'::text) || '{"queue":[]}'::jsonb)
+    WHERE task_id = $1`, [advisory.taskId]);
+  const queuedAdvisory = await planning.retry(account, first.id, advisory.taskId);
+  assert.equal(queuedAdvisory.state, 'queued');
+  assert.equal(queuedAdvisory.stage, 'PROJECT_DIRECTOR');
+  assert.equal(await planning.runNext(), true, 'Replaying a historical evidence pause starts at coordination');
+  assert.equal(await planning.runNext(), false);
+  const replayed = (await request(`${advisoryPath}/agent-plan`, { token })).plan;
+  assert.equal(replayed.state, 'completed');
+  assert.equal(replayed.error, null);
+  assert.equal(replayed.reviewStatus, 'advisory_ready');
+  assert.deepEqual(replayed.steps.slice(0, 4), beforeReplay.steps);
+  assert.deepEqual(replayed.blockers, [advisoryGap]);
+  assert.equal(replayed.proposal, undefined);
+  const advisoryTask = await request(advisoryPath, { token });
+  assert.equal(advisoryTask.status, 'PLANNING');
+  assert.deepEqual(advisoryTask.decisions[0].options, advisoryChoice.options);
+  assert.equal(advisoryTask.decisions[0].impact, advisoryChoice.impact);
+  await request(`${advisoryPath}/transition`, { token, method: 'POST', body: { status: 'WAITING_APPROVAL' }, status: 409 });
+  await request(`${advisoryPath}/executions`, { token, method: 'POST', status: 409 });
+  const advisoryPage = await globalThis.fetch(new URL(`/?project=${first.id}&section=tasks&task=${advisory.taskId}`, web), {
+    headers: { Cookie: `ado_session=${token}` }, signal: globalThis.AbortSignal.timeout(30_000),
+  });
+  assert.equal(advisoryPage.status, 200);
+  const advisoryHtml = await advisoryPage.text();
+  for (const label of ['方案已生成', '可选方案', '证据缺口', '推荐', advisoryChoice.options[1], '提交并复核']) assert(advisoryHtml.includes(label), label);
+  await request(`${advisoryPath}/decisions`, { token, method: 'POST', status: 204,
+    body: { answers: [{ id: advisoryTask.decisions[0].id, answer: advisoryChoice.options[0] }] } });
+  assert.equal(await planning.runNext(), true, 'Revise only the affected part of the product draft');
+  assert.equal(await planning.runNext(), true, 'Recheck the architecture for the selected decision');
+  assert.equal(await planning.runNext(), false, 'Leave the unaffected designer review intact');
+  const reviewed = (await request(`${advisoryPath}/agent-plan`, { token })).plan;
+  assert.equal(reviewed.reviewStatus, 'advisory_ready');
+  assert.deepEqual(reviewed.steps.map(({ phase }) => phase),
+    ['director', 'draft', 'architecture', 'design', 'coordinate', 'revise', 'architecture_review']);
+  assert.deepEqual(reviewed.blockers, [advisoryGap]);
+  const settled = await request(advisoryPath, { token });
+  assert.equal(settled.decisions[0].answer, advisoryChoice.options[0]);
+  assert.deepEqual(settled.decisions[1], advisoryTask.decisions[1]);
+  const replayHistory = await request(`${advisoryPath}/events`, { token });
+  const checkpoint = replayHistory.find(({ eventType }) => eventType === 'agent.plan_checkpoint');
+  assert.equal(checkpoint.payload.error, 'review_evidence_missing');
+  assert.deepEqual(checkpoint.payload.steps, beforeReplay.steps);
 
   const board = await planning.start(account, first.id, {
     repositoryId: repo.id, request: '给任务看板列表增加优先级和状态显示',

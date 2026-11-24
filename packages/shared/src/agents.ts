@@ -166,7 +166,8 @@ export interface AgentPlan {
   steps: { role: PlanningRole; version: number; model: string; output: PlanningOutput; phase?: string }[];
   error: string | null;
   failureCategory?: PlanningFailureCategory;
-  reviewStatus?: 'reviewing' | 'waiting_decisions' | 'waiting_evidence' | 'revising' | 'ready';
+  advisory?: boolean;
+  reviewStatus?: 'reviewing' | 'waiting_decisions' | 'waiting_evidence' | 'revising' | 'ready' | 'advisory_ready';
   blockers?: string[];
   proposal?: ApprovedAgentPlan;
   approvedVersion?: string;

@@ -25,6 +25,8 @@ export interface PlanWorkflow {
   source: PlanningSource;
   evidence?: Awaited<ReturnType<GitHubApp['planningEvidence']>>;
   evidenceHints?: string;
+  evidenceGap?: string;
+  advisory?: boolean;
   questions: TaskDecision[];
   affected: PlanReviewer[];
   blockers?: string[];
@@ -33,8 +35,15 @@ export interface PlanWorkflow {
   approvedTarget?: { repositoryId: string; checks: VerificationCheck[]; independentChecks: IndependentCheck[] };
 }
 
-export function newWorkflow(source: PlanningSource): PlanWorkflow {
-  return { queue: ['director', 'draft', 'architecture'], source, questions: [], affected: [] };
+export function isAdvisoryRequest(request: string) {
+  const text = request.normalize('NFKC');
+  const asksForOptions = /(?:给出?|提供|输出|制定|提交|出具?|生成)[^。；;，,\n]{0,14}方案|(?:方案|设计)(?:即可|先行)|(?:只要|仅需)方案|\b(?:proposal only|plan only|options only|(?:provide|propose|draft|outline) (?:a |the )?(?:plan|proposal|options))\b/iu;
+  const asksForImplementation = /(?:再|并(?:且)?|然后|随后|同时|直接|请|按.{0,12}方案)(?:开始|进行|落地)?(?:实现|开发|部署|上线|修改|执行|修复|实施)(?!方案|建议|思路|对比)|\b(?:and|then|also) (?:implement|deploy|fix|ship|merge)\b/iu;
+  return asksForOptions.test(text) && !asksForImplementation.test(text);
+}
+
+export function newWorkflow(source: PlanningSource, advisory = false): PlanWorkflow {
+  return { queue: ['director', 'draft', 'architecture'], source, advisory, questions: [], affected: [] };
 }
 
 export function latestPlanOutput<T extends Step['output']>(steps: Step[], role: PlanningRole) {
@@ -60,8 +69,10 @@ function decisionKey(question: string) {
 
 function publishReviewedQuestions(workflow: PlanWorkflow, step: Step, candidates: Step[]) {
   const existing = new Map(workflow.questions.map((item) => [decisionKey(item.question), item]));
-  const published = new Map([...existing].filter(([, item]) => Boolean(item.answer)));
-  for (const question of stageQuestions(step)) {
+  const published = new Map([...existing].filter(([, item]) => workflow.advisory || Boolean(item.answer)));
+  const coordinated = stageQuestions(step);
+  const reviewed = candidates.filter(({ output }) => 'review' in output).flatMap(stageQuestions);
+  for (const question of workflow.advisory && !coordinated.length ? reviewed : coordinated) {
     const key = decisionKey(question.question);
     const prior = published.get(key);
     const sourceReviewers = candidates.flatMap(stageQuestions)
@@ -70,7 +81,7 @@ function publishReviewedQuestions(workflow: PlanWorkflow, step: Step, candidates
     const roles = reviewers.length ? reviewers : ['ARCHITECT' as const];
     if (prior) {
       prior.reviewers = roles;
-      if (prior.answer) workflow.affected = [...new Set([...workflow.affected, ...roles])];
+      if (prior.answer && !workflow.advisory) workflow.affected = [...new Set([...workflow.affected, ...roles])];
     } else {
       published.set(key, { ...question, id: existing.get(key)?.id ?? randomUUID(), reviewers: roles });
     }
@@ -87,17 +98,34 @@ export function advancePlan(workflow: PlanWorkflow, previous: Step[], step: Step
   if (phase === 'draft' && product?.needsDesign) workflow.queue.push('design');
   if (workflow.queue.length) return null;
 
-  workflow.blockers = planReviewBlockers(steps, Boolean(product?.needsDesign));
-  if (workflow.blockers.length) return 'review_evidence_missing';
+  workflow.blockers = [...new Set([
+    ...(workflow.evidenceGap ? [workflow.evidenceGap] : []),
+    ...planReviewBlockers(steps, Boolean(product?.needsDesign)),
+  ])];
   const candidates = previous.slice(previous.map(({ phase }) => phase).lastIndexOf('coordinate') + 1);
   if (phase === 'coordinate') publishReviewedQuestions(workflow, step, candidates);
   const reviewFinished = phase === 'architecture' || phase === 'design'
     || phase === 'architecture_review' || phase === 'design_review';
+  if (workflow.advisory) {
+    if (reviewFinished && !steps.some(({ phase }) => phase === 'coordinate')) {
+      workflow.queue.push('coordinate');
+      return null;
+    }
+    if (phase === 'revise') {
+      if (workflow.affected.includes('ARCHITECT')) workflow.queue.push('architecture_review');
+      if (workflow.affected.includes('UI_UX_DESIGNER') && design) workflow.queue.push('design_review');
+    }
+    if (phase === 'architecture_review' || phase === 'design_review') publishReviewedQuestions(workflow, step, [step]);
+    if (workflow.queue.length) return null;
+    workflow.affected = [];
+    return 'advisory_ready';
+  }
   if (reviewFinished && [...candidates, step].some((stage) => stageQuestions(stage).length > 0)) {
     workflow.queue.push('coordinate');
     return null;
   }
   if (workflow.questions.some(({ answer }) => !answer)) return 'pending_review_decisions';
+  if (workflow.blockers.length) return 'review_evidence_missing';
 
   if (!steps.some(({ phase }) => phase === 'revise')) {
     workflow.queue.push('revise');
@@ -105,9 +133,9 @@ export function advancePlan(workflow: PlanWorkflow, previous: Step[], step: Step
   }
   if (phase === 'revise' && product) {
     const original = latestPlanOutput<ProductPlan>(previous, 'PRODUCT_MANAGER');
-    const reviewers = new Set([...workflow.affected, ...(product.affectedReviewers ?? []),
+    const reviewers = new Set(workflow.affected.length ? workflow.affected : [...(product.affectedReviewers ?? []),
       ...(product.decisions ?? []).flatMap((decision) => decision.reviewers.length ? decision.reviewers : ['ARCHITECT' as const])]);
-    if (original && ['title', 'userStory', 'requirements', 'acceptanceCriteria'].some((key) =>
+    if (!workflow.affected.length && original && ['title', 'userStory', 'requirements', 'acceptanceCriteria'].some((key) =>
       JSON.stringify(original[key as keyof ProductPlan]) !== JSON.stringify(product[key as keyof ProductPlan]))) {
       reviewers.add('ARCHITECT');
     }
