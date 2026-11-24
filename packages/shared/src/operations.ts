@@ -51,7 +51,14 @@ export interface ProjectAuditEntry {
   createdAt: string;
   details?: { autoApproval?: AutoApprovalSettings; previousAutoApproval?: AutoApprovalSettings; version?: number; role?: AgentRole; enabled?: boolean;
     versionId?: string | null; previousVersionId?: string | null; excerptHash?: string;
-    model?: string; sourceUrl?: string | null; effectiveAt?: string | null; month?: string; budgetUsd?: string | null } | null;
+    model?: string; sourceUrl?: string | null; effectiveAt?: string | null; month?: string; budgetUsd?: string | null;
+    delivery?: {
+      outcome: string; runId: string; pullNumber: number; repository: string;
+      originalCommitSha: string; finalCommitSha: string; reason?: string | null;
+      mergeSha?: string; ciRunId?: number; ciAttempt?: number; authorization?: string;
+      gateCheckId?: number; mergedBy?: string;
+    };
+  } | null;
 }
 
 export interface ProjectOperations {

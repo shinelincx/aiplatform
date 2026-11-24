@@ -572,6 +572,32 @@ export async function refreshDelivery(form: FormData) {
   redirect(`${query}#task-detail`);
 }
 
+export async function closeDelivery(form: FormData) {
+  const { query, endpoint, id } = taskPath(form);
+  const runId = form.get('runId');
+  const outcome = form.get('outcome');
+  if (!id || !isWorkerId(runId) || (outcome !== 'completed' && outcome !== 'cancelled')) redirect(query);
+  const dialog = outcome === 'completed' ? 'delivery-complete' : 'delivery-cancel';
+  const response = await execute(endpoint + '/executions/' + runId + '/delivery/closeout', {
+    method: 'POST', body: JSON.stringify({ outcome, reason: form.get('reason') }),
+    signal: AbortSignal.timeout(40_000),
+  });
+  if (!response?.ok) {
+    const codes: Record<string, string> = {
+      delivery_not_merged: 'delivery-not-merged', delivery_not_closed: 'delivery-not-closed',
+      delivery_pr_mismatch: 'delivery-pr-mismatch', delivery_ci_missing: 'delivery-ci-missing',
+      delivery_merge_evidence_missing: 'delivery-merge-evidence-missing',
+      delivery_clearance_missing: 'delivery-clearance-missing', delivery_state_changed: 'delivery-state-changed',
+      task_archive_dependency: 'delivery-active-dependents',
+    };
+    const detail = response?.status === 409 ? await response.json().catch(() => null) : null;
+    const failure = detail?.code && Object.hasOwn(codes, detail.code) ? codes[detail.code]
+      : issue(response, outcome === 'cancelled' && response?.status === 400 ? 'delivery-cancel-reason' : 'delivery-closeout');
+    redirect(atDialog(query, dialog) + '&issue=' + failure + '#task-detail');
+  }
+  redirect(query + '&notice=' + (outcome === 'completed' ? 'delivery-completed' : 'delivery-cancelled') + '#task-detail');
+}
+
 export interface WorkerAccessState {
   error?: string;
   notice?: string;

@@ -1,7 +1,7 @@
 import { executionQualityGate, independentCheckStatuses, workerDiskPressure, type ApiHealth, type CheckFailureReason, type CheckResult,
   type ExecutionEvent, type ExecutionRun, type IndependentCheck, type Project, type ReviewEvidence, type Task,
   type VerificationCheck, type WorkerReport } from '@ado/shared';
-import { addExecutionEvidence, changeExecutionWorker, publishExecution, refreshDelivery, retryExecutionQa,
+import { addExecutionEvidence, changeExecutionWorker, closeDelivery, publishExecution, refreshDelivery, retryExecutionQa,
   reviewExecution, startExecution } from './actions';
 import { ActionDialog } from './console-controls';
 import { read, readSection } from './api-client';
@@ -184,6 +184,8 @@ export async function Executions({ project, task, runsResult, checks, independen
   const waitingOnGithub = latest?.delivery?.state === 'queued' && !latest.delivery.configured;
   const publishing = (latest?.delivery?.state === 'queued' && !waitingOnGithub) || latest?.delivery?.state === 'publishing';
   const owner = project.role === 'owner';
+  const canCloseDelivery = owner && project.status === 'active' && task.status === 'REVIEW' && !task.archivedAt
+    && latest?.review?.decision === 'approved' && pull?.state === 'published' && pull.pullState !== 'merged';
   const canRecordEvidence = owner && project.status === 'active' && !task.archivedAt && task.status === 'REVIEW'
     && !latest?.review && latest?.artifact;
   const checkingQa = latest?.qa?.state === 'queued' || latest?.qa?.state === 'running';
@@ -395,6 +397,25 @@ export async function Executions({ project, task, runsResult, checks, independen
             {identity}<input type="hidden" name="runId" value={latest.id} />
             <SubmitButton className="secondary" pendingLabel="正在同步…">同步 GitHub PR 状态</SubmitButton>
           </form>}
+        {canCloseDelivery && <div className="execution-actions" role="group" aria-label="交付结案">
+          <ActionDialog title="确认交付并结案" actionKey="delivery-complete">
+            <form action={closeDelivery} className="fields">
+              {identity}<input type="hidden" name="runId" value={latest.id} />
+              <input type="hidden" name="outcome" value="completed" />
+              <p>ADO 会核对 GitHub 合并、最终提交的 CI 和负责人放行记录，再将任务标记为已完成。</p>
+              <SubmitButton pendingLabel="正在核验…">确认交付并结案</SubmitButton>
+            </form>
+          </ActionDialog>
+          <ActionDialog title="取消并归档" actionKey="delivery-cancel">
+            <form action={closeDelivery} className="fields">
+              {identity}<input type="hidden" name="runId" value={latest.id} />
+              <input type="hidden" name="outcome" value="cancelled" />
+              <p>关联 PR 须已关闭且未合并。归档后可通过「显示已归档」查看。</p>
+              <label>取消原因<textarea name="reason" maxLength={500} required /></label>
+              <SubmitButton className="btn-danger" pendingLabel="正在核验…">确认取消并归档</SubmitButton>
+            </form>
+          </ActionDialog>
+        </div>}
         {latest.delivery.error && <p className="feedback">{deliveryErrors[latest.delivery.error] ?? '发布失败，请重试。'}</p>}
       </section>}
       {runs.length > 1 && <details className="drawer execution-history">

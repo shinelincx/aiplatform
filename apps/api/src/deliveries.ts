@@ -1,5 +1,5 @@
 import {
-  ConflictException, Controller, HttpCode, Inject, Injectable, Logger, NotFoundException, Param, ParseUUIDPipe,
+  BadRequestException, Body, ConflictException, Controller, HttpCode, Inject, Injectable, Logger, NotFoundException, Param, ParseUUIDPipe,
   Post, ServiceUnavailableException, UseGuards, type OnModuleDestroy, type OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,8 @@ import { autoApprovalActor } from './auto-approval';
 import { Database } from './database';
 import { DeliveryError, pushCandidate } from './git-delivery';
 import { GitHubApp, TransientGitHubError } from './github';
+import { GitHubApp } from './github';
+import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { qualityGateColumns, requireQualityGate, type QualityGateRun } from './quality-gate';
 import { TasksService } from './tasks';
@@ -149,14 +151,76 @@ export class DeliveriesService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  async closeOut(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
+    const input = objectInput(body);
+    const outcome = input.outcome;
+    if (outcome !== 'completed' && outcome !== 'cancelled') throw new BadRequestException('Invalid delivery outcome');
+    const reason = outcome === 'cancelled' ? textInput(input.reason, 'cancellation reason', 500) : null;
+    const access = { owner: true, active: true };
+    await this.projects.access(actor.id, projectId, access);
+    const published = await this.findPublished(projectId, taskId, runId);
+    const settled = (delivery: typeof published) => delivery.taskStatus === (outcome === 'completed' ? 'COMPLETED' : 'CANCELLED')
+      && delivery.pullState === (outcome === 'completed' ? 'merged' : 'closed');
+    const invalid = () => new ConflictException({ code: 'delivery_state_changed', message: 'The task or delivery changed' });
+    if (settled(published)) return;
+    if (published.taskStatus !== 'REVIEW' || published.archived || !published.isCurrent || !published.approved) throw invalid();
+    const installation = Number(published.installationId);
+    const repository = Number(published.externalId);
+    const pull = await this.github.readPull(installation, repository, published.repository, published.pullNumber);
+    if (pull.head.repo?.id !== repository || pull.head.ref !== published.branch || pull.base.ref !== published.baseBranch
+      || !/^[0-9a-f]{40}$/.test(pull.head.sha) || !Number.isFinite(Date.parse(pull.updated_at))) {
+      throw new ConflictException({ code: 'delivery_pr_mismatch', message: 'The pull request no longer matches the bound repository or branches' });
+    }
+    if (outcome === 'cancelled' && (pull.state !== 'closed' || pull.merged !== false)) {
+      throw new ConflictException({ code: 'delivery_not_closed', message: 'Cancellation requires a closed, unmerged pull request' });
+    }
+    const proof = outcome === 'completed'
+      ? await this.github.verifyMergedDelivery(installation, repository, published.repository, pull) : null;
+    await this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, access, client);
+      const current = await this.findPublished(projectId, taskId, runId, client);
+      if (settled(current)) return;
+      if (current.taskStatus !== 'REVIEW' || current.archived || !current.isCurrent || !current.approved
+        || current.pullNumber !== published.pullNumber || current.commitSha !== published.commitSha
+        || current.externalId !== published.externalId || current.repository !== published.repository
+        || current.installationId !== published.installationId || current.branch !== published.branch
+        || current.baseBranch !== published.baseBranch
+        || (current.updatedAt && current.updatedAt.getTime() > Date.parse(pull.updated_at))) throw invalid();
+      const task = await this.tasks.find(projectId, taskId, client);
+      await client.query(
+        'UPDATE execution_deliveries SET pull_state = $2, github_updated_at = $3, updated_at = now() WHERE run_id = $1',
+        [runId, proof ? 'merged' : 'closed', pull.updated_at],
+      );
+      if (proof) {
+        await this.markMerged(client, task, runId, current.pullNumber);
+      } else {
+        await client.query("UPDATE tasks SET status = 'CANCELLED', updated_at = now() WHERE project_id = $1 AND id = $2", [projectId, taskId]);
+        await this.tasks.event(client, task, 'task.status_changed', { from: 'REVIEW', to: 'CANCELLED', runId, actorId: actor.id });
+        await this.tasks.archiveTask(client, { ...task, status: 'CANCELLED' }, actor.id);
+      }
+      const details = {
+        outcome, runId, pullNumber: current.pullNumber, repository: current.repository, actorId: actor.id,
+        originalCommitSha: current.commitSha, finalCommitSha: pull.head.sha, ...(proof ?? { reason }),
+      };
+      await this.tasks.event(client, task, 'task.delivery_closed', details);
+      await this.projects.audit(client, actor.id, projectId, 'delivery.closed', taskId, { delivery: details });
+    });
+  }
+
   private async findPublished(projectId: string, taskId: string, runId: string, client?: PoolClient) {
-    type Pull = PublishedPull & { repository: string; installationId: string; externalId: string };
+    type Pull = PublishedPull & { repository: string; installationId: string; externalId: string;
+      taskStatus: Task['status']; archived: boolean; isCurrent: boolean; approved: boolean };
     const sql = `SELECT ${publishedPullColumns}, g.owner || '/' || g.repo_name AS repository,
-         g.installation_id AS "installationId", g.github_repository_id AS "externalId"
+         g.installation_id AS "installationId", g.github_repository_id AS "externalId",
+         t.status AS "taskStatus", t.archived_at IS NOT NULL AS archived,
+         r.id = (SELECT latest.id FROM execution_runs latest WHERE latest.project_id = $2 AND latest.task_id = $3
+           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1) AS "isCurrent",
+         EXISTS (SELECT 1 FROM execution_reviews h WHERE h.run_id = r.id AND h.decision = 'approved') AS approved
        FROM execution_deliveries d JOIN execution_runs r ON r.id = d.run_id
+       JOIN tasks t ON t.id = r.task_id AND t.project_id = r.project_id
        JOIN repositories g ON g.id = d.repository_id AND g.project_id = r.project_id
        WHERE r.id = $1 AND r.project_id = $2 AND r.task_id = $3 AND d.state = 'published' AND d.pull_number IS NOT NULL
-       ${client ? 'FOR UPDATE OF d' : ''}`;
+       ${client ? 'FOR UPDATE OF d, t' : ''}`;
     const values = [runId, projectId, taskId];
     const { rows: [published] } = client ? await client.query<Pull>(sql, values)
       : await this.db.projectQuery<Pull>(projectId, sql, values);
@@ -359,5 +423,12 @@ export class DeliveriesController {
   refresh(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
     @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string) {
     return this.deliveries.refreshPull(actor, projectId, taskId, runId);
+  }
+
+  @Post('closeout')
+  @HttpCode(204)
+  closeOut(@CurrentAccount() actor: Account, @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string, @Param('runId', ParseUUIDPipe) runId: string, @Body() body: unknown) {
+    return this.deliveries.closeOut(actor, projectId, taskId, runId, body);
   }
 }

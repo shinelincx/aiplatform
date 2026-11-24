@@ -33,9 +33,16 @@ interface PullResponse {
   merged?: boolean;
   merged_at?: string | null;
   updated_at: string;
-  head: { ref: string; sha: string };
-  base: { ref: string; repo?: { id: number } };
+  merge_commit_sha?: string | null;
+  merged_by?: { id: number; login: string; type: string } | null;
+  head: { ref: string; sha: string; repo?: { id: number } | null };
+  base: { ref: string; repo?: { id: number; owner?: { id: number; type: string } } };
 }
+
+const githubSha = /^[a-f0-9]{40}$/;
+const releaseRepositoryId = 1462649547;
+const releaseAppId = 5886323;
+const ownerClearance = 'The repository owner explicitly cleared this commit for human merge.';
 
 function externalId(value: unknown) {
   const id = typeof value === 'string' ? Number(value) : value;
@@ -71,14 +78,14 @@ export class GitHubApp {
     }
   }
 
-  private async request<T>(path: string, token: string, body?: object) {
+  private async request<T>(path: string, token: string, body?: object, apiVersion = '2026-03-10') {
     const response = await fetch(`https://api.github.com${path}`, {
       method: body ? 'POST' : 'GET',
       headers: {
         Accept: 'application/vnd.github+json',
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2026-03-10',
+        'X-GitHub-Api-Version': apiVersion,
       },
       body: body ? JSON.stringify(body) : undefined,
       redirect: 'error',
@@ -135,11 +142,68 @@ export class GitHubApp {
   async readPull(installationId: number, repositoryId: number, repository: string, number: number) {
     const token = await this.installationToken(installationId, repositoryId);
     const repositoryPath = repository.split('/').map(encodeURIComponent).join('/');
-    const { data } = await this.request<PullResponse>(`/repos/${repositoryPath}/pulls/${number}`, token);
+    // The 2026-03-10 response can omit the merged commit SHA used for delivery closeout.
+    const { data } = await this.request<PullResponse>(`/repos/${repositoryPath}/pulls/${number}`, token, undefined, '2022-11-28');
     if (data?.number !== number || data.base?.repo?.id !== repositoryId || typeof data.merged !== 'boolean') {
       throw new BadGatewayException('GitHub pull request does not match the published repository and number');
     }
     return data;
+  }
+
+  async verifyMergedDelivery(installationId: number, repositoryId: number, repository: string, pull: PullResponse) {
+    const mergeSha = pull.merge_commit_sha ?? '';
+    const headSha = pull.head.sha;
+    if (pull.state !== 'closed' || pull.merged !== true) {
+      throw new ConflictException({ code: 'delivery_not_merged', message: 'The linked pull request is not merged' });
+    }
+    if (!githubSha.test(mergeSha) || !githubSha.test(headSha)) {
+      throw new ConflictException({ code: 'delivery_merge_evidence_missing', message: 'GitHub omitted a verifiable merge commit' });
+    }
+    const token = await this.installationToken(installationId, repositoryId);
+    const endpoint = '/repos/' + repository.split('/').map(encodeURIComponent).join('/');
+    const ciQuery = new URLSearchParams({ event: 'pull_request', head_sha: headSha, per_page: '20' });
+    const [comparison, ci, gate] = await Promise.all([
+      this.request<{ status: string }>(endpoint + '/compare/' + mergeSha + '...' + encodeURIComponent(pull.base.ref) + '?per_page=1', token),
+      this.request<{ workflow_runs: {
+        id: number; run_attempt: number; head_sha: string; head_branch: string; event: string; status: string;
+        conclusion: string; repository?: { id: number }; head_repository?: { id: number };
+        pull_requests?: { number: number; base?: { ref: string } }[];
+      }[] }>(endpoint + '/actions/workflows/ci.yml/runs?' + ciQuery, token),
+      repositoryId === releaseRepositoryId
+        ? this.request<{ check_runs: {
+          id: number; head_sha: string; status: string; conclusion: string; app?: { id: number; slug: string };
+          output?: { summary: string };
+        }[] }>(endpoint + '/commits/' + headSha + '/check-runs?check_name=ado-merge-gate&app_id=' + releaseAppId, token)
+        : null,
+    ]);
+    if (!['ahead', 'identical'].includes(comparison.data.status)) {
+      throw new ConflictException({ code: 'delivery_not_merged', message: 'The merge commit is not reachable from the target branch' });
+    }
+    const run = ci.data.workflow_runs.find((entry) => entry.event === 'pull_request' && entry.head_sha === headSha
+      && entry.head_branch === pull.head.ref && entry.repository?.id === repositoryId && entry.head_repository?.id === repositoryId
+      && (!entry.pull_requests?.length || entry.pull_requests.some(({ number, base }) => number === pull.number && base?.ref === pull.base.ref)));
+    const ciMissing = () => new ConflictException({ code: 'delivery_ci_missing', message: 'The final commit is missing passing PR CI' });
+    if (!run || run.status !== 'completed' || run.conclusion !== 'success' || !Number.isSafeInteger(run.id)
+      || !Number.isSafeInteger(run.run_attempt)) throw ciMissing();
+    const { data: { jobs } } = await this.request<{ jobs: { name: string; status: string; conclusion: string }[] }>(
+      endpoint + '/actions/runs/' + run.id + '/attempts/' + run.run_attempt + '/jobs?per_page=100', token,
+    );
+    if (!['checks', 'compose'].every((name) => jobs.some((job) => job.name === name && job.status === 'completed'
+      && job.conclusion === 'success'))) throw ciMissing();
+
+    const clearance = gate?.data.check_runs.find((check) => check.head_sha === headSha && check.status === 'completed'
+      && check.conclusion === 'success' && check.app?.id === releaseAppId && check.app.slug === 'aiplatform-ado-release-gate'
+      && check.output?.summary === ownerClearance);
+    const owner = pull.base.repo?.owner;
+    const merger = pull.merged_by;
+    const ownerMerged = owner?.type === 'User' && merger?.type === 'User' && Number.isSafeInteger(owner.id) && merger.id === owner.id;
+    if (!clearance && !ownerMerged) {
+      throw new ConflictException({ code: 'delivery_clearance_missing', message: 'The final commit has no verified owner authorization' });
+    }
+    return {
+      mergeSha, ciRunId: run.id, ciAttempt: run.run_attempt, authorization: clearance ? 'owner_gate' : 'owner_merge',
+      ...(clearance && { gateCheckId: clearance.id }), ...(ownerMerged && { mergedBy: merger.login }),
+    };
   }
 
   async draftPull(token: string, repository: string, branch: string, baseBranch: string,

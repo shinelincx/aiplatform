@@ -17,6 +17,7 @@ const actions: Record<string, string> = {
   'skill.version_rejected': '驳回 Skill 版本',
   'task.approved': '批准任务方案', 'task.rejected': '驳回任务方案', 'execution.reviewed': '人工审核',
   'repository.checks_updated': '更新仓库检查与交付设置', 'delivery.queued': '提交发布请求',
+  'delivery.closed': '交付结案',
   'execution.worker_reassigned': '调整 Worker 分配',
   'requirement.approved': '登记已批准需求', 'requirement.retired': '撤下需求来源',
   'knowledge.version_created': '登记知识版本', 'knowledge.approved': '批准知识版本', 'knowledge.rejected': '驳回知识版本',

@@ -636,14 +636,22 @@ fs.writeFileSync(TMPDIR + '/probe', '');
     const projects = new ProjectsService(publisherDb, new AuthService(publisherDb));
     let pullCalls = 0;
     let snapshot;
+    let closeoutChecksPassed = false;
     const github = {
       configured: true,
       async readPull(install, repo, repositoryName, number) {
         assert.equal(install, 1);
         assert.equal(repo, Number.parseInt(suffix, 16));
         assert.equal(repositoryName, 'test/execution-fixture');
-        assert.equal(number, 2);
+        assert([2, 3].includes(number));
         return snapshot;
+      },
+      async verifyMergedDelivery(install, repo, repositoryName, pull) {
+        assert.equal(repo, Number.parseInt(suffix, 16));
+        assert.equal(pull.number, 2);
+        assert.equal(pull.merged, true);
+        if (!closeoutChecksPassed) throw new Error('Final CI has not passed');
+        return { mergeSha: 'e'.repeat(40), ciRunId: 7, ciAttempt: 1, authorization: 'owner_gate', gateCheckId: 8 };
       },
       async deliveryToken(install, repo) {
         assert.equal(install, 1);
@@ -657,7 +665,7 @@ fs.writeFileSync(TMPDIR + '/probe', '');
         assert.equal(base, 'main');
         assert.equal(git('rev-parse', head).trim(), commit);
         assert.equal(git('show', `${commit}:index.ts`), 'new\n');
-        assert.match(title, /^\[(VERIFY-AND-REPAIR|AUTO-DRAFT-PR)\]/);
+        assert.match(title, /^\[(VERIFY-AND-REPAIR|AUTO-DRAFT-PR|ABANDONED-PR)\]/);
         assert(body.includes('Changed files') && body.includes('index.ts') && body.includes('unit') && body.includes(repairedHash));
         if (title.startsWith('[AUTO-DRAFT-PR]')) {
           assert(body.includes('Independent verification') && body.includes('browser') && body.includes('dependency'));
@@ -809,19 +817,70 @@ fs.writeFileSync(TMPDIR + '/probe', '');
     await refresh();
     assert.equal((await request(automatic.runs, { token }))[0].delivery.pullState, 'changed');
     assert.equal((await request(automatic.path, { token })).status, 'REVIEW');
-    snapshot = { ...snapshot, updated_at: '2026-01-02T00:00:01Z', head: { ...snapshot.head, sha: draft.commitSha } };
-    await Promise.all([refresh(), refresh()]);
+    const closeoutPath = `${automatic.runs}/${autoRun.id}/delivery/closeout`;
+    await request(closeoutPath, { method: 'POST', body: { outcome: 'completed' }, status: 401 });
+    const complete = () => publisher.closeOut(actor, first.id, automatic.id, autoRun.id, { outcome: 'completed' });
+    snapshot = { ...snapshot, number: 2, head: { ...snapshot.head, repo: { id: Number.parseInt(suffix, 16) } } };
+    await assert.rejects(publisher.closeOut(actor, first.id, automatic.id, autoRun.id, {
+      outcome: 'cancelled', reason: 'Already merged',
+    }), /closed, unmerged/);
+    await assert.rejects(complete(), /Final CI has not passed/);
+    assert.equal((await request(automatic.path, { token })).status, 'REVIEW');
+    closeoutChecksPassed = true;
+    await Promise.all([complete(), complete()]);
     assert.equal((await request(automatic.runs, { token }))[0].delivery.pullState, 'merged');
     assert.equal((await request(automatic.path, { token })).status, 'COMPLETED');
     const mergedEvents = (await request(`${automatic.path}/events`, { token }))
-      .filter(({ eventType, payload }) => eventType === 'task.github_pull_request' && payload.state === 'merged');
+      .filter(({ eventType }) => eventType === 'task.delivery_closed');
     assert.equal(mergedEvents.length, 1);
+    assert.equal(mergedEvents[0].payload.originalCommitSha, draft.commitSha);
+    assert.equal(mergedEvents[0].payload.finalCommitSha, wrong);
+    assert.equal(mergedEvents[0].payload.mergeSha, 'e'.repeat(40));
     assert.equal(await hasSyncButton(), false);
-    assert.equal((await request(automatic.runs, { token }))[0].evidence.filter(entry => entry.check).length, 3);
+    const completedRun = (await request(automatic.runs, { token }))[0];
+    assert.equal(completedRun.evidence.filter(entry => entry.check).length, 3);
+    assert.equal(completedRun.delivery.commitSha, draft.commitSha);
+    assert.equal(completedRun.review.decision, 'approved');
+
+    const abandoned = await newTask('ABANDONED-PR');
+    const abandonedRun = await request(abandoned.runs, { token, method: 'POST', status: 201 });
+    assert.equal((await worker.send('WORKER_CLAIM')).id, abandonedRun.id);
+    const reportAbandoned = (sequence, kind, payload) => worker.send('EXECUTION_EVENT', { runId: abandonedRun.id, sequence, kind, payload });
+    assert.equal((await reportAbandoned(1, 'thread', { threadId: 'closed-pr-fixture' })).accepted, true);
+    assert.equal((await reportAbandoned(2, 'result', candidate(1, repairedHash))).accepted, true);
+    await upload(abandonedRun.id, approved, patchBytes, 200);
+    assert.equal((await reportAbandoned(3, 'verification', { ...passing, attempt: 1 })).accepted, true);
+    await request(`${abandoned.runs}/${abandonedRun.id}/review`, approve);
+    let abandonedDelivery;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      abandonedDelivery = (await request(abandoned.runs, { token }))[0].delivery;
+      if (abandonedDelivery?.state === 'published' || abandonedDelivery?.state === 'failed') break;
+      await delay(250);
+    }
+    assert.equal(abandonedDelivery?.state, 'published');
+    assert.equal(abandonedDelivery.pullNumber, 3);
+    const cancel = (reason) => publisher.closeOut(actor, first.id, abandoned.id, abandonedRun.id, { outcome: 'cancelled', reason });
+    await assert.rejects(cancel('  '), /Invalid cancellation reason/);
+    snapshot = { state: 'open', merged: false, updated_at: '2026-01-02T00:00:00Z', number: 3,
+      head: { sha: abandonedDelivery.commitSha, ref: abandonedDelivery.branch, repo: { id: Number.parseInt(suffix, 16) } },
+      base: { ref: abandonedDelivery.baseBranch },
+    };
+    await assert.rejects(cancel('Work superseded'), /closed, unmerged/);
+    snapshot = { ...snapshot, state: 'closed' };
+    await Promise.all([cancel('Work superseded'), cancel('Work superseded')]);
+    const cancelled = await request(abandoned.path, { token });
+    assert.equal(cancelled.status, 'CANCELLED');
+    assert(cancelled.archivedAt);
+    const cancelledRun = (await request(abandoned.runs, { token }))[0];
+    assert.equal(cancelledRun.review.decision, 'approved');
+    assert.equal(cancelledRun.delivery.pullState, 'closed');
+    const cancelledEvents = (await request(`${abandoned.path}/events`, { token })).filter(({ eventType }) => eventType === 'task.delivery_closed');
+    assert.equal(cancelledEvents.length, 1);
+    assert.equal(cancelledEvents[0].payload.reason, 'Work superseded');
     await request(checksPath, { token, method: 'PATCH', body: { checks: plan, autoDraftPr: false } });
     console.log('Signed GitHub events, deduplication and verified-commit merge tracking passed');
     console.log('Human approval atomically queued an automatic draft PR with verified evidence');
-    console.log('On-demand PR synchronization completed the verified task without a webhook');
+    console.log('Owner delivery closeout preserved approvals and recorded verified merges or closed PRs once');
   }
 
   await request(checksPath, { token, method: 'PATCH', body: { checks: plan } });
