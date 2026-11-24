@@ -222,6 +222,9 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
     const { jobRoot, gitDir, worktree, git, patch } = await checkout(runtime, offer, signal);
     await verifySandbox(runtime, jobRoot, worktree, gitDir, signal);
     const baseCommit = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+    if (offer.development?.approvedPlan && baseCommit !== offer.development.approvedPlan.commit) {
+      throw new ExecutionFailure('source_unavailable');
+    }
     const revision = offer.development?.revision;
     let previousTree: string | undefined;
     if (revision) {

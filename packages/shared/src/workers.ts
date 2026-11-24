@@ -56,6 +56,7 @@ export interface WorkerCapabilities {
   codexVersion?: string;
   verificationVersion?: 1;
   artifactVersion?: 1;
+  approvedPlanVersion?: 1;
   revisionArtifactVersion?: 1;
   mavenVerification?: true;
 }

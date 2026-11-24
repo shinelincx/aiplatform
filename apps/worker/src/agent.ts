@@ -210,6 +210,7 @@ export async function runAgent(baseUrl: string, workerId: string | undefined, to
     capabilities.codexVersion = codexVersion;
     capabilities.verificationVersion = 1;
     capabilities.artifactVersion = 1;
+    capabilities.approvedPlanVersion = 1;
     capabilities.revisionArtifactVersion = 1;
     if (runtime.supportsMaven) capabilities.mavenVerification = true;
   }

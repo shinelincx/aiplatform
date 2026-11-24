@@ -54,6 +54,62 @@ function externalId(value: unknown) {
 
 export class TransientGitHubError extends BadGatewayException {}
 
+type PlanningTreeEntry = { path: string; sha: string; mode: string; size?: number };
+const planningAliases = [
+  [/任务|工单/u, 'task'], [/看板|面板/u, 'board'], [/优先级/u, 'priority'], [/状态/u, 'status'],
+  [/审批|批准/u, 'approval'], [/规划/u, 'planning'], [/界面|页面|样式/u, 'frontend component'],
+] as const;
+
+function planningTerms(request: string, hints: string[]) {
+  const aliases = planningAliases.flatMap(([pattern, words]) => pattern.test(request) ? [words] : []);
+  const text = [...hints, ...aliases, request].join(' ').toLowerCase();
+  return [...new Set(text.match(/[a-z0-9]{3,}|[\p{Script=Han}]{2}/gu) ?? [])].slice(0, 150);
+}
+
+export function rankPlanningFiles(entries: PlanningTreeEntry[], request: string, hints: string[]) {
+  const terms = planningTerms(request, hints);
+  const interfaceTask = /界面|页面|看板|列表|ui|frontend|board/i.test([request, ...hints].join(' '));
+  const testPath = /(?:^|\/|[._-])(?:spec|tests?|verify)(?:\/|[._-])/i;
+  const candidates = entries.flatMap((entry) => {
+    const { path, mode, size, sha } = entry;
+    if (!['100644', '100755'].includes(mode) || !/^[a-f0-9]{40}$/.test(sha)
+      || size === undefined || size <= 0 || size > 32_768
+      || !/\.(?:md|tsx?|[cm]?jsx?|py|java|go|rs|rb|cs|vue|svelte|sql|kt|css|html|swift|dart)$/i.test(path)
+      || /(?:^|\/)(?:\.[^/]+|node_modules|vendor|dist|build|.*(?:secret|credential|private[-_]?key)[^/]*)(?:\/|$)/i.test(path)) return [];
+    const name = path.toLowerCase();
+    const parts = name.split(/[^\p{L}\d]+/u);
+    const matches = terms.filter((term) => parts.includes(term) || parts.includes(`${term}s`)).length;
+    const score = matches * 20 + (matches > 0 && interfaceTask && /\.(?:tsx|jsx|vue|svelte|css)$/.test(name) ? 8 : 0)
+      + (/^(?:readme|context|agents)\.md$/i.test(path) ? 10 : 0);
+    const group: 'docs' | 'tests' | 'code' = /\.md$/i.test(path) ? 'docs' : testPath.test(path) ? 'tests' : 'code';
+    return [{ entry, score, group }];
+  }).sort((a, b) => b.score - a.score);
+  const limits = { docs: 3, tests: 3, code: 8 };
+  return candidates.filter(({ group }) => limits[group]-- > 0).map(({ entry }) => entry);
+}
+
+function planningExcerpt(contents: string, terms: string[]) {
+  const limit = 5500;
+  if (contents.length <= limit) return contents;
+  const lines = contents.split('\n');
+  const anchors = lines.map((line, index) => {
+    const text = line.toLowerCase();
+    return { index, score: terms.filter((term) => text.includes(term)).length };
+  }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score);
+  let excerpt = contents.slice(0, 1200);
+  const used = new Set<number>();
+  for (const { index } of anchors) {
+    if (used.has(index)) continue;
+    const start = Math.max(0, index - 4);
+    const end = Math.min(lines.length, index + 5);
+    for (let line = start; line < end; line++) used.add(line);
+    const window = lines.slice(start, end).join('\n');
+    if (excerpt.length + window.length + 50 > limit) continue;
+    excerpt += `\n\n[lines ${start + 1}-${end}]\n${window}`;
+  }
+  return excerpt;
+}
+
 @Injectable()
 export class GitHubApp {
   get configured() {
@@ -250,6 +306,38 @@ export class GitHubApp {
       }
       if (!hasNextPage) return results;
     }
+  }
+
+  async planningSource(source: { installationId: number; githubId: number; repository: string; branch: string }) {
+    const repositoryPath = source.repository.split('/').map(encodeURIComponent).join('/');
+    const token = await this.installationToken(source.installationId, source.githubId);
+    const root = `/repos/${repositoryPath}`;
+    const { data } = await this.request<{ commit: { sha: string; commit?: { tree?: { sha: string } } } }>(
+      `${root}/branches/${encodeURIComponent(source.branch)}`, token,
+    );
+    const commit = data.commit.sha;
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new BadGatewayException('GitHub did not return a valid base commit');
+    return { root, token, commit, tree: data.commit.commit?.tree?.sha };
+  }
+
+  async planningEvidence(source: Parameters<GitHubApp['planningSource']>[0], request: string, hints: string[] = []) {
+    const { root, token, commit, tree } = await this.planningSource(source);
+    if (!tree || !/^[a-f0-9]{40}$/.test(tree)) throw new BadGatewayException('GitHub did not return a valid repository tree');
+    const { data } = await this.request<{ truncated?: boolean; tree: PlanningTreeEntry[] }>(
+      `${root}/git/trees/${tree}?recursive=1`, token,
+    );
+    const terms = planningTerms(request, hints);
+    const selected = rankPlanningFiles(data.tree, request, hints);
+    const files = await Promise.all(selected.map(async ({ path, sha }) => {
+      const result = await this.request<{ content: string; encoding: string }>(`${root}/git/blobs/${sha}`, token).catch(() => null);
+      const blob = result?.data;
+      if (blob?.encoding !== 'base64') return null;
+      const contents = Buffer.from(blob.content, 'base64').toString('utf8');
+      if (/\0|-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(contents)) return null;
+      const excerpt = planningExcerpt(contents, terms);
+      return { path, excerpt, truncated: excerpt.length < contents.length };
+    }));
+    return { commit, incompleteTree: data.truncated === true, files: files.filter((file) => file !== null) };
   }
 
   async verifyBranch(installationId: number, repository: GitHubRepository, branch: string) {
