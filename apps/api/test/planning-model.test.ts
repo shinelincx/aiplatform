@@ -11,7 +11,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('planning provider failures', () => {
+describe('planning provider', () => {
+  it.each([
+    [undefined, undefined],
+    ['none', { effort: 'none' }],
+    ['high', { effort: 'high' }],
+  ] as const)('sends the configured reasoning effort %s', async (reasoningEffort, reasoning) => {
+    vi.stubEnv('ADO_AGENT_API_KEY', 'private-key-fixture');
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({
+      status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: '{"objective":"Fixture","constraints":[]}' }] }],
+    }));
+    vi.stubGlobal('fetch', fetch);
+
+    await openAIPlanningModel.generate('PROJECT_DIRECTOR', { ...agent, reasoningEffort }, {});
+
+    const payload = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    expect(payload.reasoning).toEqual(reasoning);
+  });
+
   it('retains valid metering and UTC provider time when structured output cannot be used', async () => {
     vi.stubEnv('ADO_AGENT_API_KEY', 'private-key-fixture');
     const fetch = vi.fn().mockResolvedValue(Response.json({

@@ -257,9 +257,12 @@ export async function executeCodex(runtime: Runtime, offer: ExecutionOffer, repo
       apiKey: runtime.apiKey,
       configOverrides: profile,
     });
+    const developer = offer.development?.agent;
+    const reasoningEffort = developer?.reasoningEffort;
     const thread = codex.startThread({
       workingDirectory: worktree, approvalPolicy: 'never', webSearchMode: 'disabled',
-      ...(offer.development?.agent.model && { model: offer.development.agent.model }),
+      ...(developer?.model && { model: developer.model }),
+      ...(reasoningEffort && reasoningEffort !== 'none' && { modelReasoningEffort: reasoningEffort }),
     });
     const approvedTask = {
       title: offer.title, description: offer.description, acceptanceCriteria: offer.acceptanceCriteria,

@@ -2,7 +2,7 @@ import {
   BadRequestException, Body, ConflictException, Controller, Get, Inject, Injectable,
   NotFoundException, Param, ParseIntPipe, ParseUUIDPipe, Post, Put, UseGuards,
 } from '@nestjs/common';
-import { isUsableSkillVersion, isWorkerId, type Account, type AgentAssignment, type AgentRegistry,
+import { agentReasoningEfforts, isUsableSkillVersion, isWorkerId, type Account, type AgentAssignment, type AgentRegistry,
   type AgentRole, type AgentVersion, type ProjectSkill, type SkillDecision, type SkillEvaluation, type SkillVersion } from '@ado/shared';
 import type { PoolClient } from 'pg';
 import { CurrentAccount, SessionGuard } from './auth';
@@ -66,8 +66,8 @@ export class AgentRegistryService {
       `SELECT
         ARRAY(SELECT jsonb_build_object('role', role, 'enabled', enabled, 'activeVersion', active_version)
           FROM project_agent_settings WHERE project_id = $1) AS settings,
-        ARRAY(SELECT jsonb_build_object('role', role, 'version', version, 'model', model,
-          'instructions', instructions, 'skills', skills)
+        ARRAY(SELECT jsonb_strip_nulls(jsonb_build_object('role', role, 'version', version, 'model', model,
+          'reasoningEffort', reasoning_effort, 'instructions', instructions, 'skills', skills))
           FROM project_agent_versions WHERE project_id = $1 ORDER BY version DESC) AS versions,
         ARRAY(SELECT jsonb_build_object('id', s.id, 'name', s.name, 'enabled', s.enabled, 'versions',
           (SELECT jsonb_agg(to_jsonb(v) ORDER BY v.version DESC)
@@ -82,8 +82,8 @@ export class AgentRegistryService {
         return {
           role, enabled: setting?.enabled ?? true, activeVersion: setting?.activeVersion ?? 1, template: templates[role],
           versions: [
-            ...registry.versions.filter((row) => row.role === role).map(({ version, model, instructions, skills }) =>
-              ({ version, model, instructions, skills })),
+            ...registry.versions.filter((row) => row.role === role).map(({ version, model, reasoningEffort, instructions, skills }) =>
+              ({ version, model, ...(reasoningEffort && { reasoningEffort }), instructions, skills })),
             { version: 1, model: '', instructions: '', skills: [] },
           ],
         };
@@ -109,6 +109,7 @@ export class AgentRegistryService {
     });
     return {
       role, version: config.version, model: config.model || defaultModel,
+      ...(config.reasoningEffort && { reasoningEffort: config.reasoningEffort }),
       instructions: [agent.template, config.instructions].filter(Boolean).join('\n\n'), skills,
     };
   }
@@ -119,6 +120,9 @@ export class AgentRegistryService {
     const instructions = textInput(input.instructions ?? '', 'agent instructions', 8000, true);
     const model = textInput(input.model ?? '', 'model', 100, true);
     if (model && !/^[\w.-]+$/.test(model)) throw new BadRequestException('Invalid model identifier');
+    const requestedEffort = input.reasoningEffort ?? '';
+    const reasoningEffort = agentReasoningEfforts(role).find((effort) => effort === requestedEffort);
+    if (requestedEffort !== '' && !reasoningEffort) throw new BadRequestException('Invalid reasoning effort for this agent role');
     const requested = input.skills ?? [];
     if (!Array.isArray(requested) || requested.length > 8) throw new BadRequestException('Invalid skill selection');
     const skills = (requested as unknown[]).map((value) => {
@@ -137,11 +141,11 @@ export class AgentRegistryService {
       const version = agent.versions[0].version + 1;
       await this.setAgent(client, projectId, role, agent.enabled, version);
       await client.query(
-        `INSERT INTO project_agent_versions (project_id, role, version, model, instructions, skills)
-         VALUES ($1,$2,$3,$4,$5,$6)`, [projectId, role, version, model, instructions, JSON.stringify(skills)]);
+        `INSERT INTO project_agent_versions (project_id, role, version, model, instructions, skills, reasoning_effort)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`, [projectId, role, version, model, instructions, JSON.stringify(skills), reasoningEffort ?? null]);
       await this.projects.audit(client, actor.id, projectId, 'agent.version_published', projectId,
         { role, version, enabled: agent.enabled });
-      return { role, version, model, instructions, skills };
+      return { role, version, model, ...(reasoningEffort && { reasoningEffort }), instructions, skills };
     });
   }
 

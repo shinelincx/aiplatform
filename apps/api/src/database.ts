@@ -412,6 +412,7 @@ const migrations = [
     deployment_run text,
     deployment_attempt text
   );`,
+  `ALTER TABLE project_agent_versions ADD COLUMN reasoning_effort text;`,
 ];
 
 function connect(user: string) {

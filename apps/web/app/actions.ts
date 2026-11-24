@@ -401,7 +401,7 @@ export async function updateAgent(form: FormData) {
   const operation = form.get('operation');
   const createVersion = operation === 'publish';
   const body = createVersion ? {
-    model: form.get('model'), instructions: form.get('instructions'),
+    model: form.get('model'), reasoningEffort: form.get('reasoningEffort'), instructions: form.get('instructions'),
     skills: form.getAll('skills').filter(Boolean).map((entry) => {
       const [id, version] = String(entry).split(':');
       return { id, version: Number(version) };

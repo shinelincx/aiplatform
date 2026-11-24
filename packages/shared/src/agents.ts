@@ -20,6 +20,16 @@ export const planningRoles = ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT'
 export type PlanningRole = (typeof planningRoles)[number] | 'UI_UX_DESIGNER';
 export type PlanReviewer = 'ARCHITECT' | 'UI_UX_DESIGNER';
 
+const commonReasoningEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const responsesReasoningEfforts = ['none', ...commonReasoningEfforts] as const;
+const codexReasoningEfforts = [...commonReasoningEfforts, 'ultra'] as const;
+
+export type ReasoningEffort = (typeof responsesReasoningEfforts | typeof codexReasoningEfforts)[number];
+
+export function agentReasoningEfforts(role: AgentRole): readonly ReasoningEffort[] {
+  return developerRoles.some((developer) => developer === role) ? codexReasoningEfforts : responsesReasoningEfforts;
+}
+
 export interface PlanReview {
   findings: string[];
   evidence: string[];
@@ -80,6 +90,7 @@ export interface ProjectSkill {
 export interface AgentVersion {
   version: number;
   model: string;
+  reasoningEffort?: ReasoningEffort;
   instructions: string;
   skills: { id: string; version: number }[];
 }
@@ -102,6 +113,7 @@ export interface AgentAssignment {
   role: AgentRole;
   version: number;
   model: string;
+  reasoningEffort?: ReasoningEffort;
   instructions: string;
   skills: { name: string; version: number; instructions: string }[];
 }

@@ -122,6 +122,7 @@ export async function Agents({ project, selectedSkill, selectedVersion, skillRes
               <ActionDialog title={`${name} · Agent`} actionKey={`agent:${agent.role}`} trigger={manage ? '配置' : '详情'}>
                 <dl className="modal-facts">
                   <div><dt>模型</dt><dd>{active.model || '默认模型'}</dd></div>
+                  <div><dt>推理强度</dt><dd>{active.reasoningEffort ?? '默认强度'}</dd></div>
                   <div><dt>当前版本</dt><dd>v{active.version}</dd></div>
                   <div><dt>状态</dt><dd>{agent.enabled ? '已启用' : '已停用'}</dd></div>
                   <div><dt>Skill</dt><dd>{active.skills.map(({ id, version }) => `${skillNames.get(id) ?? 'Skill'} v${version}`).join('、') || '—'}</dd></div>
@@ -134,8 +135,8 @@ export async function Agents({ project, selectedSkill, selectedVersion, skillRes
                 </details>
                 {manage && <AgentVersionEditor key={`${project.id}:${agent.role}:${active.version}`}
                   projectId={project.id} role={agent.role} activeVersion={active.version}
-                  versions={agent.versions.map(({ version, model, instructions, skills: refs }) => ({
-                    version, model, instructions,
+                  versions={agent.versions.map(({ version, model, reasoningEffort, instructions, skills: refs }) => ({
+                    version, model, reasoningEffort, instructions,
                     canActivate: refs.every(ref => allowedRefs.has(`${ref.id}:${ref.version}`)),
                   }))}
                   toggle={<form action={updateAgent}>
