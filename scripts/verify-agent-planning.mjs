@@ -200,7 +200,7 @@ try {
   await request(`${v1Path}/decision`, { ...approval, status: 409 });
   assert.equal((await request(`${v1Path}/decision`, { ...approval, body: { decision: 'rejected' } })).status, 'rejected');
   const reference = { id: skill.id, version: skillV2.version };
-  const config = { instructions: 'Cover empty states', model: 'fixture-codex', skills: [reference] };
+  const config = { instructions: 'Cover empty states', model: 'fixture-codex', reasoningEffort: 'xhigh', skills: [reference] };
   await request(`/projects/${second.id}/agent-registry/agents/FRONTEND_DEVELOPER/versions`, {
     token, method: 'POST', status: 404, body: config,
   });
@@ -221,13 +221,23 @@ try {
     .filter(({ action, resourceId }) => action === 'skill.version_approved' && resourceId === skill.id);
   assert.equal(approvalAudit.length, 1);
   assert.deepEqual(approvalAudit[0].details, { version: 2 });
+  await request(`${developerPath}/versions`, {
+    token, method: 'POST', status: 400, body: { ...config, reasoningEffort: 'none' },
+  });
   const published = await request(`${developerPath}/versions`, { token, method: 'POST', status: 201, body: config });
   assert.equal(published.version, 2);
+  assert.equal(published.reasoningEffort, 'xhigh');
+  const agentPage = await globalThis.fetch(
+    new URL(`/?project=${first.id}&section=agents&dialog=agent:FRONTEND_DEVELOPER`, web),
+    { headers: { Cookie: `ado_session=${token}` } },
+  );
+  assert.equal(agentPage.status, 200);
+  assert.match(await agentPage.text(), /<select[^>]*name="reasoningEffort"[^>]*>[\s\S]*?<option value="xhigh" selected="">xhigh<\/option>/);
   await request(`${registryPath}/agents/PRODUCT_MANAGER/versions`, {
-    token, method: 'POST', status: 201, body: { model: 'fixture-pm', skills: [reference] },
+    token, method: 'POST', status: 201, body: { model: 'fixture-pm', reasoningEffort: 'high', skills: [reference] },
   });
   await request(`${registryPath}/agents/QA_ENGINEER/versions`, {
-    token, method: 'POST', status: 201, body: { model: 'fixture-qa', instructions: 'Verify empty states' },
+    token, method: 'POST', status: 201, body: { model: 'fixture-qa', reasoningEffort: 'low', instructions: 'Verify empty states' },
   });
 
   const { rows: [repo] } = await db.projectQuery(first.id,
@@ -353,6 +363,7 @@ try {
   assert.deepEqual(complete.proposal.design.review.evidence, ['docs/settings.md']);
   assert.deepEqual(complete.proposal.architecture.review.evidence, ['src/settings.ts']);
   assert.equal(modelCalls[2].agent.model, 'fixture-pm');
+  assert.equal(modelCalls[2].agent.reasoningEffort, 'high');
   assert.equal(modelCalls[2].agent.skills[0].version, 2);
   assert.equal(modelCalls[3].input.priorSteps.length, 2);
   const proposed = await request(taskPath, { token });
@@ -416,6 +427,7 @@ try {
   assert.deepEqual(offer.development.approvedPlan, complete.proposal);
   assert.equal(offer.development.agent.version, 2);
   assert.equal(offer.development.agent.model, config.model);
+  assert.equal(offer.development.agent.reasoningEffort, 'xhigh');
   assert.deepEqual(offer.development.agent.skills, [{ name: skill.name, version: skillV2.version, instructions: skillV2.instructions }]);
   assert.deepEqual(offer.development.requirement, approvedContent);
   assert.deepEqual(offer.development.knowledge, [frozenKnowledge]);
@@ -460,6 +472,7 @@ try {
   assert.equal(await qa.runNext(), true);
   assert.equal(await qa.runNext(), false);
   assert.equal(qaCalls[1].agent.model, 'fixture-qa');
+  assert.equal(qaCalls[1].agent.reasoningEffort, 'low');
   assert.equal(qaCalls[1].agent.version, 2);
   assert.deepEqual(qaCalls[1].input.task.acceptanceCriteria, outputs.PRODUCT_MANAGER.acceptanceCriteria);
   assert.equal(qaCalls[1].input.baseCommit, baseCommit);

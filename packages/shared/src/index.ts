@@ -4,9 +4,9 @@ export { canTransitionTask, taskPriorities, taskTransitions } from './tasks';
 export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './tasks';
 export { parseDecisionQuestions, parseDecisionReply } from './decisions';
 export type { DecisionQuestion, TaskDecision } from './decisions';
-export { agentRoleLabels, developerRoles, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, planningRoles } from './agents';
+export { agentReasoningEfforts, agentRoleLabels, developerRoles, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, planningRoles } from './agents';
 export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ApprovedAgentPlan, ArchitecturePlan, DesignPlan, DeveloperRole, PlanReview, PlanReviewer,
-  DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill,
+  DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill, ReasoningEffort,
   SkillDecision, SkillEvaluation, SkillVersion, SkillVersionStatus } from './agents';
 export { decodeWorkerMessage, isWorkerId, workerCredentialLifetimeHours, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,
   workerOfflineMs, workerProtocolVersion } from './workers';

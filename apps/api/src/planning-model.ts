@@ -192,6 +192,7 @@ export async function generateStructuredOutput(agent: AgentAssignment, propertie
     signal: AbortSignal.timeout(90_000),
     body: JSON.stringify({
       model: agent.model, service_tier: 'auto', store: false, max_output_tokens: 6000,
+      ...(agent.reasoningEffort && { reasoning: { effort: agent.reasoningEffort } }),
       instructions: [...instructions, agent.instructions,
         ...agent.skills.map((skill) => `${skill.name} (v${skill.version}): ${skill.instructions}`)].join('\n\n'),
       input: JSON.stringify(input),
