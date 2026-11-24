@@ -741,7 +741,9 @@ try {
   await db.projectQuery(first.id, `UPDATE task_agent_plans SET state = 'failed', error = 'review_evidence_missing',
     input = jsonb_set(input, '{workflow}', ((input->'workflow') - 'advisory'::text) || '{"queue":[]}'::jsonb)
     WHERE task_id = $1`, [advisory.taskId]);
-  await request(`${advisoryPath}/agent-plan/retry`, { token, method: 'POST' });
+  const queuedAdvisory = await planning.retry(account, first.id, advisory.taskId);
+  assert.equal(queuedAdvisory.state, 'queued');
+  assert.equal(queuedAdvisory.stage, 'PROJECT_DIRECTOR');
   assert.equal(await planning.runNext(), true, 'Replaying a historical evidence pause starts at coordination');
   assert.equal(await planning.runNext(), false);
   const replayed = (await request(`${advisoryPath}/agent-plan`, { token })).plan;

@@ -43,7 +43,7 @@ function publicPlan(row: PlanRecord, showDiagnosis = false): AgentPlan {
   return {
     taskId: row.taskId, state: row.state, stage: currentRole(row) ?? null, steps: row.steps, error: row.error,
     ...(workflow && {
-      advisory: workflow.advisory,
+      ...(workflow.advisory && { advisory: true }),
       reviewStatus: workflow.proposal ? 'ready'
         : workflow.advisory && row.state === 'completed' && !row.error ? 'advisory_ready'
         : row.error === 'pending_review_decisions' ? 'waiting_decisions'
