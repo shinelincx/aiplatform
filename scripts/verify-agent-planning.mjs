@@ -739,7 +739,7 @@ try {
   const beforeReplay = (await request(`${advisoryPath}/agent-plan`, { token })).plan;
   assert.equal(beforeReplay.steps.length, 4);
   await db.projectQuery(first.id, `UPDATE task_agent_plans SET state = 'failed', error = 'review_evidence_missing',
-    input = jsonb_set(input, '{workflow}', (input->'workflow' - 'advisory') || '{"queue":[]}'::jsonb)
+    input = jsonb_set(input, '{workflow}', ((input->'workflow') - 'advisory'::text) || '{"queue":[]}'::jsonb)
     WHERE task_id = $1`, [advisory.taskId]);
   await request(`${advisoryPath}/agent-plan/retry`, { token, method: 'POST' });
   assert.equal(await planning.runNext(), true, 'Replaying a historical evidence pause starts at coordination');
