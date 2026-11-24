@@ -17,6 +17,7 @@ import { OperationsController, OperationsService } from './operations';
 import { openAIPlanningModel, PLANNING_MODEL } from './planning-model';
 import { ProjectsController, ProjectsService } from './projects';
 import { ProjectKnowledgeController, ProjectKnowledgeService } from './project-knowledge';
+import { StagingReleasesController } from './staging-releases';
 import { TasksController, TasksService } from './tasks';
 import { WorkerGateway } from './worker-gateway';
 import { WorkersController, WorkersService } from './workers';
@@ -33,7 +34,7 @@ class HealthController {
 @Module({
   controllers: [HealthController, AuthController, ProjectsController, RepositoriesController, TasksController, WorkersController,
     ExecutionsController, ArtifactsController, DeliveriesController, GitHubWebhookController, AgentPlanningController,
-    AgentRegistryController, ExecutionQaController, OperationsController, ProjectKnowledgeController],
+    AgentRegistryController, ExecutionQaController, OperationsController, ProjectKnowledgeController, StagingReleasesController],
   providers: [Database, AuthService, SessionGuard, ProjectsService, GitHubApp, TasksService, WorkersService, WorkerGateway,
     ExecutionsService, ArtifactStore, ArtifactsService, DeliveriesService, { provide: GIT_PUBLISH, useValue: pushCandidate },
     AgentPlanningService, AgentRegistryService, { provide: PLANNING_MODEL, useValue: openAIPlanningModel },

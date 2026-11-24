@@ -2,10 +2,14 @@
 set -Eeuo pipefail
 umask 077
 
-[[ ${SSH_ORIGINAL_COMMAND:-} == deploy-ado ]]
+mode=${ADO_STAGING_DEPLOY_MODE:-standard}
+case "$mode:${SSH_ORIGINAL_COMMAND:-}" in
+  standard:deploy-ado|migration:deploy-ado-migrate) ;;
+  *) exit 1 ;;
+esac
 IFS= read -r -n 2048 payload
 mapfile -t request < <(printf '%s' "$payload" | python3 -c '
-import json, re, sys
+import json, os, re, sys
 data = json.load(sys.stdin)
 for key, pattern in {
   "sha": "[a-f0-9]{40}", "image": r"ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}",
@@ -20,9 +24,18 @@ size = data.get("archive_size")
 if type(size) is not int or not 1 <= size <= 2 * 1024**3:
     sys.exit("Invalid deployment archive size")
 print(size)
+if os.environ.get("ADO_STAGING_DEPLOY_MODE") == "migration":
+    base = data.get("base_sha")
+    if not isinstance(base, str) or not re.fullmatch("[a-f0-9]{40}", base) or base == data["sha"]:
+        sys.exit("Invalid approved base revision")
+    print(base)
 ')
 unset payload
-[[ ${#request[@]} == 6 ]]
+if [[ $mode == migration ]]; then
+  [[ ${#request[@]} == 7 ]]
+else
+  [[ ${#request[@]} == 6 ]]
+fi
 revision=${request[0]} image=${request[1]}
 root=/opt/ado-staging
 compose="$root/compose.sh"
@@ -36,6 +49,8 @@ scratch=$(mktemp -d "$root/.cd.XXXXXXXX")
 export DOCKER_CONFIG="$scratch/registry"
 temp_release=
 switched=0
+migration_applied=0
+backup=
 
 db() { docker exec -i ado-staging-postgres-1 psql -XqAt -v ON_ERROR_STOP=1 -U ado -d ado "$@"; }
 stateful() { docker inspect --format '{{.Id}}' ado-staging-postgres-1 ado-staging-redis-1 ado-staging-storage-1; }
@@ -59,7 +74,9 @@ finish() {
   local status=$?
   trap - EXIT
   if (( status && switched )); then
-    if select_release "$current" && recreate api && recreate web && public "https://$domain/health" -o /dev/null; then
+    if [[ $mode == migration ]] && { (( migration_applied )) || [[ $(db -c 'SELECT max(version) FROM schema_migrations') != "$schema" ]]; }; then
+      printf 'Database migration may have taken effect. Coordinate recovery using backup %s and previous release %s.\n' "$backup" "$current" >&2
+    elif select_release "$current" && recreate api && recreate web && public "https://$domain/health" -o /dev/null; then
       printf 'Rolled back to %s.\n' "${current##*/}"
     else
       printf 'Rollback requires inspection.\n' >&2
@@ -82,6 +99,10 @@ if [[ $current == "$release" ]] && [[ $(docker inspect -f '{{.Config.Image}}' ad
   printf 'Release %s is already active.\n' "$revision"
   exit 0
 fi
+if [[ $mode == migration && ${current##*/} != "${request[6]}" ]]; then
+  printf 'Staging is no longer on the approved base.\n' >&2
+  exit 1
+fi
 local_image="ado-platform-release:$revision"
 docker load --input "$archive"
 test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$local_image")" = "$revision"
@@ -96,16 +117,34 @@ test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.imag
 test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")" = https://github.com/shinelincx/aiplatform
 docker image rm --no-prune "$local_image" >/dev/null
 
+candidate=$release
 if [[ ! -d $release ]]; then
   temp_release=$(mktemp -d "$root/releases/.cd-XXXXXXXX")
+  candidate=$temp_release
   docker run --rm --network none --read-only --entrypoint tar "$image" -C /app \
-    --exclude=node_modules --exclude=.next --exclude=dist -cf - . | tar --no-same-owner -xf - -C "$temp_release"
-  for path in compose.staging.yaml deploy/staging-nginx.conf apps/api/src/database.ts apps/api/src/migrate.ts; do
-    cmp -s "$current/$path" "$temp_release/$path" || { printf '%s requires a coordinated release.\n' "$path" >&2; exit 1; }
-  done
-  diff -qr "$current/apps/worker/src" "$temp_release/apps/worker/src" || { printf 'Worker source changed.\n' >&2; exit 1; }
+    --exclude=node_modules --exclude=.next --exclude=dist -cf - . | tar --no-same-owner -xf - -C "$candidate"
+fi
+for path in compose.staging.yaml deploy/staging-nginx.conf; do
+  cmp -s "$current/$path" "$candidate/$path" || { printf '%s requires a manual coordinated release.\n' "$path" >&2; exit 1; }
+done
+diff -qr "$current/apps/worker/src" "$candidate/apps/worker/src" || { printf 'Worker source changed.\n' >&2; exit 1; }
+changed=0
+for path in apps/api/src/database.ts apps/api/src/migrate.ts apps/api/src/project-isolation.ts; do
+  test -f "$current/$path" && test -f "$candidate/$path"
+  if ! cmp -s "$current/$path" "$candidate/$path"; then
+    [[ $mode == migration ]] || { printf '%s requires a coordinated release.\n' "$path" >&2; exit 1; }
+    changed=1
+  fi
+done
+if [[ $mode == migration ]]; then
+  (( changed )) || { printf 'Release has no database changes.\n' >&2; exit 1; }
+fi
+if [[ -n $temp_release ]]; then
   cat > "$temp_release/compose.web-production.yaml" <<YAML
 services:
+  migrate:
+    image: $image
+    volumes: !reset []
   api:
     image: $image
     command: [node, apps/api/dist/main.js]
@@ -133,13 +172,32 @@ state=$(stateful)
 schema=$(db -c 'SELECT max(version) FROM schema_migrations')
 started=$(date -u +%FT%TZ)
 switched=1
-docker stop --time 25 ado-staging-api-1 >/dev/null
+if [[ $mode == migration ]]; then
+  "$compose" stop --timeout 25 web api
+else
+  docker stop --time 25 ado-staging-api-1 >/dev/null
+fi
 test "$(queue)" = 0
+if [[ $mode == migration ]]; then
+  install -d -m 700 "$root/backups"
+  backup="$root/backups/pre-${revision}-$(date -u +%Y%m%dT%H%M%SZ)"
+  ADO_COMPOSE_WRAPPER="$compose" bash "$release/scripts/compose-backup.sh" backup ado-staging "$backup"
+  (cd -- "$backup" && sha256sum -c SHA256SUMS)
+  assert_main
+fi
 select_release "$release"
+if [[ $mode == migration ]]; then
+  "$compose" run --rm --no-deps -T migrate
+  migration_applied=1
+  schema_after=$(db -c 'SELECT max(version) FROM schema_migrations')
+  [[ $schema_after =~ ^[0-9]+$ ]] && (( schema_after >= schema ))
+else
+  schema_after=$schema
+fi
 recreate api
 recreate web
 test "$(stateful)" = "$state"
-test "$(db -c 'SELECT max(version) FROM schema_migrations')" = "$schema"
+test "$(db -c 'SELECT max(version) FROM schema_migrations')" = "$schema_after"
 public "https://$domain/health" | python3 -c 'import json,sys; assert json.load(sys.stdin).get("revision") == sys.argv[1]' "$revision"
 public "https://$domain/" -o "$scratch/workbench.html"
 grep -q 'AI DEVELOPMENT ORGANIZATION' "$scratch/workbench.html"

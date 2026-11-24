@@ -31,6 +31,25 @@ function issue(response: Response | null, fallback: string) {
   return fallback;
 }
 
+export async function decideStagingRelease(form: FormData) {
+  const target = settingsPath('staging-releases');
+  const sha = String(form.get('sha') ?? '');
+  const decision = form.get('decision');
+  if (!/^[0-9a-f]{40}$/.test(sha)) redirect(target + '?issue=staging-release-decision');
+  const response = await execute('/staging-releases/' + sha + '/decision', {
+    method: 'POST', body: JSON.stringify({ decision, note: form.get('note') }),
+  });
+  if (!response?.ok) {
+    const problem = response?.status === 409 ? 'staging-release-conflict' : issue(response, 'staging-release-decision');
+    redirect(target + '?issue=' + problem);
+  }
+  revalidatePath(target);
+  const { dispatched } = await response.json() as { dispatched: boolean };
+  if (decision === 'rejected') redirect(target + '?notice=staging-release-rejected');
+  if (!dispatched) redirect(target + '?issue=staging-release-dispatch');
+  redirect(target + '?notice=staging-release-approved');
+}
+
 export async function login(form: FormData) {
   const response = await execute('/auth/session', {
     method: 'POST',

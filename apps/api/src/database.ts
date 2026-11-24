@@ -395,6 +395,23 @@ const migrations = [
       WHERE t.status IN ('READY', 'REVIEW') AND t.auto_approval_entry IS NOT NULL AND t.archived_at IS NULL
       ORDER BY t.auto_approval_entry LIMIT 1 FOR UPDATE OF p SKIP LOCKED
     $$;`,
+  `CREATE TABLE staging_releases (
+    sha text PRIMARY KEY CHECK (sha ~ '^[0-9a-f]{40}$'),
+    base_sha text NOT NULL CHECK (base_sha <> sha),
+    image text NOT NULL,
+    source_run text NOT NULL,
+    pulls integer[] NOT NULL,
+    files text[] NOT NULL,
+    state text NOT NULL DEFAULT 'pending'
+      CHECK (state IN ('pending', 'approved', 'rejected', 'deploying', 'succeeded', 'failed')),
+    requested_at timestamptz NOT NULL DEFAULT now(),
+    decided_by_id uuid REFERENCES users(id),
+    decided_by text,
+    decided_at timestamptz,
+    note text,
+    deployment_run text,
+    deployment_attempt text
+  );`,
 ];
 
 function connect(user: string) {
