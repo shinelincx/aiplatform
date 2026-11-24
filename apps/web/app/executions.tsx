@@ -11,6 +11,7 @@ import { TaskActivity, type ActivityItem } from './task-activity';
 import { SubmitButton } from './task-feedback';
 import { executionFailureLabels } from './workspace';
 import { stagingReleaseLabels, stagingRunUrl } from './staging-release-status';
+import { readStagingProgress } from './staging-release-progress';
 
 function autoReviewLabel(delivery: ExecutionRun['delivery']) {
   if (delivery?.pullState === 'merged') return '自动评审 · 已合并';
@@ -133,28 +134,9 @@ function EvidenceList({ entries }: { entries?: ReviewEvidence[] }) {
   </li>)}</ul>;
 }
 
-async function stagingStatus(pullNumber: number) {
-  const health = await read<ApiHealth>('/health').catch(() => null);
-  const deployed = health?.revision;
-  if (!deployed || !/^[0-9a-f]{40}$/.test(deployed)) return '预发布部署待核对';
-  const request = async (path: string) => {
-    const response = await fetch(`https://api.github.com/repos/shinelincx/aiplatform/${path}`, {
-      redirect: 'error', signal: AbortSignal.timeout(2500), next: { revalidate: 120 },
-    });
-    return response.ok ? response.json() : null;
-  };
-  try {
-    const pull = await request(`pulls/${pullNumber}`);
-    const merged = pull?.merge_commit_sha;
-    if (pull?.merged !== true || typeof merged !== 'string' || !/^[0-9a-f]{40}$/.test(merged)) return '预发布部署待核对';
-    if (merged === deployed) return '已部署预发布';
-    const comparison = await request(`compare/${merged}...${deployed}`);
-    if (comparison?.status === 'ahead' || comparison?.status === 'identical') return '已部署预发布';
-    return comparison ? '待部署预发布' : '预发布部署待核对';
-  } catch {
-    return '预发布部署待核对';
-  }
-}
+const releaseStageLabels = {
+  pending: '等待', running: '进行中', passed: '已通过', failed: '失败', cancelled: '已取消', skipped: '已跳过',
+};
 
 export async function Executions({ project, task, runsResult, checks, independentChecks, autoDraftPr, planned, approvals }: {
   project: Project; task: Task; runsResult: Awaited<ReturnType<typeof readSection<ExecutionRun[]>>>;
@@ -167,10 +149,11 @@ export async function Executions({ project, task, runsResult, checks, independen
   const pull = latest?.delivery;
   const deployment = project.code === 'ADO' && pull?.pullState === 'merged' && pull.pullNumber && pull.baseBranch === 'main'
     && pull.pullUrl === `https://github.com/shinelincx/aiplatform/pull/${pull.pullNumber}` ? pull.pullNumber : null;
-  const [workersResult, eventsResult, deploymentStatus, release] = await Promise.all([
+  const [workersResult, eventsResult, progress, release] = await Promise.all([
     readSection<WorkerReport[]>(`/projects/${project.id}/workers`, Array.isArray),
     latest ? readSection<ExecutionEvent[]>(`${url}/${latest.id}/events`, Array.isArray) : null,
-    deployment ? stagingStatus(deployment) : null,
+    deployment ? read<ApiHealth>('/health').catch(() => null)
+      .then(health => readStagingProgress(deployment, health?.revision)) : null,
     deployment ? read<StagingReleaseStatus | null>(`/projects/${project.id}/staging-releases/${deployment}`).catch(() => null) : null,
   ]);
   const workers = workersResult.data ?? [];
@@ -232,6 +215,7 @@ export async function Executions({ project, task, runsResult, checks, independen
 
   return <section aria-labelledby="execution-heading" className="execution-block">
     {refreshing && <RefreshExecution />}
+    {!refreshing && !release && progress?.workflow?.active && <RefreshExecution intervalMs={30000} />}
     <div className="task-detail__card execution-summary">
       <header className="execution-head">
         <div>
@@ -391,11 +375,25 @@ export async function Executions({ project, task, runsResult, checks, independen
         <h5>交付</h5>
         <p role="status">{waitingOnGithub ? '等待 GitHub App 配置' : deliveryLabels[latest.delivery.state]}
           {latest.delivery.pullState && ` · ${pullLabels[latest.delivery.pullState]}`}</p>
-        {deploymentStatus && <p>预发布 · {deploymentStatus === '已部署预发布' ? deploymentStatus
-          : release ? stagingReleaseLabels[release.state] : deploymentStatus}
+        {progress && <p role="status">预发布 · {progress.status === '已部署预发布' ? progress.status
+          : release ? stagingReleaseLabels[release.state] : progress.status}
           {release?.decidedBy && ` · ${release.decidedBy}`}
           {release?.deploymentRun && <> · <a href={stagingRunUrl(release.deploymentRun)}>部署日志</a></>}
         </p>}
+        {!release && progress && !progress.workflow && <p><a href="https://github.com/shinelincx/aiplatform/actions/workflows/ci.yml">在 GitHub 查看发布流水线</a></p>}
+        {!release && progress?.workflow && <div aria-label="普通发布进度">
+          <p><a href={progress.workflow.url}>发布流水线日志</a> · <code title={progress.workflow.revision}>{progress.workflow.revision.slice(0, 12)}</code></p>
+          {!!progress.workflow.stages.length && <ul className="check-list" aria-label="发布步骤">
+            {progress.workflow.stages.map(stage => <li key={stage.name} data-status={stage.status}>
+              <span>{stage.label} · {releaseStageLabels[stage.status]}</span>
+              {stage.logUrl && <a href={stage.logUrl} aria-label={stage.label + '日志'}>查看日志</a>}
+            </li>)}
+          </ul>}
+          {progress.workflow.failure && <p role="alert" className="feedback">
+            {progress.workflow.failure}
+            {progress.workflow.failedStep && <small>{' '}失败步骤 · {progress.workflow.failedStep}</small>}
+          </p>}
+        </div>}
         <p className="description">{latest.delivery.branch} → {latest.delivery.baseBranch}</p>
         {latest.delivery.pullUrl && <p><a href={latest.delivery.pullUrl}>查看 GitHub PR #{latest.delivery.pullNumber}</a></p>}
         {owner && project.status === 'active' && latest.delivery.state === 'published' && latest.delivery.pullState !== 'merged' &&
