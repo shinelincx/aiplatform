@@ -31,7 +31,23 @@ const auth = new AuthService(db);
 const projects = new ProjectsService(db, auth);
 const registry = new AgentRegistryService(db, projects);
 const tasks = new TasksService(db, projects, registry);
-const github = new GitHubApp();
+let sourceCommit = 'a'.repeat(40);
+let sourceAvailable = true;
+class FixtureGitHub extends GitHubApp {
+  async planningSource() {
+    return { commit: sourceCommit };
+  }
+
+  async planningEvidence(source, request) {
+    assert.equal(source.repository, 'test/planning-fixture');
+    return { commit: sourceCommit, incompleteTree: false,
+      files: !sourceAvailable && request === 'Check missing evidence' ? [] : [
+        { path: 'src/settings.ts', excerpt: 'Settings are visible to the project owner.', truncated: false },
+        { path: 'docs/settings.md', excerpt: 'Keep an empty state when settings are unavailable.', truncated: false },
+      ] };
+  }
+}
+const github = new FixtureGitHub();
 const deliveries = new DeliveriesService(db, tasks, projects, github, new ArtifactStore(), pushCandidate);
 const executions = new ExecutionsService(db, projects, tasks, github, deliveries);
 const modelCalls = [];
@@ -49,16 +65,21 @@ const qa = new ExecutionQaService(db, projects, tasks, new ArtifactStore(), {
     });
   },
 });
+const architectureReview = {
+  findings: ['Re-use the existing settings service'], evidence: ['src/settings.ts'], blockers: [],
+  assumptions: ['Confirm older browser support in the smoke test'], decisions: [],
+};
 const outputs = {
   PROJECT_DIRECTOR: { objective: 'Create a settings page', constraints: ['Use the existing repository'] },
   PRODUCT_MANAGER: {
     title: 'Settings page', userStory: 'As a user I can view settings', requirements: ['Show the saved value'],
-    acceptanceCriteria: ['The page displays the saved value'],
+    acceptanceCriteria: ['The page displays the saved value'], needsDesign: false, affectedReviewers: [],
   },
   ARCHITECT: {
     developer: 'FRONTEND_DEVELOPER', steps: ['Add the route and wire the existing data source'],
-    risks: ['Missing data state'], testApproach: ['Exercise the page with and without saved data'],
+    risks: ['Missing data state'], testApproach: ['Exercise the page with and without saved data'], review: architectureReview,
   },
+  UI_UX_DESIGNER: { design: ['Show the existing empty state'], review: { ...architectureReview, evidence: ['docs/settings.md'] } },
 };
 const plannedDecision = { question: 'Who may disable an account?', options: ['Project owners only', 'All project members'] };
 let failProduct = true;
@@ -77,12 +98,38 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
       failProduct = false;
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] });
     }
-    if (role === 'ARCHITECT' && input.request === 'Confirm account policy') {
-      return modelReply(agent, { ...outputs.ARCHITECT, decisions: [plannedDecision] });
+    const policy = input.request === 'Confirm account policy';
+    const board = input.request === '给任务看板列表增加优先级和状态显示';
+    if (board && role === 'PROJECT_DIRECTOR') {
+      return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate' ? [] : [
+        { question: '任务是否已有优先级和状态字段？', options: ['复用字段', '新增字段'],
+          impact: '决定是否需要调整接口', reviewers: ['ARCHITECT'] },
+      ] });
+    }
+    if (role === 'PROJECT_DIRECTOR' && policy) {
+      const review = { ...plannedDecision, impact: 'Changes the account action and its access policy', reviewers: ['ARCHITECT'] };
+      return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate'
+        ? [review, { ...review, question: `${review.question} 此决定尚未作出。`, reviewers: ['UI_UX_DESIGNER'] }]
+        : [review] });
+    }
+    const answers = input.humanDecisions?.flatMap(({ answer }) => answer ? [answer] : []) ?? [];
+    if (role === 'PRODUCT_MANAGER') {
+      const design = input.request === 'Add a settings page' || policy || board;
+      return modelReply(agent, { ...outputs.PRODUCT_MANAGER, needsDesign: design,
+        ...(answers.length && { requirements: answers, acceptanceCriteria: answers.map((answer) => `Verify: ${answer}`) }),
+      });
+    }
+    if (role === 'ARCHITECT' && policy) {
+      return modelReply(agent, { ...outputs.ARCHITECT,
+        ...(answers.length && { steps: answers.map((answer) => `Implement: ${answer}`) }),
+        review: { ...architectureReview, decisions: answers.length ? [] : [
+          { ...plannedDecision, impact: 'Changes the account action and its access policy', reviewers: ['ARCHITECT', 'UI_UX_DESIGNER'] },
+        ] },
+      });
     }
     return modelReply(agent, outputs[role]);
   },
-});
+}, github);
 
 async function request(path, { token, method = 'GET', body, status = 200 } = {}) {
   const response = await globalThis.fetch(new URL(path, api), {
@@ -292,8 +339,7 @@ try {
     `UPDATE task_agent_plans SET state = 'running', lease_id = gen_random_uuid(),
       lease_expires_at = now() - interval '1 second' WHERE task_id = $1`, [queued.taskId],
   );
-  assert.equal(await planning.runNext(), true);
-  assert.equal(await planning.runNext(), true);
+  for (let index = 0; index < 4; index++) assert.equal(await planning.runNext(), true);
   assert.equal(await planning.runNext(), false);
   const { plan: complete } = await request(planPath, { token });
   assert.equal(complete.state, 'completed');
@@ -302,7 +348,10 @@ try {
   assert.deepEqual(complete.knowledge, [frozenKnowledge]);
   assert(modelCalls.every(({ input: modelInput }) => JSON.stringify(modelInput.approvedRequirement) === JSON.stringify(approvedContent)));
   for (const { input: modelInput } of modelCalls) assert.deepEqual(modelInput.approvedKnowledge, [frozenKnowledge]);
-  assert.deepEqual(modelCalls.map(({ role }) => role), ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'PRODUCT_MANAGER', 'ARCHITECT']);
+  assert.equal((await request(planPath, { token })).plan.proposal?.commit, 'a'.repeat(40));
+  assert.deepEqual(complete.proposal.design.design, ['Show the existing empty state']);
+  assert.deepEqual(complete.proposal.design.review.evidence, ['docs/settings.md']);
+  assert.deepEqual(complete.proposal.architecture.review.evidence, ['src/settings.ts']);
   assert.equal(modelCalls[2].agent.model, 'fixture-pm');
   assert.equal(modelCalls[2].agent.skills[0].version, 2);
   assert.equal(modelCalls[3].input.priorSteps.length, 2);
@@ -330,15 +379,27 @@ try {
   assert(html.includes(requirement.referenceUrl) && html.includes('规划使用的批准摘录'));
 
   await request(`${taskPath}/transition`, {
-    token, method: 'POST', status: 409, body: { status: 'READY', developerRole: 'BACKEND_DEVELOPER' },
+    token, method: 'POST', status: 409, body: { status: 'READY', developerRole: 'BACKEND_DEVELOPER', planVersion: complete.proposal.version },
   });
-  const planApproval = await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' } });
+  await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' }, status: 409 });
+  const repositoryChecks = {
+    checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }],
+    independentChecks: [{ name: 'browser', kind: 'browser' }],
+  };
+  const updateChecks = (body = repositoryChecks) => request(`${prefix}/repositories/${repo.id}/checks`, { token, method: 'PATCH', body });
+  await updateChecks();
+  const planApproval = await request(`${taskPath}/transition`, {
+    token, method: 'POST', body: { status: 'READY', planVersion: complete.proposal.version },
+  });
+  assert.deepEqual(await request(`${taskPath}/executions`, { token }), [], 'Approval does not dispatch');
+  assert.equal((await request(planPath, { token })).plan.approvedVersion, complete.proposal.version);
   assert.deepEqual(planApproval.developer, { role: 'FRONTEND_DEVELOPER', version: 2, model: config.model });
-  await request(`${prefix}/repositories/${repo.id}/checks`, {
-    token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }],
-      independentChecks: [{ name: 'browser', kind: 'browser' }] },
-  });
-  const run = await request(`${taskPath}/executions`, { token, method: 'POST', status: 201 });
+  await updateChecks({ ...repositoryChecks, independentChecks: [] });
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), /verification settings changed/);
+  await updateChecks();
+  sourceCommit = 'b'.repeat(40);
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), /approved commit/);
+  sourceCommit = 'a'.repeat(40);
   const credential = await request(`${prefix}/workers`, {
     token, method: 'POST', status: 201, body: { name: 'Planning handoff fixture' },
   });
@@ -346,11 +407,13 @@ try {
     `UPDATE workers SET connection_id = gen_random_uuid(), capabilities = '{"codexVersion":"0.170.0","verificationVersion":1}'
      WHERE id = $1 RETURNING id AS "workerId", credential_hash AS hash, connection_id AS "connectionId"`, [credential.workerId],
   );
-  assert.equal(await executions.claim(worker), null, 'Planned QA requires an archive-capable Worker');
-  await db.pool.query("UPDATE workers SET capabilities = capabilities || '{\"artifactVersion\":1}' WHERE id = $1", [worker.workerId]);
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), /updated Worker is required/);
+  await db.pool.query("UPDATE workers SET capabilities = capabilities || '{\"artifactVersion\":1,\"approvedPlanVersion\":1}' WHERE id = $1", [worker.workerId]);
+  const run = await executions.queue(account, first.id, queued.taskId);
+  assert.equal(run.requestedWorkerId, worker.workerId);
   const offer = await executions.claim(worker);
   assert.equal(offer?.id, run.id);
-  assert.deepEqual(offer.development.plan, outputs.ARCHITECT);
+  assert.deepEqual(offer.development.approvedPlan, complete.proposal);
   assert.equal(offer.development.agent.version, 2);
   assert.equal(offer.development.agent.model, config.model);
   assert.deepEqual(offer.development.agent.skills, [{ name: skill.name, version: skillV2.version, instructions: skillV2.instructions }]);
@@ -368,6 +431,7 @@ try {
   const baseCommit = 'a'.repeat(40);
   const usage = { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 };
   assert.equal((await send(1, 'thread', { threadId: 'fixture-qa-thread' })).accepted, true);
+  assert.equal((await send(2, 'result', { attempt: 1, baseCommit: 'b'.repeat(40), patchHash, files: ['settings.ts'], usage })).accepted, false);
   assert.equal((await send(2, 'result', { attempt: 1, baseCommit, patchHash, files: ['settings.ts'], usage })).accepted, true);
   const verification = { attempt: 1, patchHash, checks: [{ name: 'unit', status: 'passed', exitCode: 0, durationMs: 20 }] };
   assert.equal((await send(3, 'verification', verification)).accepted, false, 'QA requires the archived patch');
@@ -448,7 +512,7 @@ try {
   const operations = await request(operationsPath, { token });
   const pmUsage = operations.usage.find(({ role }) => role === 'PRODUCT_MANAGER');
   assert.deepEqual(pmUsage, { role: 'PRODUCT_MANAGER', model: 'fixture-pm-resolved',
-    inputTokens: '40', cachedInputTokens: '10', outputTokens: '16', estimatedUsd: null });
+    inputTokens: '60', cachedInputTokens: '15', outputTokens: '24', estimatedUsd: null });
   assert.equal(operations.usage.find(({ role }) => role === 'QA_ENGINEER').model, 'fixture-qa-resolved');
   assert.equal(operations.usage.find(({ role }) => role === 'FRONTEND_DEVELOPER').inputTokens, '10');
   for (const action of ['task.approved', 'agent.step_completed', 'task.status_changed',
@@ -466,7 +530,7 @@ try {
     token, method: 'PUT', body: { ...rate, outputUsdPerMillion: '50' },
   });
   const estimates = await request(operationsPath, { token });
-  assert.equal(estimates.usage.find(({ role }) => role === 'PRODUCT_MANAGER').estimatedUsd, '0.000224000000');
+  assert.equal(estimates.usage.find(({ role }) => role === 'PRODUCT_MANAGER').estimatedUsd, '0.000336000000');
   assert.equal(estimates.usage.find(({ role }) => role === 'QA_ENGINEER').estimatedUsd, null);
   assert.equal(estimates.rates.length, 1);
   assert(estimates.audit.some(({ action }) => action === 'operations.model_rate_updated'));
@@ -508,19 +572,32 @@ try {
     assert(await planning.runNext(), `Expected to run ${role}`);
   }
   const decisionPath = `${prefix}/tasks/${decisionTaskId}`;
+  assert.deepEqual((await request(decisionPath, { token })).decisions, [],
+    'Candidate questions stay in planning until the evidence reviews finish');
+  assert.equal(await planning.runNext(), true, 'UI/UX reviews the same draft');
+  assert.deepEqual((await request(decisionPath, { token })).decisions, []);
+  assert.equal(await planning.runNext(), true, 'The Director reconciles evidence-backed decisions');
+  let approvalVersion;
   const approve = (status = 200) => request(`${decisionPath}/transition`, {
-    token, method: 'POST', body: { status: 'READY' }, status,
+    token, method: 'POST', body: { status: 'READY', planVersion: approvalVersion }, status,
   });
   await approve(409);
   const { decisions: [planned] } = await request(decisionPath, { token });
-  assert.deepEqual(planned, { id: 'plan:0', ...plannedDecision });
+  assert.equal(planned.question, plannedDecision.question);
+  assert.equal(planned.impact, 'Changes the account action and its access policy');
+  assert.deepEqual(planned.options, plannedDecision.options);
+  assert.deepEqual(planned.reviewers, ['ARCHITECT', 'UI_UX_DESIGNER']);
+  assert.equal((await request(decisionPath, { token })).decisions.length, 1);
+  assert.equal((await request(`${decisionPath}/agent-plan`, { token })).plan.reviewStatus, 'waiting_decisions');
   const submit = (answers, status = 204, session = token) => request(`${decisionPath}/decisions`, {
     token: session, method: 'POST', body: { answers }, status,
   });
   await submit([{ id: planned.id, answer: planned.options[0] }], 403, viewerToken);
   await submit([{ id: 'unknown', answer: planned.options[0] }], 409);
-  // An earlier deployment could approve a stored plan with unresolved items.
-  await db.projectQuery(first.id, "UPDATE tasks SET status = 'READY' WHERE id = $1", [decisionTaskId]);
+  assert.equal(await planning.runNext(), false);
+  const waiting = (await request(`${decisionPath}/agent-plan`, { token })).plan;
+  assert(waiting.steps.some(({ role }) => role === 'UI_UX_DESIGNER'));
+  assert.equal(waiting.proposal, undefined);
   await request(`${decisionPath}/executions`, { token, method: 'POST', status: 409 });
   const dispatchUrl = new URL(`/?project=${first.id}&section=tasks&task=${decisionTaskId}&dialog=dispatch`, web);
   const dispatchPage = await globalThis.fetch(dispatchUrl, {
@@ -528,15 +605,24 @@ try {
   });
   assert.equal(dispatchPage.status, 200);
   const dispatchHtml = await dispatchPage.text();
-  assert(dispatchHtml.includes('请在任务详情补充以下决策并重新送审') && !dispatchHtml.includes('确认派发任务'));
+  assert(dispatchHtml.includes(planned.question) && !dispatchHtml.includes('确认派发任务'));
   await submit([{ id: planned.id, answer: planned.options[0] }]);
+  await approve(409);
+  assert.equal(await planning.runNext(), true, 'The product manager revises the shared draft');
+  await approve(409);
+  for (let index = 0; index < 2; index++) assert.equal(await planning.runNext(), true);
+  const initialProposal = (await request(`${decisionPath}/agent-plan`, { token })).plan.proposal;
+  approvalVersion = initialProposal.version;
+  assert.deepEqual(initialProposal.product.acceptanceCriteria, [`Verify: ${planned.options[0]}`]);
+  assert.deepEqual(initialProposal.architecture.steps, [`Implement: ${planned.options[0]}`]);
+  assert.deepEqual(await request(`${decisionPath}/executions`, { token }), []);
   await approve();
 
-  const firstRun = await request(`${decisionPath}/executions`, { token, method: 'POST', status: 201 });
+  const firstRun = await executions.queue(account, first.id, decisionTaskId);
   const firstOffer = await executions.claim(worker);
   assert.equal(firstOffer.id, firstRun.id);
   assert.equal(firstOffer.decisionReporting, true);
-  assert.deepEqual(firstOffer.development.decisions, [{ question: planned.question, answer: planned.options[0] }]);
+  assert.deepEqual(firstOffer.development.approvedPlan, initialProposal);
   const runtimeDecision = { question: 'How is the last administrator protected?', options: [
     'Reject disabling the last active administrator', 'Require another administrator to be assigned first',
   ] };
@@ -554,7 +640,7 @@ try {
   });
   assert.equal(decisionPage.status, 200);
   const decisionHtml = await decisionPage.text();
-  assert(decisionHtml.replaceAll('<!-- -->', '').includes('1 项待人工确认') && decisionHtml.includes('补充决策并重新送审'));
+  assert(decisionHtml.replaceAll('<!-- -->', '').includes('1 项待人工确认') && decisionHtml.includes('提交决定'));
   assert(decisionHtml.includes(runtimeDecision.question) && decisionHtml.includes(runtimeDecision.options[0]));
 
   const pending = card.decisions.find(({ answer }) => !answer);
@@ -575,16 +661,19 @@ try {
   assert.equal(submittedPage.status, 303);
   assert(submittedPage.headers.get('location')?.includes('notice=decisions-submitted'));
   await submit([runtimeAnswer], 409);
-  assert.equal((await request(decisionPath, { token })).status, 'WAITING_APPROVAL');
+  assert.equal((await request(decisionPath, { token })).status, 'PLANNING');
   await request(`${decisionPath}/executions`, { token, method: 'POST', status: 409 });
+  for (let index = 0; index < 3; index++) assert.equal(await planning.runNext(), true);
+  await approve(409);
+  const revisedProposal = (await request(`${decisionPath}/agent-plan`, { token })).plan.proposal;
+  assert.notEqual(revisedProposal.version, initialProposal.version);
+  approvalVersion = revisedProposal.version;
   await approve();
-  const secondRun = await request(`${decisionPath}/executions`, { token, method: 'POST', status: 201 });
+  const secondRun = await executions.queue(account, first.id, decisionTaskId);
   const secondOffer = await executions.claim(worker);
   assert.equal(secondOffer.id, secondRun.id);
-  assert.deepEqual(secondOffer.development.decisions, [
-    { question: planned.question, answer: planned.options[0] },
-    { question: pending.question, answer: runtimeAnswer.answer },
-  ]);
+  assert.deepEqual(secondOffer.development.approvedPlan, revisedProposal);
+  assert(secondOffer.development.approvedPlan.architecture.steps.includes(`Implement: ${runtimeAnswer.answer}`));
   const decisionHistory = await request(`${decisionPath}/events`, { token });
   assert.equal(decisionHistory.filter(({ payload }) => payload.to === 'READY').length, 2);
   assert.equal(decisionHistory.filter(({ eventType }) => eventType === 'task.decisions_submitted').length, 2);
@@ -593,7 +682,36 @@ try {
   assert.equal((await request(`${decisionPath}/executions/${firstRun.id}/events`, { token }))[0].payload.code, 'needs_decisions');
   await executions.record(worker, { runId: secondRun.id, sequence: 1, kind: 'failed', payload: { code: 'no_changes' } });
 
+  sourceAvailable = false;
+  const { taskId: evidenceTaskId } = await planning.start(account, first.id, { repositoryId: repo.id, request: 'Check missing evidence' });
+  for (let index = 0; index < 3; index++) assert.equal(await planning.runNext(), true);
+  const evidencePath = `${prefix}/tasks/${evidenceTaskId}`;
+  const blocked = (await request(`${evidencePath}/agent-plan`, { token })).plan;
+  assert.equal(blocked.reviewStatus, 'waiting_evidence');
+  assert(blocked.blockers.length);
+  await request(`${evidencePath}/transition`, { token, method: 'POST', body: { status: 'READY' }, status: 409 });
+  await request(`${evidencePath}/executions`, { token, method: 'POST', status: 409 });
+  sourceAvailable = true;
+  await planning.retry(account, first.id, evidenceTaskId);
+  for (let index = 0; index < 4; index++) assert.equal(await planning.runNext(), true);
+  const backendProposal = (await request(`${evidencePath}/agent-plan`, { token })).plan.proposal;
+  assert.equal(backendProposal.design, undefined);
+  assert(backendProposal.architecture.review.assumptions.length);
+
+  const board = await planning.start(account, first.id, {
+    repositoryId: repo.id, request: '给任务看板列表增加优先级和状态显示',
+  });
+  const boardPath = `${prefix}/tasks/${board.taskId}`;
+  for (let index = 0; index < 6; index++) {
+    assert.equal(await planning.runNext(), true);
+    assert.deepEqual((await request(boardPath, { token })).decisions, []);
+  }
+  const { plan: boardPlan } = await request(`${boardPath}/agent-plan`, { token });
+  assert.equal(boardPlan.reviewStatus, 'ready', 'Evidence-resolved questions do not block approval');
+  assert(boardPlan.proposal.architecture.review.evidence.length && boardPlan.proposal.design.review.evidence.length);
+
   const { taskId: legacyTaskId } = await planning.start(account, first.id, { repositoryId: repo.id, request: 'Legacy account scope' });
+  await db.projectQuery(first.id, "UPDATE task_agent_plans SET input = input - 'workflow' WHERE task_id = $1", [legacyTaskId]);
   for (const role of ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT']) {
     assert(await planning.runNext(), `Expected to run ${role}`);
   }
@@ -611,7 +729,7 @@ try {
   assert.deepEqual(legacy.decisions.map(({ question }) => question), ['账号维护范围', '权限粒度']);
   await request(`${legacyPath}/executions`, { token, method: 'POST', status: 409 });
 
-  const providerPlanning = new AgentPlanningService(db, projects, tasks, registry, openAIPlanningModel);
+  const providerPlanning = new AgentPlanningService(db, projects, tasks, registry, openAIPlanningModel, github);
   const credentialsMarker = 'fixture-provider-key-sensitive';
   const providerBodyMarker = 'fixture-provider-error-body-sensitive';
   const rawRequestMarker = 'fixture-provider-raw-request-sensitive';
@@ -675,7 +793,7 @@ try {
       const { plan: detail } = await request(diagnosisPath, { token });
       assert.deepEqual(detail, {
         taskId: diagnostic.taskId, state: 'failed', stage: 'PROJECT_DIRECTOR', steps: [],
-        error: 'planning_step_failed', failureCategory: category,
+        error: 'planning_step_failed', failureCategory: category, reviewStatus: 'reviewing',
       });
       assert.equal((await request(detailPath, { token })).status, 'PLANNING');
       const { rows: [saved] } = await db.projectQuery(first.id,

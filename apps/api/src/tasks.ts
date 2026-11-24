@@ -10,8 +10,11 @@ import { canTransitionTask, developerRoles, taskPriorities, type Account, type A
 import { AgentRegistryService } from './agent-registry';
 import { CurrentAccount, SessionGuard } from './auth';
 import { Database, isUniqueViolation } from './database';
+import type { PlanWorkflow } from './plan-workflow';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
+
+export const planExecutionTarget = "jsonb_build_object('repositoryId', id, 'checks', check_plan, 'independentChecks', independent_checks)";
 
 const taskColumns = `id, project_id AS "projectId", task_code AS code, title, description, status, priority,
   repository_id AS "repositoryId", parent_task_id AS "parentTaskId",
@@ -32,7 +35,9 @@ const taskReadColumns = `${taskColumns},
     (SELECT ${runFailure} FROM execution_runs r WHERE r.project_id = tasks.project_id AND r.task_id = tasks.id
      ORDER BY r.created_at DESC, r.id DESC LIMIT 1) END AS "executionFailure",
   (SELECT p.steps->2->'output' FROM task_agent_plans p WHERE p.project_id = tasks.project_id
-   AND p.task_id = tasks.id AND p.state = 'completed') AS architecture,
+   AND p.task_id = tasks.id AND p.state = 'completed' AND NOT p.input ? 'workflow') AS architecture,
+  (SELECT p.input->'workflow'->'questions' FROM task_agent_plans p WHERE p.project_id = tasks.project_id
+   AND p.task_id = tasks.id AND p.state <> 'cancelled') AS "plannedQuestions",
   (SELECT e.payload->'decisions' FROM task_events e WHERE e.project_id = tasks.project_id AND e.task_id = tasks.id
    AND e.event_type = 'task.decisions_submitted' AND NOT EXISTS (
      SELECT 1 FROM task_events reset WHERE reset.project_id = e.project_id AND reset.task_id = e.task_id
@@ -41,6 +46,7 @@ const taskReadColumns = `${taskColumns},
 
 type TaskRead = {
   architecture: ArchitecturePlan | null;
+  plannedQuestions: TaskDecision[] | null;
   submittedDecisions: TaskDecision[] | null;
 };
 
@@ -60,12 +66,12 @@ function legacyDecisions(plan: ArchitecturePlan): DecisionQuestion[] {
   }));
 }
 
-function withDecisions<T extends Task>({ architecture, submittedDecisions, ...task }: T & TaskRead) {
+function withDecisions<T extends Task>({ architecture, plannedQuestions, submittedDecisions, ...task }: T & TaskRead) {
   const failure = task.executionFailure;
   const checkLegacy = ['WAITING_APPROVAL', 'READY'].includes(task.status)
     || (task.status === 'FAILED' && failure?.code === 'no_changes');
   const planned = architecture?.decisions ?? (architecture && checkLegacy ? legacyDecisions(architecture) : []);
-  const decisions = new Map((submittedDecisions ?? []).map((item) => [item.question, item]));
+  const decisions = new Map((plannedQuestions ?? submittedDecisions ?? []).map((item) => [item.question, item]));
   for (const [index, item] of planned.entries()) {
     if (!decisions.has(item.question)) decisions.set(item.question, { ...item, id: `plan:${index}` });
   }
@@ -246,10 +252,12 @@ export class TasksService {
         write: true, active: true, owner: to === 'READY' || to === 'REJECTED',
       }, client);
       const task = await this.find(projectId, id, client);
+      const workflow = await this.planWorkflow(client, task);
+      if (workflow && to === 'PLANNING') throw new ConflictException('Use the Agent planning retry action');
       if (task.archivedAt || running.has(task.status) || !canTransitionTask(task.status, to)) {
         throw new ConflictException('Invalid task transition');
       }
-      if (to !== 'CANCELLED' && await this.hasActiveAgentPlan(client, task)) {
+      if (task.status === 'PLANNING' && to !== 'CANCELLED' && await this.hasActiveAgentPlan(client, task)) {
         throw new ConflictException('An Agent plan is already managing this task');
       }
       if (to === 'CANCELLED' || to === 'PLANNING') {
@@ -271,6 +279,22 @@ export class TasksService {
         );
         if (blocked.rowCount) throw new ConflictException('Prerequisite tasks must be completed');
         const planned = await this.plannedDevelopment(client, task);
+        if (workflow && (!planned?.proposal || planned.proposal.version !== input.planVersion)) {
+          throw new ConflictException({ code: 'stale-plan-version', message: 'Review the current plan version before approval' });
+        }
+        if (planned?.proposal) {
+          const { rows: [binding] } = await client.query<{ target: PlanWorkflow['approvedTarget'] }>(
+            `SELECT ${planExecutionTarget} AS target FROM repositories WHERE project_id = $1 AND id = $2 FOR SHARE`,
+            [projectId, task.repositoryId]);
+          if (!binding?.target) throw new ConflictException('The plan repository is no longer bound');
+          await client.query(
+            `UPDATE task_agent_plans SET input = jsonb_set(input, '{workflow}',
+              input->'workflow' || $2::jsonb) WHERE task_id = $1`,
+            [id, { approvedVersion: planned.proposal.version, approvedTarget: binding.target }]);
+          await this.event(client, task, 'agent.plan_version_approved', {
+            actorId: actor.id, version: planned.proposal.version, commit: planned.proposal.commit, target: binding.target,
+          });
+        }
         if (planned && role && role !== planned.agent.role) throw new ConflictException('Developer differs from the Agent plan');
         approved = planned?.agent ?? await this.selectDeveloper(client, projectId, role);
         await this.projects.audit(client, actor.id, projectId, 'task.approved', id);
@@ -290,19 +314,53 @@ export class TasksService {
     const { answers } = objectInput(body);
     if (!Array.isArray(answers) || answers.length > 16) throw new BadRequestException('Invalid decision answers');
     return this.db.transaction(async (client) => {
-      await this.projects.access(actor.id, projectId, { write: true, active: true }, client);
+      const project = await this.projects.access(actor.id, projectId, { write: true, active: true }, client);
       const task = await this.find(projectId, id, client);
+      const workflow = await this.planWorkflow(client, task);
+      if (workflow && project.role !== 'owner') {
+        await this.projects.access(actor.id, projectId, { owner: true }, client);
+      }
       const pending = (task.decisions ?? []).filter(({ answer }) => !answer);
-      if (task.archivedAt || !['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)
-        || !pending.length || answers.length !== pending.length) {
+      const statuses = workflow ? ['PLANNING', 'FAILED'] : ['WAITING_APPROVAL', 'READY', 'FAILED'];
+      if (task.archivedAt || !statuses.includes(task.status)
+        || !pending.length || !answers.length || (!workflow && answers.length !== pending.length)) {
         throw new ConflictException('Task decisions changed or cannot be submitted');
       }
       const byId = new Map(answers.map((entry) => {
         const { id, answer } = objectInput(entry);
         return [textInput(id, 'decision ID', 100), textInput(answer, 'decision answer', 1000)];
       }));
-      if (pending.some(({ id }) => !byId.has(id))) throw new ConflictException('Task decisions changed');
+      const pendingIds = new Set(pending.map(({ id }) => id));
+      if (byId.size !== answers.length || [...byId.keys()].some((key) => !pendingIds.has(key))) {
+        throw new ConflictException('Task decisions changed');
+      }
       const decisions = (task.decisions ?? []).map((item) => ({ ...item, answer: byId.get(item.id) ?? item.answer }));
+      if (workflow) {
+        const reviewers = pending.filter(({ id }) => byId.has(id)).flatMap((item) => item.reviewers
+          ?? (workflow.proposal?.design ? ['ARCHITECT', 'UI_UX_DESIGNER'] as const : ['ARCHITECT'] as const));
+        workflow.questions = decisions;
+        workflow.affected = [...new Set([...workflow.affected, ...reviewers])];
+        const resume = (workflow.queue.length === 0 || task.status === 'FAILED')
+          && !workflow.blockers?.length && decisions.every(({ answer }) => answer);
+        if (resume) {
+          workflow.queue = ['revise'];
+          delete workflow.proposal;
+          delete workflow.approvedVersion;
+          delete workflow.approvedTarget;
+          await client.query("UPDATE tasks SET status = 'PLANNING', approved_developer = NULL, updated_at = now() WHERE id = $1", [id]);
+          if (task.status !== 'PLANNING') {
+            await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to: 'PLANNING' });
+          }
+        }
+        await client.query(
+          `UPDATE task_agent_plans SET input = jsonb_set(input, '{workflow}', $2::jsonb),
+           state = CASE WHEN $3 THEN 'queued' ELSE state END, error = CASE WHEN $3 THEN NULL ELSE error END,
+           updated_at = now() WHERE task_id = $1`, [id, workflow, resume]);
+        await this.event(client, task, 'task.decisions_submitted', {
+          actorId: actor.id, decisions, ...(task.executionFailure && { runId: task.executionFailure.runId }),
+        });
+        return;
+      }
       await client.query(
         `UPDATE tasks SET status = 'WAITING_APPROVAL', updated_at = now(), approved_developer = NULL
          WHERE project_id = $1 AND id = $2`, [projectId, id]);
@@ -315,12 +373,23 @@ export class TasksService {
     });
   }
 
+  async planWorkflow(client: PoolClient, task: Task) {
+    const { rows: [row] } = await client.query<{ workflow: PlanWorkflow | null }>(
+      "SELECT input->'workflow' AS workflow FROM task_agent_plans WHERE project_id = $1 AND task_id = $2 AND state <> 'cancelled'",
+      [task.projectId, task.id]);
+    return row?.workflow;
+  }
+
   async plannedDevelopment(client: PoolClient, task: Task) {
     const { rows: [planned] } = await client.query<{
       plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null; requirement: RequirementContent | null;
       knowledge: KnowledgeSnapshot[] | null;
+      proposal: PlanWorkflow['proposal'] | null; approvedVersion: string | null; approvedTarget: PlanWorkflow['approvedTarget'] | null;
     }>(
-      `SELECT steps->2->'output' AS plan, assignments->(steps->2->'output'->>'developer') AS agent,
+      `SELECT COALESCE(input->'workflow'->'proposal'->'architecture', steps->2->'output') AS plan,
+         assignments->(COALESCE(input->'workflow'->'proposal'->'architecture', steps->2->'output')->>'developer') AS agent,
+         input->'workflow'->'proposal' AS proposal, input->'workflow'->>'approvedVersion' AS "approvedVersion",
+         input->'workflow'->'approvedTarget' AS "approvedTarget",
          assignments->'QA_ENGINEER' AS qa,
          CASE WHEN input ? 'requirement' THEN jsonb_build_object(
            'title', input->'requirement'->>'title', 'excerpt', input->'requirement'->>'excerpt'
@@ -392,9 +461,10 @@ export class TasksService {
   }
 
   private async hasActiveAgentPlan(client: PoolClient, task: Task) {
-    if (task.status !== 'PLANNING') return false;
     const plan = await client.query(
-      "SELECT 1 FROM task_agent_plans WHERE task_id = $1 AND state IN ('queued','running','failed')", [task.id]);
+      `SELECT 1 FROM task_agent_plans WHERE task_id = $1
+       AND (state IN ('queued','running','failed') OR ($2 AND state = 'completed' AND input ? 'workflow'))`,
+      [task.id, task.status === 'REJECTED']);
     return Boolean(plan.rowCount);
   }
 }

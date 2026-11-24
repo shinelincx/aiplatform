@@ -17,7 +17,31 @@ export type AgentRole = keyof typeof agentRoleLabels;
 export const developerRoles = ['FRONTEND_DEVELOPER', 'BACKEND_DEVELOPER'] as const;
 export type DeveloperRole = (typeof developerRoles)[number];
 export const planningRoles = ['PROJECT_DIRECTOR', 'PRODUCT_MANAGER', 'ARCHITECT'] as const;
-export type PlanningRole = (typeof planningRoles)[number];
+export type PlanningRole = (typeof planningRoles)[number] | 'UI_UX_DESIGNER';
+export type PlanReviewer = 'ARCHITECT' | 'UI_UX_DESIGNER';
+
+export interface PlanReview {
+  findings: string[];
+  evidence: string[];
+  blockers: string[];
+  assumptions: string[];
+  decisions: (DecisionQuestion & { impact: string; reviewers: PlanReviewer[] })[];
+}
+
+export interface DesignPlan {
+  design: string[];
+  review: PlanReview;
+}
+
+export interface ApprovedAgentPlan {
+  version: string;
+  repository: string;
+  branch: string;
+  commit: string;
+  product: ProductPlan;
+  architecture: ArchitecturePlan;
+  design?: DesignPlan;
+}
 
 export interface SkillEvaluation {
   result: 'passed' | 'failed';
@@ -85,12 +109,17 @@ export interface AgentAssignment {
 export interface DirectorPlan {
   objective: string;
   constraints: string[];
+  decisions?: PlanReview['decisions'];
 }
 export interface ProductPlan {
   title: string;
   userStory: string;
   requirements: string[];
   acceptanceCriteria: string[];
+  needsDesign?: boolean;
+  evidenceSearchTerms?: string[];
+  affectedReviewers?: PlanReviewer[];
+  decisions?: PlanReview['decisions'];
 }
 export interface ArchitecturePlan {
   developer: DeveloperRole;
@@ -98,8 +127,9 @@ export interface ArchitecturePlan {
   risks: string[];
   testApproach: string[];
   decisions?: DecisionQuestion[];
+  review?: PlanReview;
 }
-export type PlanningOutput = DirectorPlan | ProductPlan | ArchitecturePlan;
+export type PlanningOutput = DirectorPlan | ProductPlan | ArchitecturePlan | DesignPlan;
 
 export const planningFailureMessages = {
   network: { label: '网络连接失败或超时', hint: '检查 API 容器的出站连接、DNS 和代理路径，确认可连接模型服务后重试。' },
@@ -121,9 +151,13 @@ export interface AgentPlan {
   taskId: string;
   state: 'queued' | 'running' | 'failed' | 'completed' | 'cancelled';
   stage: PlanningRole | null;
-  steps: { role: PlanningRole; version: number; model: string; output: PlanningOutput }[];
+  steps: { role: PlanningRole; version: number; model: string; output: PlanningOutput; phase?: string }[];
   error: string | null;
   failureCategory?: PlanningFailureCategory;
+  reviewStatus?: 'reviewing' | 'waiting_decisions' | 'waiting_evidence' | 'revising' | 'ready';
+  blockers?: string[];
+  proposal?: ApprovedAgentPlan;
+  approvedVersion?: string;
   requirement?: ProjectRequirement;
   knowledge?: KnowledgeSnapshot[];
 }

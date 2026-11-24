@@ -216,28 +216,37 @@ const planStates: Record<AgentPlan['state'], string> = {
 const fieldLabels: Record<string, string> = {
   objective: '目标', constraints: '约束与待确认事项', title: '标题', userStory: '用户故事',
   requirements: '需求', acceptanceCriteria: '验收条件', developer: '开发角色',
-  steps: '实施步骤', risks: '风险', testApproach: '验证思路',
+  steps: '实施步骤', risks: '风险', testApproach: '验证思路', design: '设计结论',
 };
 
-export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
-  projectId: string; plan: AgentPlan; canRetry: boolean; showDiagnosis: boolean;
+const reviewStates = {
+  reviewing: '正在评审', waiting_decisions: '待人工决策', waiting_evidence: '缺少评审证据',
+  revising: '正在修订与复核', ready: '可送审',
+} as const;
+
+export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagnosis }: {
+  projectId: string; plan: AgentPlan; canRetry: boolean; canRefresh: boolean; showDiagnosis: boolean;
 }) {
   const diagnosis = showDiagnosis && plan.state === 'failed' && plan.error === 'planning_step_failed'
     ? planningFailureMessages[isPlanningFailureCategory(plan.failureCategory) ? plan.failureCategory : 'unknown']
     : null;
+  const stages = plan.stage === 'UI_UX_DESIGNER' || plan.steps.some(({ role }) => role === 'UI_UX_DESIGNER')
+    ? [...planningRoles, 'UI_UX_DESIGNER' as const] : planningRoles;
+  const proposal = plan.proposal;
   return (
     <section aria-labelledby="agent-plan-heading" className="plan-block task-detail__card">
       <header className="plan-head">
         <h4 id="agent-plan-heading">Agent 规划</h4>
-        <span className="badge" data-status={plan.state}>{planStates[plan.state]}</span>
+        <span className="badge" data-status={plan.state}>{plan.approvedVersion ? '版本已批准'
+          : plan.reviewStatus && plan.error !== 'planning_step_failed' ? reviewStates[plan.reviewStatus] : planStates[plan.state]}</span>
       </header>
       <ol className="plan-stages" aria-label="Agent 规划阶段">
-        {planningRoles.map((role) => {
+        {stages.map((role) => {
           const complete = plan.steps.some((step) => step.role === role);
-          const current = !complete && plan.stage === role && plan.state !== 'cancelled';
-          return <li key={role} data-state={complete ? 'completed' : current ? plan.state : 'waiting'}
+          const current = plan.stage === role && plan.state !== 'cancelled';
+          return <li key={role} data-state={current ? plan.state : complete ? 'completed' : 'waiting'}
             aria-current={current ? 'step' : undefined}><strong>{agentRoleLabels[role]}</strong>
-            <small>{complete ? '已生成' : current ? planStates[plan.state] : '等待'}</small></li>;
+            <small>{current ? planStates[plan.state] : complete ? '已生成' : '等待'}</small></li>;
         })}
       </ol>
       {plan.requirement && <>
@@ -259,15 +268,27 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
             <p className="description">{version.excerpt}</p>
           </li>)}</ul>
         </details>}
-      {plan.state === 'failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}
-      {plan.state === 'failed' && canRetry && <form action={retryAgentPlan}>
+      {plan.reviewStatus === 'waiting_decisions' && <p><a href="#task-decisions">查看待人工决策</a></p>}
+      {Boolean(plan.blockers?.length) && <ul className="warning-text">{plan.blockers?.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>}
+      {proposal && <div className="description">
+        <h5>送审方案 · {proposal.version.slice(0, 8)}</h5>
+        <small>{proposal.repository} · {proposal.branch} · <code>{proposal.commit.slice(0, 12)}</code></small>
+        <p>{proposal.product.userStory}</p>
+        <h6>需求范围</h6><ul>{proposal.product.requirements.map((item, index) => <li key={index}>{item}</li>)}</ul>
+        <h6>实施步骤</h6><ol>{proposal.architecture.steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
+        {proposal.design && <><h6>设计结论</h6><ul>{proposal.design.design.map((item, index) => <li key={index}>{item}</li>)}</ul></>}
+        <h6>验收条件</h6><ol>{proposal.product.acceptanceCriteria.map((item, index) => <li key={index}>{item}</li>)}</ol>
+      </div>}
+      {plan.state === 'failed' && plan.error === 'planning_step_failed' && <p>当前阶段未生成可用结果。重试将从该阶段继续。</p>}
+      {((plan.state === 'failed' && canRetry && plan.error !== 'pending_review_decisions') || (proposal && canRefresh))
+        && <form action={retryAgentPlan}>
         <input type="hidden" name="projectId" value={projectId} />
         <input type="hidden" name="taskId" value={plan.taskId} />
-        <SubmitButton pendingLabel="正在重试…">重试规划</SubmitButton>
+        <SubmitButton pendingLabel="正在重新规划…">{proposal ? '刷新仓库证据并重新规划' : '重试规划'}</SubmitButton>
       </form>}
-      {plan.steps.map(({ role, version, model, output }) => (
-        <details key={role} open={role === 'ARCHITECT'}>
-          <summary>{agentRoleLabels[role]} · v{version} · {model}</summary>
+      {plan.steps.map(({ role, version, model, output, phase }, index) => (
+        <details key={`${role}:${index}`} open={!proposal && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')}>
+          <summary>{agentRoleLabels[role]}{phase === 'revise' ? ' · 修订' : phase === 'coordinate' ? ' · 协调' : phase?.endsWith('_review') ? ' · 复核' : ''} · v{version} · {model}</summary>
           <dl>
             {Object.entries(output).filter(([field]) => Object.hasOwn(fieldLabels, field)).map(([field, value]) => (
               <div key={field}>
@@ -277,6 +298,13 @@ export function PlanProgress({ projectId, plan, canRetry, showDiagnosis }: {
               </div>
             ))}
           </dl>
+          {'review' in output && output.review && <dl>
+            {Object.entries({ 评审发现: output.review.findings, 证据位置: output.review.evidence,
+              关键证据缺口: output.review.blockers, 假设与验证: output.review.assumptions })
+              .filter(([, items]) => items.length > 0).map(([label, items]) => <div key={label}>
+                <dt><strong>{label}</strong></dt><dd><ul>{items.map((item, i) => <li key={i}>{item}</li>)}</ul></dd>
+              </div>)}
+          </dl>}
         </details>
       ))}
     </section>
