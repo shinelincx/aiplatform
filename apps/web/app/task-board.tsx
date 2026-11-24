@@ -2,14 +2,19 @@
 
 import Link from 'next/link';
 import { useEffect, useId, useRef, useState } from 'react';
-import { taskPriorities, type Task, type TaskPriority } from '@ado/shared';
+import { taskPriorities, type Task, type TaskPriority, type TaskStatus } from '@ado/shared';
 import { Icon } from './icons';
-import { laneForStatus, taskLanes, workspaceHref, type TaskLane } from './workspace';
+import { laneForStatus, taskLanes, taskStatusLabels, workspaceHref, type TaskLane } from './workspace';
 
-type BoardTask = Pick<Task, 'id' | 'code' | 'title' | 'priority' | 'status' | 'archivedAt' | 'createdAt'> & {
+type BoardTask = Pick<Task, 'id' | 'code' | 'title' | 'archivedAt' | 'createdAt'> & {
+  priority?: string | null;
+  status?: string | null;
   failure?: string | null;
   pending?: number;
 };
+
+const uncategorizedLane = { id: 'uncategorized', label: '未归类任务', caption: null, tone: 'mute' } as const;
+type BoardLane = TaskLane | typeof uncategorizedLane.id;
 
 const titleSegmenter = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' });
 const boardDate = new Intl.DateTimeFormat('sv-SE', {
@@ -23,7 +28,7 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
   const [query, setQuery] = useState('');
   const [priority, setPriority] = useState<TaskPriority | ''>('');
   const [showArchived, setShowArchived] = useState(false);
-  const [collapsed, setCollapsed] = useState<Partial<Record<TaskLane, boolean>>>({});
+  const [collapsed, setCollapsed] = useState<Partial<Record<BoardLane, boolean>>>({});
   const boardId = useId();
   const currentYear = boardDate.format(new Date()).slice(0, 4);
   const board = useRef<HTMLDivElement>(null);
@@ -31,6 +36,15 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
   const filtered = items.filter((task) => (showArchived || !task.archivedAt)
     && (!priority || task.priority === priority)
     && (!keyword || task.title.toLowerCase().includes(keyword) || task.code.toLowerCase().includes(keyword)));
+  const grouped = new Map<TaskLane, BoardTask[]>(taskLanes.map(({ id }) => [id, []]));
+  const uncategorized: BoardTask[] = [];
+  for (const task of filtered) {
+    const { status } = task;
+    const target = typeof status === 'string' && Object.hasOwn(laneForStatus, status)
+      ? grouped.get(laneForStatus[status as TaskStatus]) : undefined;
+    (target ?? uncategorized).push(task);
+  }
+  const columns = uncategorized.length ? [...taskLanes, uncategorizedLane] : taskLanes;
 
   useEffect(() => {
     board.current?.querySelector<HTMLElement>('[data-highlighted="true"]')?.scrollIntoView({ block: 'nearest' });
@@ -54,13 +68,14 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
       </Link>}
     </div>
     <div className="board" ref={board} role="region" aria-label="任务看板各阶段">
-      {taskLanes.map((column) => {
-        const tasks = filtered.filter(({ status }) => laneForStatus[status] === column.id);
+      {columns.map((column) => {
+        const tasks = column.id === uncategorizedLane.id ? uncategorized : grouped.get(column.id) ?? [];
         const expanded = !collapsed[column.id];
         const listId = `${boardId}-${column.id}`;
         return <section className="lane" key={column.id} data-tone={column.tone} data-highlighted={lane === column.id}>
           <header className="lane__head">
-            <span className="lane__dot" aria-hidden="true" /><h2>{column.label}</h2><small>{column.caption}</small><b>{tasks.length}</b>
+            <span className="lane__dot" aria-hidden="true" /><h2>{column.label}</h2>
+            {column.caption && <small>{column.caption}</small>}<b>{tasks.length}</b>
             <button type="button" className="lane__toggle" aria-expanded={expanded} aria-controls={listId}
               aria-label={`${expanded ? '收缩' : '展开'}${column.label}`}
               onClick={() => setCollapsed((previous) => ({ ...previous, [column.id]: !previous[column.id] }))}>
@@ -69,6 +84,9 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
           </header>
           <div className="lane__body" id={listId} hidden={!expanded}>
             {tasks.map((task) => {
+              const { status } = task;
+              const statusLabel = typeof status === 'string' && Object.hasOwn(taskStatusLabels, status)
+                ? taskStatusLabels[status as TaskStatus] : status || '—';
               const cutoff = [...titleSegmenter.segment(task.title)][20]?.index;
               const createdAt = boardDate.format(new Date(task.createdAt));
               return <Link className="tcard" key={task.id}
@@ -76,6 +94,10 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
                 <h3 title={cutoff === undefined ? undefined : task.title}>
                   {cutoff === undefined ? task.title : `${task.title.slice(0, cutoff)}…`}
                 </h3>
+                <div className="tcard__metadata">
+                  <span>优先级：{task.priority || '—'}</span>
+                  <span>状态：{statusLabel}</span>
+                </div>
                 <time dateTime={task.createdAt}>{createdAt.slice(0, 4) === currentYear ? createdAt.slice(5) : createdAt}</time>
                 {task.failure && <p className="tcard__reason">{task.failure}</p>}
                 {!!task.pending && <p className="tcard__reason warning-text">{task.pending} 项待人工确认</p>}
