@@ -148,7 +148,7 @@ export const openAIPlanningModel: PlanningModel = {
   available: responsesConfigured,
   defaultModel: () => process.env.ADO_AGENT_MODEL?.trim() ?? '',
   async generate(role, agent, input) {
-    const context = input as { phase?: string; availableDevelopers?: string[]; repositoryEvidence?: { files: { path: string }[] } };
+    const context = input as { phase?: string; advisory?: boolean; availableDevelopers?: string[]; repositoryEvidence?: { files: { path: string }[] } };
     const paths = context.repositoryEvidence?.files.map(({ path }) => path) ?? [];
     const review = paths.length ? shape({ ...reviewProperties.properties, evidence: { type: 'array', items: { type: 'string', enum: paths } } })
       : reviewProperties;
@@ -161,13 +161,15 @@ export const openAIPlanningModel: PlanningModel = {
       'Do not claim to have inspected any content outside the supplied repository excerpts and approved project knowledge.',
       'In draft, include up to twelve short English code-search terms or likely file names in evidenceSearchTerms even when the request is in another language. A suggested search term is not a claim of repository knowledge.',
       'Director and product draft questions are investigation prompts. Before presenting them to an owner, reviewers must check available evidence. Resolve facts the code can answer and routine choices that can use an existing UI or engineering convention.',
-      'In coordinate, return only distinct decisions still requiring owner selection after relevant reviews. Drop evidence-resolved questions and merge affected reviewers for duplicate topics. If evidence and existing conventions resolve the candidates, return an empty decisions array.',
+      context.advisory
+        ? 'This is an advisory deliverable. Present feasible alternatives and a recommendation before asking for confirmation. In coordinate use decisions for distinct viable alternatives, or for owner choices that affect them. Explain trade-offs and what each evidence gap prevents confirming. Preserve useful conditional options. Do not treat the recommendation as an owner answer.'
+        : 'In coordinate, return only distinct decisions still requiring owner selection after relevant reviews. Drop evidence-resolved questions and merge affected reviewers for duplicate topics. If evidence and existing conventions resolve the candidates, return an empty decisions array.',
       'Do not copy private planning workflow instructions into the product requirements. Limit each list to twelve entries and each line to 500 characters. Use at most eight questions with two to four distinct options each, each option at most 250 characters.',
       'Use phase to identify the work requested. The product draft is shared by the reviewers. In revise, incorporate relevant reviews and each recorded human answer into requirements and testable acceptance criteria, and name the reviewers materially affected.',
       'Use needsDesign for changes to user flows, interactions, interface states or design rules. A small repair restoring an existing rule with no interaction or state changes can skip design review.',
       'Reviewers must cite exact paths of supplied files read. Name the missing path or symbol when possible. Record missing evidence as a blocker only where it materially affects scope, permission, feasibility or acceptance. Put minor uncertainties with their verification method in assumptions.',
       'For required human decisions, give distinct options with the recommendation first, explain impact, and identify the affected reviewer roles. While a decision is open, work on independent parts and defer dependent conclusions.',
-      'In *_review phases, check the revised draft against the evidence and recorded answers and update the executable steps or design.',
+      'In *_review phases, check the portions affected by the recorded answers, retain reviewed findings and evidence gaps outside that scope, and update the relevant steps or design.',
       'Use the approved requirement excerpt and selected project knowledge when provided. Flag conflicts or unspecified behavior for human review.',
       ...(role === 'ARCHITECT' ? [
         Object.hasOwn(input, 'phase')

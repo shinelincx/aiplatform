@@ -17,6 +17,7 @@ const tabOrder = Object.keys(tabs) as TaskDetailTab[];
 const tabForHash: Record<string, TaskDetailTab> = {
   '#task-summary': 'summary',
   '#task-plan': 'plan',
+  '#plan-decisions': 'plan',
   '#task-decisions': 'execution',
   '#execution-heading': 'execution',
   '#task-events': 'activity',

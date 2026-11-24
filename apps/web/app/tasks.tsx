@@ -37,6 +37,8 @@ const eventLabels: Record<string, string> = {
   'agent.model_usage': '模型用量', 'agent.step_completed': '规划步骤完成',
   'agent.plan_version_ready': '方案版本可送审', 'agent.plan_version_approved': '方案版本已批准',
   'agent.plan_failed': '规划失败', 'agent.plan_cancelled': '规划取消',
+  'agent.plan_checkpoint': '已保留上次规划记录', 'agent.plan_retried': '继续规划',
+  'agent.plan_advisory_ready': '可选方案已生成', 'agent.plan_waiting_input': '规划等待补充信息',
 };
 
 function eventStatus(value: unknown): value is TaskStatus {
@@ -139,7 +141,8 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const pendingDecisions = task?.decisions?.filter(({ answer }) => !answer) ?? [];
   const confirmedDecisions = task?.decisions?.filter(({ answer }) => Boolean(answer)) ?? [];
   const failure = task && taskFailureLabel(task);
-  const managedPlan = plan && ['queued', 'running', 'failed'].includes(plan.state);
+  const managedPlan = plan && (['queued', 'running', 'failed'].includes(plan.state)
+    || (task?.status === 'PLANNING' && plan.reviewStatus && !plan.proposal));
   const chooseDeveloper = manageRequirements && task?.status === 'WAITING_APPROVAL' && plan?.state !== 'completed';
   const registry = chooseDeveloper ? await readSection<AgentRegistry>(`/projects/${project.id}/agent-registry`,
     data => Array.isArray(data.agents)) : null;
@@ -172,7 +175,40 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const canStopQa = latestRun && project.role === 'owner' && project.status === 'active' && task?.status === 'TESTING'
     && latestRun.qa && ['queued', 'running', 'failed'].includes(latestRun.qa.state);
   const stopTitle = canStopRun ? '取消执行' : '取消任务';
-  const initialTab: TaskDetailTab = pendingDecisions.length || (task && ['READY', 'QUEUED', 'RUNNING', 'RETRYING', 'TESTING', 'REVIEW',
+  const inPlanning = Boolean(plan?.reviewStatus && task?.status === 'PLANNING');
+  const decisionCard = task && (pendingDecisions.length > 0 || confirmedDecisions.length > 0) &&
+  <section id={inPlanning ? "plan-decisions" : "task-decisions"} className="task-detail__card decision-review" aria-labelledby="decision-heading">
+    <h4 id="decision-heading">{pendingDecisions.length ? plan?.advisory ? '可选方案' : '待人工确认' : '已记录的人工决策'}</h4>
+    {confirmedDecisions.length > 0 && <dl className="decision-answers">{confirmedDecisions.map(({ id, question, answer }) =>
+      <div key={id}><dt>{question}</dt><dd>{answer}</dd></div>)}</dl>}
+    {pendingDecisions.length > 0 && <>
+      <p className="warning-text">{plan?.reviewStatus ? '提交决定后，规划 Agent 将修订方案并复核受影响的内容。'
+        : '请明确以下事项并送审。项目所有者批准后才能派发。'}</p>
+      {(plan?.reviewStatus ? manageRequirements && ['PLANNING', 'FAILED'].includes(task.status)
+          && (!plan.advisory || plan.reviewStatus === 'advisory_ready')
+        : canWrite && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)) && !task.archivedAt
+        ? <form action={submitTaskDecisions} className="fields">
+          {taskIdentity}
+          {inPlanning && <input type="hidden" name="decisionView" value="plan" />}
+          {pendingDecisions.map(({ id, question, options, impact }, index) => <div className="decision-question" key={id}>
+            <label>{question}
+              <input name={`decision:${id}`} list={`decision-options-${index}`}
+                aria-describedby={`decision-recommendation-${index}`} autoComplete="off"
+                placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required={!plan?.reviewStatus} />
+            </label>
+            <datalist id={`decision-options-${index}`}>{options.map((option) => <option key={option} value={option} />)}</datalist>
+            <p className="muted" id={`decision-recommendation-${index}`}>推荐 · {options[0]}</p>
+            {impact && <p className="muted">{impact}</p>}
+            <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul>
+          </div>)}
+          <div className="form-actions"><SubmitButton pendingLabel="正在提交…">{plan?.reviewStatus ? '提交并复核' : '补充决策并重新送审'}</SubmitButton></div>
+        </form>
+        : <ul>{pendingDecisions.map(({ id, question, options, impact }) =>
+          <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p>{impact && <p>{impact}</p>}
+            <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul></li>)}</ul>}
+    </>}
+  </section>;
+  const initialTab: TaskDetailTab = inPlanning ? 'plan' : pendingDecisions.length || (task && ['READY', 'QUEUED', 'RUNNING', 'RETRYING', 'TESTING', 'REVIEW',
     'FAILED', 'TIMEOUT', 'BLOCKED', 'REJECTED', 'MERGED', 'COMPLETED'].includes(task.status)) ? 'execution'
     : plan && task && ['PLANNING', 'WAITING_APPROVAL'].includes(task.status) ? 'plan' : 'summary';
 
@@ -344,42 +380,14 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
                   canRetry={canWrite && !task.archivedAt && task.status === 'PLANNING'}
                   canRefresh={manageRequirements && !task.archivedAt && ['WAITING_APPROVAL', 'READY', 'FAILED', 'REJECTED', 'TIMEOUT'].includes(task.status)} />
                   : <p className="task-detail__empty">此任务暂无 Agent 规划。</p>}
+              {inPlanning && decisionCard}
             </div>,
             execution: <div className="execution-block">
               {failure && <p className="feedback" role="status"><strong>执行结果</strong> · {failure}</p>}
-              {(pendingDecisions.length > 0 || confirmedDecisions.length > 0) &&
-                <section id="task-decisions" className="task-detail__card decision-review" aria-labelledby="decision-heading">
-                  <h4 id="decision-heading">{pendingDecisions.length ? '待人工确认' : '已记录的人工决策'}</h4>
-                  {confirmedDecisions.length > 0 && <dl className="decision-answers">{confirmedDecisions.map(({ id, question, answer }) =>
-                    <div key={id}><dt>{question}</dt><dd>{answer}</dd></div>)}</dl>}
-                  {pendingDecisions.length > 0 && <>
-                    <p className="warning-text">{plan?.reviewStatus ? '提交决定后，规划 Agent 将修订方案并复核受影响的内容。'
-                      : '请明确以下事项并送审。项目所有者批准后才能派发。'}</p>
-                    {(plan?.reviewStatus ? manageRequirements && ['PLANNING', 'FAILED'].includes(task.status)
-                      : canWrite && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)) && !task.archivedAt
-                      ? <form action={submitTaskDecisions} className="fields">
-                        {taskIdentity}
-                        {pendingDecisions.map(({ id, question, options, impact }, index) => <div className="decision-question" key={id}>
-                          <label>{question}
-                            <input name={`decision:${id}`} list={`decision-options-${index}`}
-                              aria-describedby={`decision-recommendation-${index}`} autoComplete="off"
-                              placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required={!plan?.reviewStatus} />
-                          </label>
-                          <datalist id={`decision-options-${index}`}>{options.map((option) => <option key={option} value={option} />)}</datalist>
-                          <p className="muted" id={`decision-recommendation-${index}`}>推荐 · {options[0]}</p>
-                          {impact && <p className="muted">{impact}</p>}
-                          <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul>
-                        </div>)}
-                        <div className="form-actions"><SubmitButton pendingLabel="正在提交…">{plan?.reviewStatus ? '提交决定' : '补充决策并重新送审'}</SubmitButton></div>
-                      </form>
-                      : <ul>{pendingDecisions.map(({ id, question, options, impact }) =>
-                        <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p>{impact && <p>{impact}</p>}
-                          <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul></li>)}</ul>}
-                  </>}
-                </section>}
+              {!inPlanning && decisionCard}
               <Executions project={project} task={task} runsResult={runsResult}
                 checks={boundRepository?.checks ?? []} independentChecks={boundRepository?.independentChecks ?? []}
-                autoDraftPr={boundRepository?.autoDraftPr === true} planned={plan?.state === 'completed'} approvals={approvals} />
+                autoDraftPr={boundRepository?.autoDraftPr === true} planned={plan?.state === 'completed' && (!plan.reviewStatus || Boolean(plan.proposal))} approvals={approvals} />
             </div>,
             activity: <div id="task-events">
               {eventResult?.issue ? <SectionReadError label="任务活动" issue={eventResult.issue} />
