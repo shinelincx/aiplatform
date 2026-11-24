@@ -1,4 +1,7 @@
 export const issues: Record<string, string> = {
+  'staging-release-decision': '无法提交发布审批。请检查工作流配置和审批意见，驳回时须填写原因。',
+  'staging-release-conflict': '此版本已被处理，或已不再是 main 的最新版本。请刷新后核对。',
+  'staging-release-dispatch': '批准已保存，GitHub 尚未确认收到部署请求。可在审批单中重新触发。',
   'agent-skill-binding': '无法启用此配置。请确认项目未归档，所绑定的 Skill 版本可用。',
   'quality-gate': '必需检查尚未通过。请打开当前归档的质量门禁查看缺项。',
   login: '登录失败，请检查邮箱和密码。',
@@ -47,6 +50,8 @@ export const issues: Record<string, string> = {
 };
 
 export const notices: Record<string, string> = {
+  'staging-release-approved': '部署请求已提交，可在此处查看进度。',
+  'staging-release-rejected': '发布审批已驳回。',
   'task-created': '研发任务已创建。',
   'task-transitioned': '任务状态已更新。',
   'execution-requested': '已提交派发请求，请查看执行状态。',

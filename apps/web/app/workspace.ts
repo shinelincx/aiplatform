@@ -5,6 +5,7 @@ export const settingsViews = [
   { id: 'account', icon: 'agents', label: '我的账号', adminOnly: false },
   { id: 'projects', icon: 'layers', label: '项目目录', adminOnly: true },
   { id: 'accounts', icon: 'shield', label: '账号管理', adminOnly: true },
+  { id: 'staging-releases', icon: 'tasks', label: '系统任务', adminOnly: true },
 ] as const;
 export const themeCookie = 'ado_theme';
 

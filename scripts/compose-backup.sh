@@ -17,6 +17,10 @@ directory=$3
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$repo"
 compose=(docker compose --project-name "$project")
+if [[ -n ${ADO_COMPOSE_WRAPPER:-} ]]; then
+  [[ $operation == backup && $project == ado-staging && $ADO_COMPOSE_WRAPPER == /* ]] || fail "Invalid staging backup launcher"
+  compose=("$ADO_COMPOSE_WRAPPER")
+fi
 storage_volume="${project}_s3data"
 archive_image=postgres:16-alpine
 
@@ -82,6 +86,7 @@ restore() {
   "${compose[@]}" exec -T postgres pg_restore --exit-on-error --single-transaction \
     --no-owner --no-privileges --username=ado --dbname=ado < "$directory/database.dump"
   ADO_BOOTSTRAP_EMAIL= ADO_BOOTSTRAP_PASSWORD= ADO_AGENT_API_KEY= GITHUB_APP_ID= GITHUB_APP_PRIVATE_KEY= GITHUB_WEBHOOK_SECRET= \
+    ADO_STAGING_RELEASE_SECRET= ADO_STAGING_WORKFLOW_TOKEN= \
     "${compose[@]}" up --no-build --wait --wait-timeout 180
   printf 'Restored Compose project %s\n' "$project"
 }

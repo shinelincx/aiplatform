@@ -155,6 +155,9 @@ export const runtimePermissions = `
     ado_private.worker_candidate(uuid, text, uuid), ado_private.expired_execution(), ado_private.planning_candidate(),
     ado_private.qa_candidate(), ado_private.delivery_candidate(), ado_private.auto_approval_candidate(), ado_private.webhook_project(bigint, bigint) TO ado_api;
   GRANT SELECT ON public.schema_migrations TO ado_api;
+  GRANT SELECT, INSERT ON public.staging_releases TO ado_api;
+  GRANT UPDATE (state, decided_by_id, decided_by, decided_at, note, deployment_run, deployment_attempt)
+    ON public.staging_releases TO ado_api;
   GRANT SELECT, INSERT ON public.users, public.audit_logs, public.task_events, public.project_agent_versions,
     public.execution_events, public.execution_reviews, public.execution_artifacts, public.github_webhook_deliveries TO ado_api;
   GRANT UPDATE (name, password_hash, system_role, status, updated_at) ON public.users TO ado_api;

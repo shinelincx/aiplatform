@@ -36,6 +36,7 @@ jobs:
       POSTGRES_PASSWORD: ci-local-database-owner-only
       ADO_DATABASE_PASSWORD: ci-local-database-api-only
       GITHUB_WEBHOOK_SECRET: ci-local-webhook-only
+      ADO_STAGING_RELEASE_SECRET: ci-local-staging-approval-secret-only
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -75,6 +76,8 @@ jobs:
           docker compose exec -T api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt \
             ADO_VERIFY_WEB_URL=https://gateway npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-agent-planning.mjs
           docker compose exec -T api npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-database-isolation.mjs
+          docker compose exec -T api env NODE_EXTRA_CA_CERTS=/tmp/ado-ci-tls.crt \
+            ADO_VERIFY_WEB_URL=https://gateway npm exec -- tsx --tsconfig apps/api/tsconfig.json scripts/verify-staging-release-approval.mjs
       - name: Verify staging outage detection and recovery
         run: |
           docker compose stop web
@@ -169,9 +172,33 @@ jobs:
           [[ "$image" =~ ^ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}$ ]]
           printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
 
-  deploy-staging:
+  plan-staging:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.STAGING_CD_ENABLED == 'true'
     needs: [publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      migration: ${{ steps.plan.outputs.migration }}
+    steps:
+      - if: vars.STAGING_MIGRATION_ENABLED == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          MIGRATION_ENABLED: ${{ vars.STAGING_MIGRATION_ENABLED }}
+          RELEASE_IMAGE: ${{ needs.publish.outputs.image }}
+          STAGING_RELEASE_SECRET: ${{ secrets.STAGING_RELEASE_SECRET }}
+        run: |
+          if [[ "$MIGRATION_ENABLED" == true ]]; then
+            bash scripts/request-staging-release.sh
+          else
+            printf 'migration=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-staging:
+    if: needs.plan-staging.outputs.migration == 'false'
+    needs: [publish, plan-staging]
     environment:
       name: staging
       url: https://ado.thinkfiter.com
@@ -183,30 +210,16 @@ jobs:
     permissions:
       packages: read
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ado-release-${{ github.sha }}
-      - env:
+          path: ${{ runner.temp }}/release
+      - working-directory: ${{ runner.temp }}/release
+        env:
+          RELEASE_SHA: ${{ github.sha }}
           RELEASE_IMAGE: ${{ needs.publish.outputs.image }}
           STAGING_KEY: ${{ secrets.STAGING_SSH_KEY }}
           STAGING_HOST_KEY: ${{ vars.STAGING_SSH_HOST_KEY }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          [[ "$RELEASE_IMAGE" =~ ^ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}$ ]]
-          sha256sum -c SHA256SUMS
-          read -r RELEASE_ARCHIVE_SHA _ < SHA256SUMS
-          RELEASE_ARCHIVE_SIZE=$(stat -c %s image.tar.gz)
-          export RELEASE_ARCHIVE_SHA RELEASE_ARCHIVE_SIZE
-          umask 077
-          printf '%s\n' "$STAGING_KEY" > "$RUNNER_TEMP/staging-key"
-          printf '%s\n' "$STAGING_HOST_KEY" > "$RUNNER_TEMP/staging-host"
-          trap 'rm -f "$RUNNER_TEMP/staging-key" "$RUNNER_TEMP/staging-host"' EXIT
-          {
-            jq -nc '{sha:env.GITHUB_SHA,image:env.RELEASE_IMAGE,user:env.GITHUB_ACTOR,token:env.GH_TOKEN,
-              archive_sha:env.RELEASE_ARCHIVE_SHA,archive_size:(env.RELEASE_ARCHIVE_SIZE | tonumber)}'
-            cat image.tar.gz
-          } |
-            ssh -T -i "$RUNNER_TEMP/staging-key" -o BatchMode=yes -o IdentitiesOnly=yes \
-              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$RUNNER_TEMP/staging-host" \
-              -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 root@ado.thinkfiter.com deploy-ado
+        run: bash "$GITHUB_WORKSPACE/scripts/send-staging-release.sh"

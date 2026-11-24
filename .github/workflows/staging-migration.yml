@@ -1,0 +1,92 @@
+
+name: Staging migration
+run-name: Staging migration for ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Approved main commit
+        required: true
+        type: string
+permissions:
+  contents: read
+
+env:
+  RELEASE_SHA: ${{ inputs.sha }}
+  RELEASE_URL: https://ado.thinkfiter.com/github/staging-releases
+
+jobs:
+  claim:
+    if: github.ref == 'refs/heads/main' && vars.STAGING_MIGRATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.approval.outputs.image }}
+      base: ${{ steps.approval.outputs.base }}
+    steps:
+      - id: approval
+        env:
+          STAGING_RELEASE_SECRET: ${{ secrets.STAGING_RELEASE_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[a-f0-9]{40}$ && "$RELEASE_SHA" == "$GITHUB_SHA" ]]
+          request=$(jq -nc '{run:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT}')
+          response=$(curl --fail --silent --show-error --retry 2 --max-time 15 \
+            --header "Authorization: Bearer $STAGING_RELEASE_SECRET" --json "$request" "$RELEASE_URL/$RELEASE_SHA/claim")
+          image=$(jq -er .image <<< "$response")
+          base=$(jq -er .baseSha <<< "$response")
+          [[ "$image" =~ ^ghcr\.io/shinelincx/aiplatform@sha256:[a-f0-9]{64}$ && "$base" =~ ^[a-f0-9]{40}$ ]]
+          printf 'image=%s\nbase=%s\n' "$image" "$base" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: claim
+    environment:
+      name: staging-migration
+      url: https://ado.thinkfiter.com
+    concurrency:
+      group: ado-staging-deploy
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Transfer and deploy approved image
+        env:
+          RELEASE_IMAGE: ${{ needs.claim.outputs.image }}
+          RELEASE_BASE_SHA: ${{ needs.claim.outputs.base }}
+          STAGING_KEY: ${{ secrets.STAGING_MIGRATION_SSH_KEY }}
+          STAGING_HOST_KEY: ${{ vars.STAGING_SSH_HOST_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d)
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker pull "$RELEASE_IMAGE"
+          test "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RELEASE_IMAGE")" = "$RELEASE_SHA"
+          local_image="ado-platform-release:$RELEASE_SHA"
+          docker tag "$RELEASE_IMAGE" "$local_image"
+          cd "$(mktemp -d)"
+          docker save "$local_image" | gzip -1 > image.tar.gz
+          sha256sum image.tar.gz > SHA256SUMS
+          bash "$GITHUB_WORKSPACE/scripts/send-staging-release.sh"
+
+  report:
+    if: always() && needs.claim.result == 'success'
+    needs: [claim, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RELEASE_STATE: ${{ needs.deploy.result == 'success' && 'succeeded' || 'failed' }}
+          STAGING_RELEASE_SECRET: ${{ secrets.STAGING_RELEASE_SECRET }}
+        run: |
+          set -euo pipefail
+          jq -nc '{run:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,state:env.RELEASE_STATE}' |
+            curl --fail --silent --show-error --retry 4 --retry-all-errors --max-time 15 \
+              --header "Authorization: Bearer $STAGING_RELEASE_SECRET" --json @- "$RELEASE_URL/$RELEASE_SHA/result"
