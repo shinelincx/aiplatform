@@ -81,7 +81,6 @@ function publishReviewedQuestions(workflow: PlanWorkflow, step: Step, candidates
     const roles = reviewers.length ? reviewers : ['ARCHITECT' as const];
     if (prior) {
       prior.reviewers = roles;
-      if (!prior.answer) Object.assign(prior, question, { reviewers: roles });
       if (prior.answer && !workflow.advisory) workflow.affected = [...new Set([...workflow.affected, ...roles])];
     } else {
       published.set(key, { ...question, id: existing.get(key)?.id ?? randomUUID(), reviewers: roles });
