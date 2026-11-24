@@ -94,8 +94,9 @@ export class StagingReleasesController {
     const number = Number(input(pull, pullPattern));
     const { rows: [release] } = await this.db.projectQuery<StagingReleaseStatus & Pick<ReleaseRow, 'sha' | 'deploymentAttempt'>>(projectId,
       `SELECT sha, ${statusColumns} FROM staging_releases WHERE $1 = ANY(pulls) AND EXISTS (
-         SELECT 1 FROM execution_deliveries d JOIN repositories r ON r.id = d.repository_id AND r.project_id = d.project_id
-         WHERE d.project_id = $2 AND d.pull_number = $1 AND r.github_repository_id = 1462649547
+         SELECT 1 FROM execution_deliveries d JOIN execution_runs e ON e.id = d.run_id
+         JOIN repositories r ON r.id = d.repository_id AND r.project_id = e.project_id
+         WHERE e.project_id = $2 AND d.pull_number = $1 AND r.github_repository_id = 1462649547
            AND d.base_branch = 'main' AND d.pull_state = 'merged'
        ) ORDER BY requested_at DESC, sha LIMIT 1`, [number, projectId],
     );

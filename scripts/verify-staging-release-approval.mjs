@@ -5,11 +5,13 @@ import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 import { AuthService } from '../apps/api/src/auth.ts';
 import { Database } from '../apps/api/src/database.ts';
+import { ProjectsService } from '../apps/api/src/projects.ts';
 import { StagingReleasesController } from '../apps/api/src/staging-releases.ts';
 
 const db = new Database();
 const auth = new AuthService(db);
-const approvals = new StagingReleasesController(db, auth, undefined);
+const projects = new ProjectsService(db, auth);
+const approvals = new StagingReleasesController(db, auth, projects);
 const githubFetch = globalThis.fetch;
 const gateway = process.env.ADO_VERIFY_WEB_URL;
 const gatewaySecret = process.env.ADO_STAGING_RELEASE_SECRET;
@@ -98,6 +100,36 @@ try {
   await approvals.claim(authorization, main, { run: '53', attempt: '1' });
   await approvals.result(authorization, main, { run: '53', attempt: '1', state: 'succeeded' });
   assert.equal((await stored(main)).state, 'succeeded');
+
+  const project = await projects.create(administrator, { code: 'RELEASE-' + sha.slice(0, 8), name: 'Release fixture' });
+  await assert.rejects(approvals.projectStatus(member, project.id, '25'), status(404));
+  assert.equal(await approvals.projectStatus(administrator, project.id, '25'), null);
+  await db.projectTransaction(project.id, async client => {
+    const { rows: [repository] } = await client.query(
+      `INSERT INTO repositories (project_id, github_repository_id, owner, repo_name, repository_url, default_branch, installation_id)
+       VALUES ($1, 1462649547, 'shinelincx', 'aiplatform', 'https://github.com/shinelincx/aiplatform', 'main', 1) RETURNING id`,
+      [project.id],
+    );
+    const { rows: [task] } = await client.query(
+      `INSERT INTO tasks (project_id, repository_id, task_code, title, description, priority, acceptance_criteria, created_by)
+       VALUES ($1, $2, 'RELEASE', 'Release fixture', '', 'P1', '[]', $3) RETURNING id`,
+      [project.id, repository.id, administrator.id],
+    );
+    const { rows: [run] } = await client.query(
+      "INSERT INTO execution_runs (project_id, task_id, repository_id, status) VALUES ($1, $2, $3, 'succeeded') RETURNING id",
+      [project.id, task.id, repository.id],
+    );
+    const patch = 'b'.repeat(64);
+    await client.query("INSERT INTO execution_artifacts (run_id, sha256, size, object_key) VALUES ($1, $2, 1, 'fixture')", [run.id, patch]);
+    await client.query(
+      `INSERT INTO execution_deliveries (run_id, repository_id, requested_by, patch_hash, base_commit, base_branch, branch,
+         state, pull_number, pull_state) VALUES ($1, $2, $3, $4, $5, 'main', 'ado/' || $1::uuid::text, 'published', 25, 'merged')`,
+      [run.id, repository.id, administrator.id, patch, baseSha],
+    );
+    await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'viewer')", [project.id, member.id]);
+  });
+  assert.equal((await approvals.projectStatus(member, project.id, '25')).state, 'succeeded');
+
   if (gateway) {
     const page = '/settings/staging-releases';
     const workflow = '/github/staging-releases';
