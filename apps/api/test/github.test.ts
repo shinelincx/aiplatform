@@ -1,3 +1,4 @@
+import { rankPlanningFiles } from '../src/github';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { GitHubApp } from '../src/github';
@@ -94,4 +95,14 @@ it('requests delivery-only permissions and recovers a draft creation after a los
   });
   expect(JSON.parse(String(mock.mock.calls[2][1]?.body))).toMatchObject({ head: branch, base: 'main', draft: true });
   expect(mock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(2);
+});
+
+it('selects actual task board source for a Chinese planning request', () => {
+  const entries = ['README.md', 'apps/api/src/agent-planning.ts', 'apps/api/src/artifacts.ts',
+    'apps/api/src/deliveries.ts', 'apps/api/src/execution-qa.ts', 'apps/web/app/task-board.tsx',
+    'apps/web/app/tasks.tsx', 'packages/shared/src/tasks.ts']
+    .map(path => ({ path, sha: 'a'.repeat(40), mode: '100644', size: 4200 }));
+  const paths = rankPlanningFiles(entries, '给任务看板 列表增加优先级和状态显示', ['task board', 'task list'])
+    .map(file => file.path);
+  expect(paths.slice(0, 2)).toEqual(['apps/web/app/task-board.tsx', 'apps/web/app/tasks.tsx']);
 });

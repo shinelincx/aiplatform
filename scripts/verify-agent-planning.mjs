@@ -99,9 +99,22 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] });
     }
     const policy = input.request === 'Confirm account policy';
+    const board = input.request === '给任务看板列表增加优先级和状态显示';
+    if (board && role === 'PROJECT_DIRECTOR') {
+      return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate' ? [] : [
+        { question: '任务是否已有优先级和状态字段？', options: ['复用字段', '新增字段'],
+          impact: '决定是否需要调整接口', reviewers: ['ARCHITECT'] },
+      ] });
+    }
+    if (role === 'PROJECT_DIRECTOR' && policy) {
+      const review = { ...plannedDecision, impact: 'Changes the account action and its access policy', reviewers: ['ARCHITECT'] };
+      return modelReply(agent, { ...outputs.PROJECT_DIRECTOR, decisions: input.phase === 'coordinate'
+        ? [review, { ...review, question: `${review.question} 此决定尚未作出。`, reviewers: ['UI_UX_DESIGNER'] }]
+        : [review] });
+    }
     const answers = input.humanDecisions?.flatMap(({ answer }) => answer ? [answer] : []) ?? [];
     if (role === 'PRODUCT_MANAGER') {
-      const design = input.request === 'Add a settings page' || policy;
+      const design = input.request === 'Add a settings page' || policy || board;
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, needsDesign: design,
         ...(answers.length && { requirements: answers, acceptanceCriteria: answers.map((answer) => `Verify: ${answer}`) }),
       });
@@ -559,6 +572,11 @@ try {
     assert(await planning.runNext(), `Expected to run ${role}`);
   }
   const decisionPath = `${prefix}/tasks/${decisionTaskId}`;
+  assert.deepEqual((await request(decisionPath, { token })).decisions, [],
+    'Candidate questions stay in planning until the evidence reviews finish');
+  assert.equal(await planning.runNext(), true, 'UI/UX reviews the same draft');
+  assert.deepEqual((await request(decisionPath, { token })).decisions, []);
+  assert.equal(await planning.runNext(), true, 'The Director reconciles evidence-backed decisions');
   let approvalVersion;
   const approve = (status = 200) => request(`${decisionPath}/transition`, {
     token, method: 'POST', body: { status: 'READY', planVersion: approvalVersion }, status,
@@ -568,14 +586,14 @@ try {
   assert.equal(planned.question, plannedDecision.question);
   assert.equal(planned.impact, 'Changes the account action and its access policy');
   assert.deepEqual(planned.options, plannedDecision.options);
+  assert.deepEqual(planned.reviewers, ['ARCHITECT', 'UI_UX_DESIGNER']);
+  assert.equal((await request(decisionPath, { token })).decisions.length, 1);
   assert.equal((await request(`${decisionPath}/agent-plan`, { token })).plan.reviewStatus, 'waiting_decisions');
   const submit = (answers, status = 204, session = token) => request(`${decisionPath}/decisions`, {
     token: session, method: 'POST', body: { answers }, status,
   });
   await submit([{ id: planned.id, answer: planned.options[0] }], 403, viewerToken);
   await submit([{ id: 'unknown', answer: planned.options[0] }], 409);
-  assert.equal(await planning.runNext(), true, 'Independent design review can continue while the decision is open');
-  assert.equal(await planning.runNext(), true, 'The Director coordinates before pausing dependent work');
   assert.equal(await planning.runNext(), false);
   const waiting = (await request(`${decisionPath}/agent-plan`, { token })).plan;
   assert(waiting.steps.some(({ role }) => role === 'UI_UX_DESIGNER'));
@@ -679,6 +697,18 @@ try {
   const backendProposal = (await request(`${evidencePath}/agent-plan`, { token })).plan.proposal;
   assert.equal(backendProposal.design, undefined);
   assert(backendProposal.architecture.review.assumptions.length);
+
+  const board = await planning.start(account, first.id, {
+    repositoryId: repo.id, request: '给任务看板列表增加优先级和状态显示',
+  });
+  const boardPath = `${prefix}/tasks/${board.taskId}`;
+  for (let index = 0; index < 6; index++) {
+    assert.equal(await planning.runNext(), true);
+    assert.deepEqual((await request(boardPath, { token })).decisions, []);
+  }
+  const { plan: boardPlan } = await request(`${boardPath}/agent-plan`, { token });
+  assert.equal(boardPlan.reviewStatus, 'ready', 'Evidence-resolved questions do not block approval');
+  assert(boardPlan.proposal.architecture.review.evidence.length && boardPlan.proposal.design.review.evidence.length);
 
   const { taskId: legacyTaskId } = await planning.start(account, first.id, { repositoryId: repo.id, request: 'Legacy account scope' });
   await db.projectQuery(first.id, "UPDATE task_agent_plans SET input = input - 'workflow' WHERE task_id = $1", [legacyTaskId]);

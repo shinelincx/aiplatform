@@ -117,6 +117,7 @@ export interface ProductPlan {
   requirements: string[];
   acceptanceCriteria: string[];
   needsDesign?: boolean;
+  evidenceSearchTerms?: string[];
   affectedReviewers?: PlanReviewer[];
   decisions?: PlanReview['decisions'];
 }

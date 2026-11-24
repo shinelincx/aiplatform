@@ -171,14 +171,15 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         || row.error === 'pending_review_decisions'))) throw new ConflictException('There is no plan to retry');
       if (!this.model.available()) throw new ServiceUnavailableException('Planning provider is unconfigured');
 
-      if (workflow && (refresh || row.error === 'review_evidence_missing')) {
+      const reviewerFailed = row.error === 'planning_step_failed' && ['ARCHITECT', 'UI_UX_DESIGNER'].includes(currentRole(row));
+      if (workflow && (refresh || row.error === 'review_evidence_missing' || reviewerFailed)) {
         const { rows: [binding] } = await client.query<{ branch: string }>(
           'SELECT default_branch AS branch FROM repositories WHERE project_id = $1 AND id = $2', [projectId, task.repositoryId]);
         if (!binding) throw new ConflictException('Project repository is no longer available');
         row.input.baseBranch = binding.branch;
         row.input.workflow = {
           ...newWorkflow({ ...workflow.source, branch: binding.branch }),
-          questions: task.decisions ?? workflow.questions,
+          questions: (task.decisions ?? workflow.questions).filter(({ answer }) => Boolean(answer)),
           evidenceHints: workflow.blockers?.join(' '),
         };
         row.steps = [];
@@ -231,8 +232,9 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         }
         if (!agent) throw new Error('Planning role is missing');
         if (workflow && role === 'ARCHITECT' && !workflow.evidence) {
+          const hints = latestPlanOutput<ProductPlan>(row.steps, 'PRODUCT_MANAGER')?.evidenceSearchTerms ?? [];
           workflow.evidence = await this.github.planningEvidence(workflow.source,
-            [row.input.request, workflow.evidenceHints].filter(Boolean).join('\n')).catch(() => undefined);
+            [row.input.request, workflow.evidenceHints].filter(Boolean).join('\n'), hints).catch(() => undefined);
           if (!workflow.evidence?.files.length) {
             workflow.blockers = ['无法读取此项目仓库的评审证据。请检查仓库绑定和 GitHub App 的读取权限后重试。'];
             await this.settle(row, null, undefined, undefined, 'review_evidence_missing');
@@ -253,12 +255,14 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         usage = response.usage;
         const output = validatePlanningOutput(role, response.output);
         if ('developer' in output && !developers.includes(output.developer)) {
-          throw new PlanningFailure('invalid_structured_output');
+          throw new PlanningFailure('invalid_structured_output', undefined, undefined, 'Developer role unavailable');
         }
         if (workflow && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')) {
           const review = 'review' in output ? output.review : undefined;
           if ((role === 'ARCHITECT' && (output as ArchitecturePlan).decisions?.length) || !review || review.evidence.some((path) => !workflow.evidence?.files.some((file) => file.path === path))
-            || (!review.evidence.length && !review.blockers.length)) throw new PlanningFailure('invalid_structured_output');
+            || (!review.evidence.length && !review.blockers.length)) {
+            throw new PlanningFailure('invalid_structured_output', undefined, undefined, 'Review evidence or decision format invalid');
+          }
         }
         if (workflow && role === 'PRODUCT_MANAGER') {
           const product = output as ProductPlan;
@@ -268,7 +272,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         step = { role, version: agent.version, model: agent.model, output, ...(phase && { phase }) };
       } catch (error) {
         const failure = error instanceof PlanningFailure ? error : undefined;
-        await this.settle(row, null, usage ?? failure?.usage, failure?.category ?? 'unknown');
+        await this.settle(row, null, usage ?? failure?.usage, failure?.category ?? 'unknown', 'planning_step_failed', failure?.validation);
         return true;
       }
       await this.settle(row, step, usage);
@@ -279,7 +283,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
   }
 
   private async settle(row: PlanRecord, step: AgentPlan['steps'][number] | null, usage?: ModelUsage,
-    category?: PlanningFailureCategory, reason = 'planning_step_failed') {
+    category?: PlanningFailureCategory, reason = 'planning_step_failed', validation?: string) {
     await this.db.projectTransaction(row.projectId, async (client) => {
       const { rows: [project] } = await client.query<{ status: string }>(
         'SELECT status FROM projects WHERE id = $1 FOR UPDATE', [row.projectId]);
@@ -303,7 +307,10 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           row.input.workflow.affected = current.rows[0].input.workflow.affected;
         }
         await this.saveProgress(client, row, 'failed', row.steps, reason, category);
-        await this.tasks.event(client, task, 'agent.plan_failed', { role: currentRole(row), error: reason });
+        await this.tasks.event(client, task, 'agent.plan_failed', {
+          role: currentRole(row), error: reason,
+          ...(row.input.workflow && validation && ['ARCHITECT', 'UI_UX_DESIGNER'].includes(currentRole(row)) && { validation }),
+        });
         return;
       }
 
