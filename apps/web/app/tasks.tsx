@@ -35,6 +35,7 @@ const eventLabels: Record<string, string> = {
   'task.decisions_submitted': '补充决策并送审',
   'agent.plan_queued': 'Agent 规划入队', 'agent.plan_started': 'Agent 规划开始',
   'agent.model_usage': '模型用量', 'agent.step_completed': '规划步骤完成',
+  'agent.plan_version_ready': '方案版本可送审', 'agent.plan_version_approved': '方案版本已批准',
   'agent.plan_failed': '规划失败', 'agent.plan_cancelled': '规划取消',
 };
 
@@ -54,6 +55,10 @@ function taskActivity(event: TaskEvent): ActivityItem {
         : typeof reason === 'string' ? reason : undefined,
     };
   }
+  const version = event.payload.planVersion ?? event.payload.version;
+  const commit = event.payload.planCommit ?? event.payload.commit;
+  const versionDetail = typeof version === 'string' && typeof commit === 'string'
+    ? `方案 ${version.slice(0, 8)} · 提交 ${commit.slice(0, 12)}` : undefined;
   const planning = event.eventType.startsWith('agent.');
   const failed = ['FAILED', 'TIMEOUT', 'BLOCKED', 'REJECTED'].includes(String(to)) || event.eventType.endsWith('_failed');
   return {
@@ -61,7 +66,7 @@ function taskActivity(event: TaskEvent): ActivityItem {
     label: to === 'READY' ? '批准方案 · 待派发' : eventStatus(to) ? statusLabels[to] : eventLabels[event.eventType] ?? event.eventType,
     group: failed ? '异常' : planning ? '规划' : eventStatus(to) ? '状态' : '任务',
     tone: failed ? 'rose' : undefined,
-    detail: eventStatus(from) && eventStatus(to) ? `${statusLabels[from]} → ${statusLabels[to]}` : undefined,
+    detail: versionDetail ?? (eventStatus(from) && eventStatus(to) ? `${statusLabels[from]} → ${statusLabels[to]}` : undefined),
   };
 }
 

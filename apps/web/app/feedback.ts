@@ -38,6 +38,7 @@ export const issues: Record<string, string> = {
   'github-delivery-config': '发布需要配置具有目标仓库写权限的 GitHub App。',
   task: '无法保存任务，请检查输入、任务关联和当前状态。',
   'task-conflict': '操作与当前数据冲突，请检查任务状态、编号和前置任务。',
+  'versioned-worker-required': '请为此项目连接支持方案版本校验的 Worker，再派发任务。',
   'stale-plan-version': '方案版本或仓库提交已变化。请在规划页签刷新方案并重新批准。',
   'pending-decisions': '请补齐待人工确认事项并送审。项目所有者批准后才能派发。',
   'decision-submit': '无法提交决策，请核对填写内容和最新的待确认事项。',

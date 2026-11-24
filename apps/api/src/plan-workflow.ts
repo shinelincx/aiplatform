@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  AgentPlan, ApprovedAgentPlan, ArchitecturePlan, DesignPlan, PlanningRole, PlanReviewer, ProductPlan, TaskDecision,
+  AgentPlan, ApprovedAgentPlan, ArchitecturePlan, DesignPlan, DirectorPlan, IndependentCheck, PlanningRole, PlanReviewer,
+  ProductPlan, TaskDecision, VerificationCheck,
 } from '@ado/shared';
 import type { GitHubApp } from './github';
 
@@ -9,6 +10,7 @@ export const planPhases = {
   draft: 'PRODUCT_MANAGER',
   architecture: 'ARCHITECT',
   design: 'UI_UX_DESIGNER',
+  coordinate: 'PROJECT_DIRECTOR',
   revise: 'PRODUCT_MANAGER',
   architecture_review: 'ARCHITECT',
   design_review: 'UI_UX_DESIGNER',
@@ -28,6 +30,7 @@ export interface PlanWorkflow {
   blockers?: string[];
   proposal?: ApprovedAgentPlan;
   approvedVersion?: string;
+  approvedTarget?: { repositoryId: string; checks: VerificationCheck[]; independentChecks: IndependentCheck[] };
 }
 
 export function newWorkflow(source: PlanningSource): PlanWorkflow {
@@ -50,22 +53,32 @@ export function advancePlan(workflow: PlanWorkflow, previous: Step[], step: Step
   const product = latestPlanOutput<ProductPlan>(steps, 'PRODUCT_MANAGER');
   const architecture = latestPlanOutput<ArchitecturePlan>(steps, 'ARCHITECT');
   const design = latestPlanOutput<DesignPlan>(steps, 'UI_UX_DESIGNER');
-  const review = 'review' in step.output ? step.output.review : undefined;
-  if (review && (step.role === 'ARCHITECT' || step.role === 'UI_UX_DESIGNER')) {
-    const reviewer = step.role;
-    for (const question of review.decisions) {
-      if (workflow.questions.some((item) => item.question === question.question)) continue;
-      workflow.questions.push({ ...question, id: randomUUID(), reviewers: question.reviewers.length ? question.reviewers : [reviewer] });
+  const isReviewer = step.role === 'ARCHITECT' || step.role === 'UI_UX_DESIGNER';
+  const questions = isReviewer && 'review' in step.output ? step.output.review?.decisions
+    : (step.output as DirectorPlan | ProductPlan).decisions;
+  for (const question of questions ?? []) {
+    const roles = question.reviewers.length ? question.reviewers : [isReviewer ? step.role : 'ARCHITECT'] as PlanReviewer[];
+    const existing = workflow.questions.find((item) => item.question === question.question);
+    if (existing) {
+      existing.reviewers = [...new Set([...(existing.reviewers ?? []), ...roles])];
+      if (existing.answer) workflow.affected = [...new Set([...workflow.affected, ...roles])];
+    } else {
+      workflow.questions.push({ ...question, id: randomUUID(), reviewers: roles });
     }
   }
   if (phase === 'draft' && product?.needsDesign) workflow.queue.push('design');
   if (workflow.queue.length) return null;
 
   workflow.blockers = planReviewBlockers(steps, Boolean(product?.needsDesign));
+  const initialReview = phase === 'architecture' || phase === 'design';
+  if (initialReview && (workflow.blockers.length || workflow.questions.length)) {
+    workflow.queue.push('coordinate');
+    return null;
+  }
   if (workflow.blockers.length) return 'review_evidence_missing';
   if (workflow.questions.some(({ answer }) => !answer)) return 'pending_review_decisions';
 
-  if (phase === 'architecture' || phase === 'design') {
+  if (initialReview || phase === 'coordinate') {
     workflow.queue.push('revise');
     return null;
   }

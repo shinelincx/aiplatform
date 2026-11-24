@@ -109,6 +109,7 @@ export interface AgentAssignment {
 export interface DirectorPlan {
   objective: string;
   constraints: string[];
+  decisions?: PlanReview['decisions'];
 }
 export interface ProductPlan {
   title: string;
@@ -117,6 +118,7 @@ export interface ProductPlan {
   acceptanceCriteria: string[];
   needsDesign?: boolean;
   affectedReviewers?: PlanReviewer[];
+  decisions?: PlanReview['decisions'];
 }
 export interface ArchitecturePlan {
   developer: DeveloperRole;

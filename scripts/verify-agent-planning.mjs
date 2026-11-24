@@ -99,7 +99,7 @@ const planning = new AgentPlanningService(db, projects, tasks, registry, {
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, acceptanceCriteria: [] });
     }
     const policy = input.request === 'Confirm account policy';
-    const answers = input.humanDecisions?.map(({ answer }) => answer) ?? [];
+    const answers = input.humanDecisions?.flatMap(({ answer }) => answer ? [answer] : []) ?? [];
     if (role === 'PRODUCT_MANAGER') {
       const design = input.request === 'Add a settings page' || policy;
       return modelReply(agent, { ...outputs.PRODUCT_MANAGER, needsDesign: design,
@@ -369,20 +369,24 @@ try {
     token, method: 'POST', status: 409, body: { status: 'READY', developerRole: 'BACKEND_DEVELOPER', planVersion: complete.proposal.version },
   });
   await request(`${taskPath}/transition`, { token, method: 'POST', body: { status: 'READY' }, status: 409 });
+  const repositoryChecks = {
+    checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }],
+    independentChecks: [{ name: 'browser', kind: 'browser' }],
+  };
+  const updateChecks = (body = repositoryChecks) => request(`${prefix}/repositories/${repo.id}/checks`, { token, method: 'PATCH', body });
+  await updateChecks();
   const planApproval = await request(`${taskPath}/transition`, {
     token, method: 'POST', body: { status: 'READY', planVersion: complete.proposal.version },
   });
   assert.deepEqual(await request(`${taskPath}/executions`, { token }), [], 'Approval does not dispatch');
   assert.equal((await request(planPath, { token })).plan.approvedVersion, complete.proposal.version);
   assert.deepEqual(planApproval.developer, { role: 'FRONTEND_DEVELOPER', version: 2, model: config.model });
-  await request(`${prefix}/repositories/${repo.id}/checks`, {
-    token, method: 'PATCH', body: { checks: [{ name: 'unit', kind: 'unit', argv: ['node', '--test'] }],
-      independentChecks: [{ name: 'browser', kind: 'browser' }] },
-  });
+  await updateChecks({ ...repositoryChecks, independentChecks: [] });
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), /verification settings changed/);
+  await updateChecks();
   sourceCommit = 'b'.repeat(40);
   await assert.rejects(executions.queue(account, first.id, queued.taskId), /approved commit/);
   sourceCommit = 'a'.repeat(40);
-  const run = await executions.queue(account, first.id, queued.taskId);
   const credential = await request(`${prefix}/workers`, {
     token, method: 'POST', status: 201, body: { name: 'Planning handoff fixture' },
   });
@@ -390,8 +394,10 @@ try {
     `UPDATE workers SET connection_id = gen_random_uuid(), capabilities = '{"codexVersion":"0.170.0","verificationVersion":1}'
      WHERE id = $1 RETURNING id AS "workerId", credential_hash AS hash, connection_id AS "connectionId"`, [credential.workerId],
   );
-  assert.equal(await executions.claim(worker), null, 'Planned QA requires an archive-capable Worker');
-  await db.pool.query("UPDATE workers SET capabilities = capabilities || '{\"artifactVersion\":1}' WHERE id = $1", [worker.workerId]);
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), /updated Worker is required/);
+  await db.pool.query("UPDATE workers SET capabilities = capabilities || '{\"artifactVersion\":1,\"approvedPlanVersion\":1}' WHERE id = $1", [worker.workerId]);
+  const run = await executions.queue(account, first.id, queued.taskId);
+  assert.equal(run.requestedWorkerId, worker.workerId);
   const offer = await executions.claim(worker);
   assert.equal(offer?.id, run.id);
   assert.deepEqual(offer.development.approvedPlan, complete.proposal);
@@ -412,6 +418,7 @@ try {
   const baseCommit = 'a'.repeat(40);
   const usage = { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 };
   assert.equal((await send(1, 'thread', { threadId: 'fixture-qa-thread' })).accepted, true);
+  assert.equal((await send(2, 'result', { attempt: 1, baseCommit: 'b'.repeat(40), patchHash, files: ['settings.ts'], usage })).accepted, false);
   assert.equal((await send(2, 'result', { attempt: 1, baseCommit, patchHash, files: ['settings.ts'], usage })).accepted, true);
   const verification = { attempt: 1, patchHash, checks: [{ name: 'unit', status: 'passed', exitCode: 0, durationMs: 20 }] };
   assert.equal((await send(3, 'verification', verification)).accepted, false, 'QA requires the archived patch');
@@ -568,6 +575,7 @@ try {
   await submit([{ id: planned.id, answer: planned.options[0] }], 403, viewerToken);
   await submit([{ id: 'unknown', answer: planned.options[0] }], 409);
   assert.equal(await planning.runNext(), true, 'Independent design review can continue while the decision is open');
+  assert.equal(await planning.runNext(), true, 'The Director coordinates before pausing dependent work');
   assert.equal(await planning.runNext(), false);
   const waiting = (await request(`${decisionPath}/agent-plan`, { token })).plan;
   assert(waiting.steps.some(({ role }) => role === 'UI_UX_DESIGNER'));

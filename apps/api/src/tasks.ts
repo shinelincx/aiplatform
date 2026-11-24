@@ -14,6 +14,8 @@ import type { PlanWorkflow } from './plan-workflow';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 
+export const planExecutionTarget = "jsonb_build_object('repositoryId', id, 'checks', check_plan, 'independentChecks', independent_checks)";
+
 const taskColumns = `id, project_id AS "projectId", task_code AS code, title, description, status, priority,
   repository_id AS "repositoryId", parent_task_id AS "parentTaskId",
   acceptance_criteria AS "acceptanceCriteria", archived_at AS "archivedAt", created_at AS "createdAt",
@@ -281,11 +283,16 @@ export class TasksService {
           throw new ConflictException({ code: 'stale-plan-version', message: 'Review the current plan version before approval' });
         }
         if (planned?.proposal) {
+          const { rows: [binding] } = await client.query<{ target: PlanWorkflow['approvedTarget'] }>(
+            `SELECT ${planExecutionTarget} AS target FROM repositories WHERE project_id = $1 AND id = $2 FOR SHARE`,
+            [projectId, task.repositoryId]);
+          if (!binding?.target) throw new ConflictException('The plan repository is no longer bound');
           await client.query(
-            "UPDATE task_agent_plans SET input = jsonb_set(input, '{workflow,approvedVersion}', to_jsonb($2::text)) WHERE task_id = $1",
-            [id, planned.proposal.version]);
+            `UPDATE task_agent_plans SET input = jsonb_set(input, '{workflow}',
+              input->'workflow' || $2::jsonb) WHERE task_id = $1`,
+            [id, { approvedVersion: planned.proposal.version, approvedTarget: binding.target }]);
           await this.event(client, task, 'agent.plan_version_approved', {
-            actorId: actor.id, version: planned.proposal.version, commit: planned.proposal.commit,
+            actorId: actor.id, version: planned.proposal.version, commit: planned.proposal.commit, target: binding.target,
           });
         }
         if (planned && role && role !== planned.agent.role) throw new ConflictException('Developer differs from the Agent plan');
@@ -339,6 +346,7 @@ export class TasksService {
           workflow.queue = ['revise'];
           delete workflow.proposal;
           delete workflow.approvedVersion;
+          delete workflow.approvedTarget;
           await client.query("UPDATE tasks SET status = 'PLANNING', approved_developer = NULL, updated_at = now() WHERE id = $1", [id]);
           if (task.status !== 'PLANNING') {
             await this.event(client, task, 'task.status_changed', { actorId: actor.id, from: task.status, to: 'PLANNING' });
@@ -376,11 +384,12 @@ export class TasksService {
     const { rows: [planned] } = await client.query<{
       plan: ArchitecturePlan; agent: AgentAssignment; qa: AgentAssignment | null; requirement: RequirementContent | null;
       knowledge: KnowledgeSnapshot[] | null;
-      proposal: PlanWorkflow['proposal'] | null; approvedVersion: string | null;
+      proposal: PlanWorkflow['proposal'] | null; approvedVersion: string | null; approvedTarget: PlanWorkflow['approvedTarget'] | null;
     }>(
       `SELECT COALESCE(input->'workflow'->'proposal'->'architecture', steps->2->'output') AS plan,
          assignments->(COALESCE(input->'workflow'->'proposal'->'architecture', steps->2->'output')->>'developer') AS agent,
          input->'workflow'->'proposal' AS proposal, input->'workflow'->>'approvedVersion' AS "approvedVersion",
+         input->'workflow'->'approvedTarget' AS "approvedTarget",
          assignments->'QA_ENGINEER' AS qa,
          CASE WHEN input ? 'requirement' THEN jsonb_build_object(
            'title', input->'requirement'->>'title', 'excerpt', input->'requirement'->>'excerpt'

@@ -245,7 +245,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           ...(workflow && {
             phase, repositoryEvidence: workflow.evidence,
             currentProductDraft: latestPlanOutput<ProductPlan>(row.steps, 'PRODUCT_MANAGER'),
-            humanDecisions: workflow.questions.filter(({ answer }) => answer),
+            humanDecisions: workflow.questions,
           }),
           ...(requirement && { approvedRequirement: { title: requirement.title, excerpt: requirement.excerpt } }),
           ...(knowledge && { approvedKnowledge: knowledge }),
@@ -257,7 +257,7 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
         }
         if (workflow && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')) {
           const review = 'review' in output ? output.review : undefined;
-          if (!review || review.evidence.some((path) => !workflow.evidence?.files.some((file) => file.path === path))
+          if ((role === 'ARCHITECT' && (output as ArchitecturePlan).decisions?.length) || !review || review.evidence.some((path) => !workflow.evidence?.files.some((file) => file.path === path))
             || (!review.evidence.length && !review.blockers.length)) throw new PlanningFailure('invalid_structured_output');
         }
         if (workflow && role === 'PRODUCT_MANAGER') {
@@ -318,7 +318,9 @@ export class AgentPlanningService implements OnApplicationBootstrap, OnModuleDes
           await this.saveProgress(client, row, pause ? 'failed' : 'queued', steps, pause);
           return;
         }
-        await this.tasks.event(client, task, 'agent.plan_version_ready', { proposal: workflow.proposal });
+        await this.tasks.event(client, task, 'agent.plan_version_ready', {
+          proposal: workflow.proposal, version: workflow.proposal.version, commit: workflow.proposal.commit,
+        });
       }
       if (!workflow && step.role !== 'ARCHITECT') {
         await this.saveProgress(client, row, 'queued', steps, null);

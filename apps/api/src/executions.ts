@@ -19,7 +19,8 @@ import { GitHubApp } from './github';
 import { objectInput, textInput } from './input';
 import { ProjectsService } from './projects';
 import { requireQualityGate } from './quality-gate';
-import { requireTaskDecisions, runFailure, TasksService } from './tasks';
+import type { PlanningSource } from './plan-workflow';
+import { planExecutionTarget, requireTaskDecisions, runFailure, TasksService } from './tasks';
 import { workerCanVerify, workerDiskReady, type WorkerIdentity } from './workers';
 
 const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId",
@@ -29,6 +30,7 @@ const runColumns = `id, status, worker_id AS "workerId", thread_id AS "threadId"
   check_plan AS "checkPlan", independent_checks AS "independentChecks"`;
 type ClaimedRun = ExecutionRun & { projectId: string; taskId: string };
 type WorkerLease = WorkerIdentity & { connectionId: string };
+type SourceCheck = { binding: PlanningSource; commit: string | undefined };
 const failureCodes = ['source_unavailable', 'sandbox_rejected', 'codex_failed', 'no_changes', 'worker_timeout',
   'worker_error', 'checks_changed_candidate', 'artifact_upload_failed', 'worker_restarted', 'npm_cache_unavailable',
   'maven_cache_unavailable', 'revision_source_unavailable', 'needs_decisions'];
@@ -228,14 +230,22 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const workerId = requestedWorker(body);
     const { revisionOf } = objectInput(body ?? {});
     if (revisionOf != null && !isWorkerId(revisionOf)) throw new BadRequestException('Invalid rejected execution ID');
+    const binding = await this.db.transaction(async (client) => {
+      await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
+      const task = await this.tasks.find(projectId, taskId, client);
+      const workflow = await this.tasks.planWorkflow(client, task);
+      if (workflow?.proposal && workflow.approvedVersion === workflow.proposal.version) return workflow.source;
+    });
+    const checkedSource = binding ? await this.github.planningSource(binding).catch(() => undefined) : undefined;
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
-      return this.queueExecution(client, actor, projectId, taskId, workerId, revisionOf);
+      return this.queueExecution(client, actor, projectId, taskId, workerId, revisionOf, undefined,
+        binding && { binding, commit: checkedSource?.commit });
     });
   }
 
   private async queueExecution(client: PoolClient, actor: Pick<Account, 'id'>, projectId: string, taskId: string,
-    workerId: string | null, revisionOf: unknown, autoApprovalEntry?: string) {
+    workerId: string | null, revisionOf: unknown, autoApprovalEntry?: string, checkedSource?: SourceCheck) {
     await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [projectId]);
     const task = await this.tasks.find(projectId, taskId, client);
     const revising = task.status === 'REJECTED';
@@ -285,17 +295,18 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         throw new ConflictException({ code: 'stale-plan-version', message: 'The plan version requires manual approval and dispatch' });
       }
       const { rows: [binding] } = await client.query<{
-        repository: string; branch: string; installationId: string; githubId: string;
+        repository: string; branch: string; installationId: string; githubId: string; approvedTarget: boolean;
       }>(`SELECT owner || '/' || repo_name AS repository, default_branch AS branch,
-           installation_id::text AS "installationId", github_repository_id::text AS "githubId"
-         FROM repositories WHERE project_id = $1 AND id = $2`, [projectId, task.repositoryId]);
-      if (!binding || binding.repository !== proposal.repository || binding.branch !== proposal.branch) {
-        throw new ConflictException({ code: 'stale-plan-version', message: 'The repository or branch changed. Refresh the plan and reapprove' });
+           installation_id::text AS "installationId", github_repository_id::text AS "githubId",
+           ${planExecutionTarget} = $3::jsonb AS "approvedTarget"
+         FROM repositories WHERE project_id = $1 AND id = $2 FOR SHARE`,
+        [projectId, task.repositoryId, planned.approvedTarget]);
+      if (!binding?.approvedTarget || binding.repository !== proposal.repository || binding.branch !== proposal.branch) {
+        throw new ConflictException({ code: 'stale-plan-version', message: 'The approved repository or verification settings changed' });
       }
-      const source = await this.github.planningSource({
-        ...binding, installationId: Number(binding.installationId), githubId: Number(binding.githubId),
-      }).catch(() => null);
-      if (!source || source.commit !== proposal.commit) {
+      if (!checkedSource || checkedSource.commit !== proposal.commit
+        || checkedSource.binding.repository !== binding.repository || checkedSource.binding.branch !== binding.branch
+        || checkedSource.binding.installationId !== Number(binding.installationId) || checkedSource.binding.githubId !== Number(binding.githubId)) {
         throw new ConflictException({ code: 'stale-plan-version', message: 'Cannot verify the approved commit. Refresh the plan and reapprove' });
       }
     }
@@ -321,12 +332,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
        RETURNING ${runColumns}, NULL AS review, NULL AS artifact, NULL AS delivery`,
       [projectId, taskId, task.repositoryId, handoff, existing ? prior?.qa ?? null : planned?.qa ?? null],
     );
-    if (workerId || handoff.revision) {
-      await this.assignWorker(client, projectId, run.id, workerId, Boolean(handoff.revision));
-      run.requestedWorkerId = workerId;
+    if (workerId || handoff.revision || handoff.approvedPlan) {
+      run.requestedWorkerId = await this.assignWorker(client, projectId, run.id, workerId,
+        Boolean(handoff.revision), Boolean(handoff.approvedPlan));
     }
     await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
-      ...(workerId && { requestedWorkerId: workerId }),
+      ...(run.requestedWorkerId && { requestedWorkerId: run.requestedWorkerId }),
       ...(handoff.revision && { revisionOf: handoff.revision.runId, previousPatchHash: handoff.revision.patchHash }),
       developer: handoff.agent.role, developerVersion: handoff.agent.version,
       ...(handoff.approvedPlan && { planVersion: handoff.approvedPlan.version, planCommit: handoff.approvedPlan.commit }) });
@@ -339,19 +350,24 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return run;
   }
 
-  private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null, revision: boolean) {
-    if (workerId || revision) {
-      const eligible = await client.query(
-        `SELECT 1 FROM workers w
+  private async assignWorker(client: PoolClient, projectId: string, runId: string, workerId: string | null,
+    revision: boolean, versioned = false) {
+    if (workerId || revision || versioned) {
+      const { rows: [eligible] } = await client.query<{ id: string }>(
+        `SELECT w.id FROM workers w
          JOIN worker_projects wp ON wp.worker_id = w.id AND wp.project_id = $1
          JOIN execution_runs r ON r.project_id = wp.project_id AND r.id = $2
          JOIN repositories g ON g.id = r.repository_id
          WHERE ($3::uuid IS NULL OR w.id = $3) AND NOT w.disabled AND w.credential_expires_at > now()
-           AND w.capabilities ? 'codexVersion' AND ${workerCanVerify} LIMIT 1`, [projectId, runId, workerId]);
-      if (!eligible.rowCount) throw new ConflictException(revision
+           AND w.capabilities ? 'codexVersion' AND ${workerCanVerify}
+         ORDER BY w.last_heartbeat_at DESC NULLS LAST, w.id LIMIT 1`, [projectId, runId, workerId]);
+      if (!eligible && versioned) throw new ConflictException({ code: 'versioned-worker-required', message: 'An updated Worker is required' });
+      if (!eligible) throw new ConflictException(revision
         ? 'No eligible Worker supports reading revision artifacts' : 'Worker is not eligible for this execution');
+      if (versioned) workerId = eligible.id;
     }
     await client.query('UPDATE execution_runs SET requested_worker_id = $2 WHERE id = $1', [runId, workerId]);
+    return workerId;
   }
 
   async reassign(actor: Account, projectId: string, taskId: string, runId: string, body: unknown) {
@@ -359,14 +375,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     return this.db.transaction(async (client) => {
       await this.projects.access(actor.id, projectId, { owner: true, active: true }, client);
       const task = await this.tasks.find(projectId, taskId, client);
-      const { rows: [run] } = await client.query<Pick<ExecutionRun, 'status' | 'requestedWorkerId' | 'revision'>>(
-        `SELECT status, requested_worker_id AS "requestedWorkerId", developer_assignment->'revision' AS revision FROM execution_runs
+      const { rows: [run] } = await client.query<Pick<ExecutionRun, 'status' | 'requestedWorkerId' | 'revision'> & { versioned: boolean }>(
+        `SELECT status, requested_worker_id AS "requestedWorkerId", developer_assignment->'revision' AS revision,
+           developer_assignment ? 'approvedPlan' AS versioned FROM execution_runs
          WHERE id = $1 AND project_id = $2 AND task_id = $3 FOR UPDATE`, [runId, projectId, taskId]);
       if (!run) throw new NotFoundException('Execution run not found');
       if (task.status !== 'QUEUED' || run.status !== 'queued') throw new ConflictException('Only a queued execution can be reassigned');
       if (run.requestedWorkerId === workerId) return;
-      await this.assignWorker(client, projectId, runId, workerId, Boolean(run.revision));
-      await this.tasks.event(client, task, 'task.worker_reassigned', { runId, actorId: actor.id, requestedWorkerId: workerId });
+      const assigned = await this.assignWorker(client, projectId, runId, workerId, Boolean(run.revision), run.versioned);
+      await this.tasks.event(client, task, 'task.worker_reassigned', { runId, actorId: actor.id, requestedWorkerId: assigned });
       await this.projects.audit(client, actor.id, projectId, 'execution.worker_reassigned', runId);
     });
   }
@@ -526,9 +543,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async lockWorker(client: PoolClient, worker: WorkerLease) {
-    const result = await client.query<{ canExecute: boolean; canArchive: boolean; diskReady: boolean }>(
+    const result = await client.query<{ canExecute: boolean; canArchive: boolean; canRunApprovedPlan: boolean; diskReady: boolean }>(
       `SELECT capabilities ? 'codexVersion' AS "canExecute",
-         capabilities->'artifactVersion' = '1'::jsonb AS "canArchive", ${workerDiskReady} AS "diskReady"
+         capabilities->'artifactVersion' = '1'::jsonb AS "canArchive",
+         capabilities->'approvedPlanVersion' = '1'::jsonb AS "canRunApprovedPlan", ${workerDiskReady} AS "diskReady"
        FROM workers w
        WHERE id = $1 AND credential_hash = $2 AND connection_id = $3
          AND credential_expires_at > now() AND NOT disabled FOR UPDATE`,
@@ -557,6 +575,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       );
       if (!offer) return null;
       const plan = offer.development?.approvedPlan;
+      if (plan && !capabilities.canRunApprovedPlan) return null;
       if (plan) {
         offer.title = plan.product.title;
         offer.description = [plan.product.userStory, ...plan.product.requirements.map((item) => `- ${item}`)].join('\n');

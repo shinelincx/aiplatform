@@ -286,7 +286,7 @@ function taskIssue(response: Response | null) {
 async function planConflict(response: Response | null) {
   if (response?.status !== 409) return null;
   const code = (await response.json().catch(() => null))?.code;
-  return code === 'pending-decisions' || code === 'stale-plan-version' ? code : null;
+  return code === 'pending-decisions' || code === 'stale-plan-version' || code === 'versioned-worker-required' ? code : null;
 }
 
 export async function startAgentPlan(form: FormData) {
