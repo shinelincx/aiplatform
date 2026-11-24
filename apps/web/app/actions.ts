@@ -283,8 +283,10 @@ function taskIssue(response: Response | null) {
   return response?.status === 409 ? 'task-conflict' : issue(response, 'task');
 }
 
-async function hasPendingDecisions(response: Response | null) {
-  return response?.status === 409 && (await response.json().catch(() => null))?.code === 'pending-decisions';
+async function planConflict(response: Response | null) {
+  if (response?.status !== 409) return null;
+  const code = (await response.json().catch(() => null))?.code;
+  return code === 'pending-decisions' || code === 'stale-plan-version' ? code : null;
 }
 
 export async function startAgentPlan(form: FormData) {
@@ -475,9 +477,10 @@ export async function transitionTask(form: FormData) {
   if (!id) redirect(query);
   const status = form.get('status');
   const response = await execute(`${endpoint}/transition`, {
-    method: 'POST', body: JSON.stringify({ status, developerRole: form.get('developerRole') || null }),
+    method: 'POST', body: JSON.stringify({ status, developerRole: form.get('developerRole') || null, planVersion: form.get('planVersion') || null }),
   });
-  if (await hasPendingDecisions(response)) redirect(`${query}&issue=pending-decisions#task-decisions`);
+  const conflict = await planConflict(response);
+  if (conflict) redirect(`${query}&issue=${conflict}#task-detail`);
   if (!response?.ok) {
     const confirmation = status === 'READY' ? 'task-approve' : status === 'REJECTED' ? 'task-reject' : status === 'CANCELLED' ? 'task-cancel' : null;
     const errorTarget = confirmation && form.get('confirmTransition') === '1' ? atDialog(query, confirmation) : query;
@@ -489,7 +492,7 @@ export async function transitionTask(form: FormData) {
 export async function submitTaskDecisions(form: FormData) {
   const { query, endpoint, id } = taskPath(form);
   if (!id) redirect(query);
-  const answers = [...form.entries()].flatMap(([key, answer]) => key.startsWith('decision:')
+  const answers = [...form.entries()].flatMap(([key, answer]) => key.startsWith('decision:') && typeof answer === 'string' && answer.trim()
     ? [{ id: key.slice('decision:'.length), answer }] : []);
   const response = await execute(`${endpoint}/decisions`, { method: 'POST', body: JSON.stringify({ answers }) });
   if (!response?.ok) redirect(`${query}&issue=${response?.status === 409 ? 'decision-submit' : issue(response, 'decision-submit')}#task-decisions`);
@@ -512,7 +515,8 @@ export async function startExecution(form: FormData) {
   const revisionOf = form.get('revisionOf') || null;
   if (revisionOf && !isWorkerId(revisionOf)) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
   const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId, revisionOf }) });
-  if (await hasPendingDecisions(response)) redirect(`${query}&issue=pending-decisions#task-decisions`);
+  const conflict = await planConflict(response);
+  if (conflict) redirect(`${query}&issue=${conflict}#task-detail`);
   if (!response?.ok && revisionOf) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
   if (!response?.ok) redirect(`${atDialog(query, 'dispatch')}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
   redirect(`${query}&notice=execution-started#task-detail`);

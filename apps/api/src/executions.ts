@@ -236,6 +236,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   private async queueExecution(client: PoolClient, actor: Pick<Account, 'id'>, projectId: string, taskId: string,
     workerId: string | null, revisionOf: unknown, autoApprovalEntry?: string) {
+    await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [projectId]);
     const task = await this.tasks.find(projectId, taskId, client);
     const revising = task.status === 'REJECTED';
     if (autoApprovalEntry && task.status !== 'READY') throw new ConflictException('Task left READY');
@@ -275,12 +276,39 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       task.status = 'RETRYING';
     }
     const planned = await this.tasks.plannedDevelopment(client, task);
+    if (!planned?.proposal && await this.tasks.planWorkflow(client, task)) {
+      throw new ConflictException({ code: 'stale-plan-version', message: 'The plan must be reviewed and approved before dispatch' });
+    }
+    if (planned?.proposal) {
+      const proposal = planned.proposal;
+      if (autoApprovalEntry || proposal.version !== planned.approvedVersion) {
+        throw new ConflictException({ code: 'stale-plan-version', message: 'The plan version requires manual approval and dispatch' });
+      }
+      const { rows: [binding] } = await client.query<{
+        repository: string; branch: string; installationId: string; githubId: string;
+      }>(`SELECT owner || '/' || repo_name AS repository, default_branch AS branch,
+           installation_id::text AS "installationId", github_repository_id::text AS "githubId"
+         FROM repositories WHERE project_id = $1 AND id = $2`, [projectId, task.repositoryId]);
+      if (!binding || binding.repository !== proposal.repository || binding.branch !== proposal.branch) {
+        throw new ConflictException({ code: 'stale-plan-version', message: 'The repository or branch changed. Refresh the plan and reapprove' });
+      }
+      const source = await this.github.planningSource({
+        ...binding, installationId: Number(binding.installationId), githubId: Number(binding.githubId),
+      }).catch(() => null);
+      if (!source || source.commit !== proposal.commit) {
+        throw new ConflictException({ code: 'stale-plan-version', message: 'Cannot verify the approved commit. Refresh the plan and reapprove' });
+      }
+    }
     const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);
     const existing = (revising || prior?.development?.revision) ? prior?.development : null;
     const handoff: DevelopmentHandoff = existing ?? { agent, ...(planned && { plan: planned.plan }),
       ...(planned?.requirement && { requirement: planned.requirement }), ...(planned?.knowledge && { knowledge: planned.knowledge }) };
     if (existing && task.status === 'READY') handoff.agent = agent;
-    if (task.decisions?.length) {
+    if (planned?.proposal) {
+      handoff.plan = planned.proposal.architecture;
+      handoff.approvedPlan = planned.proposal;
+      delete handoff.decisions;
+    } else if (task.decisions?.length) {
       handoff.decisions = task.decisions.flatMap(({ question, answer }) => answer ? [{ question, answer }] : []);
     }
     if (revising && prior?.patchHash && prior.comment) {
@@ -300,7 +328,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     await this.move(client, task, 'QUEUED', { runId: run.id, actorId: actor.id,
       ...(workerId && { requestedWorkerId: workerId }),
       ...(handoff.revision && { revisionOf: handoff.revision.runId, previousPatchHash: handoff.revision.patchHash }),
-      developer: handoff.agent.role, developerVersion: handoff.agent.version });
+      developer: handoff.agent.role, developerVersion: handoff.agent.version,
+      ...(handoff.approvedPlan && { planVersion: handoff.approvedPlan.version, planCommit: handoff.approvedPlan.commit }) });
     if (autoApprovalEntry) {
       await this.tasks.event(client, task, 'task.auto_approval_succeeded',
         { entryId: autoApprovalEntry, actorId: actor.id, from: 'READY', to: 'QUEUED', runId: run.id });
@@ -527,6 +556,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
          WHERE r.id = $1`, [candidate.id],
       );
       if (!offer) return null;
+      const plan = offer.development?.approvedPlan;
+      if (plan) {
+        offer.title = plan.product.title;
+        offer.description = [plan.product.userStory, ...plan.product.requirements.map((item) => `- ${item}`)].join('\n');
+        offer.acceptanceCriteria = plan.product.acceptanceCriteria;
+      }
       offer.archivePatch = capabilities.canArchive === true && Boolean(offer.checks?.length);
       offer.detailedEvents = true;
       offer.turnUsage = true;
@@ -593,10 +628,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
       const { rows: [run] } = await client.query<ClaimedRun & {
         current: boolean; checks: VerificationCheck[]; candidateHash: string | null; archivePatch: boolean; requiresQa: boolean;
+        approvedCommit: string | null;
       }>(
         `SELECT ${runColumns}, r.project_id AS "projectId", r.task_id AS "taskId",
            r.check_plan AS checks, r.candidate_hash AS "candidateHash", r.archive_patch AS "archivePatch",
            r.qa_assignment IS NOT NULL AS "requiresQa",
+           r.developer_assignment->'approvedPlan'->>'commit' AS "approvedCommit",
            r.lease_expires_at > now() AND EXISTS (
              SELECT 1 FROM worker_projects wp JOIN projects p ON p.id = wp.project_id AND p.status = 'active'
              WHERE wp.worker_id = $2 AND wp.project_id = r.project_id
@@ -624,6 +661,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         return { stop: true, accepted: false };
       }
       if (event.kind === 'result' && (!run.threadId || run.candidateHash
+        || (run.approvedCommit && run.approvedCommit !== event.payload.baseCommit)
         || ((event.payload.attempt ?? 1) !== (run.report?.attempt ?? 0) + 1)
         || (run.report && !canRepair(run.report)))) return { stop: true, accepted: false };
       if (event.kind === 'verification' && (run.candidateHash !== event.payload.patchHash

@@ -252,6 +252,55 @@ export class GitHubApp {
     }
   }
 
+  async planningSource(source: { installationId: number; githubId: number; repository: string; branch: string }) {
+    const repositoryPath = source.repository.split('/').map(encodeURIComponent).join('/');
+    const token = await this.installationToken(source.installationId, source.githubId);
+    const root = `/repos/${repositoryPath}`;
+    const { data } = await this.request<{ commit: { sha: string; commit?: { tree?: { sha: string } } } }>(
+      `${root}/branches/${encodeURIComponent(source.branch)}`, token,
+    );
+    const commit = data.commit.sha;
+    if (!/^[a-f0-9]{40}$/.test(commit)) throw new BadGatewayException('GitHub did not return a valid base commit');
+    return { root, token, commit, tree: data.commit.commit?.tree?.sha };
+  }
+
+  async planningEvidence(source: Parameters<GitHubApp['planningSource']>[0], request: string) {
+    const { root, token, commit, tree } = await this.planningSource(source);
+    if (!tree || !/^[a-f0-9]{40}$/.test(tree)) throw new BadGatewayException('GitHub did not return a valid repository tree');
+    const { data } = await this.request<{ truncated?: boolean; tree: { path: string; sha: string; mode: string; size?: number }[] }>(
+      `${root}/git/trees/${tree}?recursive=1`, token,
+    );
+    const words = new Set(request.toLowerCase().match(/[a-z0-9_]{3,}|[\p{Script=Han}]{2}/gu) ?? []);
+    const candidates = data.tree.filter(({ path, mode, size, sha }) =>
+      ['100644', '100755'].includes(mode) && /^[a-f0-9]{40}$/.test(sha)
+      && size !== undefined && size > 0 && size <= 32_768
+      && /\.(?:md|tsx?|jsx?|py|java|go|rs|rb|cs|vue|svelte|sql|kt|css|html|swift|dart)$/i.test(path)
+      && !/(?:^|\/)(?:\.[^/]+|node_modules|vendor|dist|build|.*(?:secret|credential|private[-_]?key)[^/]*)(?:\/|$)/i.test(path),
+    );
+    const score = (path: string) => {
+      const name = path.toLowerCase();
+      return [...words].filter((word) => name.includes(word)).length * 20
+        + (/^(?:readme|context|agents)\.md$/i.test(path) ? 10 : 0);
+    };
+    const sections = [
+      candidates.filter(({ path }) => /\.(?:md)$/i.test(path)),
+      candidates.filter(({ path }) => /(?:^|\/|[._-])(?:spec|tests?)(?:\/|[._-])/i.test(path) && !/\.md$/i.test(path)),
+      candidates.filter(({ path }) => !/\.md$|(?:^|\/|[._-])(?:spec|tests?)(?:\/|[._-])/i.test(path)),
+    ];
+    const selected = sections.flatMap((files, i) => files.sort((a, b) => score(b.path) - score(a.path))
+      .slice(0, i === 2 ? 8 : 3));
+    const files = await Promise.all(selected.map(async ({ path, sha }) => {
+      const result = await this.request<{ content: string; encoding: string }>(`${root}/git/blobs/${sha}`, token).catch(() => null);
+      const blob = result?.data;
+      if (blob?.encoding !== 'base64') return null;
+      const contents = Buffer.from(blob.content, 'base64').toString('utf8');
+      if (/\0|-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(contents)) return null;
+      const excerpt = contents.slice(0, 5000);
+      return { path, excerpt, truncated: excerpt.length < contents.length };
+    }));
+    return { commit, incompleteTree: data.truncated === true, files: files.filter((file) => file !== null) };
+  }
+
   async verifyBranch(installationId: number, repository: GitHubRepository, branch: string) {
     const repositoryPath = repository.fullName.split('/').map(encodeURIComponent).join('/');
     const token = await this.installationToken(installationId, repository.id);

@@ -5,7 +5,7 @@ export type { Task, TaskDetail, TaskEvent, TaskPriority, TaskStatus } from './ta
 export { parseDecisionQuestions, parseDecisionReply } from './decisions';
 export type { DecisionQuestion, TaskDecision } from './decisions';
 export { agentRoleLabels, developerRoles, isPlanningFailureCategory, isUsableSkillVersion, planningFailureMessages, planningRoles } from './agents';
-export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ArchitecturePlan, DeveloperRole,
+export type { AgentAssignment, AgentPlan, AgentRegistry, AgentRole, AgentVersion, ApprovedAgentPlan, ArchitecturePlan, DesignPlan, DeveloperRole, PlanReview, PlanReviewer,
   DirectorPlan, PlanningFailureCategory, PlanningOutput, PlanningRole, ProductPlan, ProjectAgent, ProjectSkill,
   SkillDecision, SkillEvaluation, SkillVersion, SkillVersionStatus } from './agents';
 export { decodeWorkerMessage, isWorkerId, workerCredentialLifetimeHours, workerDiskPressure, workerHeartbeatMs, workerMaxPayloadBytes,

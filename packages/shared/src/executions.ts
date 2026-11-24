@@ -1,6 +1,6 @@
 import type { ExecutionQa, ExecutionReview, IndependentCheck, IndependentCheckResult, VerificationCheck, VerificationReport } from './verification';
 import type { ExecutionDelivery, PatchArtifact } from './delivery';
-import type { AgentAssignment, ArchitecturePlan } from './agents';
+import type { AgentAssignment, ApprovedAgentPlan, ArchitecturePlan } from './agents';
 import type { RequirementContent } from './projects';
 import type { KnowledgeSnapshot } from './knowledge';
 import type { DecisionQuestion } from './decisions';
@@ -23,6 +23,7 @@ export interface ReviewEvidence {
 export interface DevelopmentHandoff {
   agent: AgentAssignment;
   plan?: ArchitecturePlan;
+  approvedPlan?: ApprovedAgentPlan;
   requirement?: RequirementContent;
   knowledge?: KnowledgeSnapshot[];
   revision?: ExecutionRevision;

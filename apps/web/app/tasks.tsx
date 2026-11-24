@@ -156,8 +156,9 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
   const available = task && canWrite && !task.archivedAt;
   const transitions = available && canManageStates.includes(task.status)
     ? taskActions.filter(({ status, ownerOnly }) => canTransitionTask(task.status, status)
-      && (!managedPlan || status === 'CANCELLED') && (!ownerOnly || project.role === 'owner')) : [];
-  const canEdit = available && !managedPlan && editable.includes(task.status);
+      && (!managedPlan || status === 'CANCELLED') && !(plan?.proposal && status === 'PLANNING')
+      && (!ownerOnly || project.role === 'owner')) : [];
+  const canEdit = available && !managedPlan && !plan?.proposal && editable.includes(task.status);
   const canArchive = available && project.role === 'owner' && ['CREATED', 'CANCELLED', 'COMPLETED'].includes(task.status);
   const hasRelations = task && (task.parentTaskId || task.dependencies.length > 0);
   const latestRun = runsResult?.data?.[0];
@@ -266,6 +267,7 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
                       <SubmitButton name="status" value={status} pendingLabel="正在批准…" disabled={!developers.length}>{label}</SubmitButton>
                     </form>
                   </ActionDialog> : <form key={status} action={transitionTask}>{taskIdentity}
+                    {status === 'READY' && plan?.proposal && <input type="hidden" name="planVersion" value={plan.proposal.version} />}
                     <SubmitButton name="status" value={status} pendingLabel="正在提交…">{label}</SubmitButton>
                   </form>;
                 })}
@@ -334,7 +336,8 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
             plan: <div id="task-plan">
               {planResult?.issue ? <SectionReadError label="Agent 规划" issue={planResult.issue} />
                 : plan ? <PlanProgress projectId={project.id} plan={plan} showDiagnosis={project.role === 'owner'}
-                  canRetry={canWrite && task.status === 'PLANNING'} />
+                  canRetry={canWrite && !task.archivedAt && task.status === 'PLANNING'}
+                  canRefresh={manageRequirements && !task.archivedAt && ['WAITING_APPROVAL', 'READY', 'FAILED', 'REJECTED', 'TIMEOUT'].includes(task.status)} />
                   : <p className="task-detail__empty">此任务暂无 Agent 规划。</p>}
             </div>,
             execution: <div className="execution-block">
@@ -345,23 +348,28 @@ export async function Tasks({ project, tasks, repositories, selectedId, lane, cr
                   {confirmedDecisions.length > 0 && <dl className="decision-answers">{confirmedDecisions.map(({ id, question, answer }) =>
                     <div key={id}><dt>{question}</dt><dd>{answer}</dd></div>)}</dl>}
                   {pendingDecisions.length > 0 && <>
-                    <p className="warning-text">请明确以下事项并送审。项目所有者批准后才能派发。</p>
-                    {canWrite && !task.archivedAt && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)
+                    <p className="warning-text">{plan?.reviewStatus ? '提交决定后，规划 Agent 将修订方案并复核受影响的内容。'
+                      : '请明确以下事项并送审。项目所有者批准后才能派发。'}</p>
+                    {(plan?.reviewStatus ? manageRequirements && ['PLANNING', 'FAILED'].includes(task.status)
+                      : canWrite && ['WAITING_APPROVAL', 'READY', 'FAILED'].includes(task.status)) && !task.archivedAt
                       ? <form action={submitTaskDecisions} className="fields">
                         {taskIdentity}
-                        {pendingDecisions.map(({ id, question, options }, index) => <div className="decision-question" key={id}>
+                        {pendingDecisions.map(({ id, question, options, impact }, index) => <div className="decision-question" key={id}>
                           <label>{question}
                             <input name={`decision:${id}`} list={`decision-options-${index}`}
                               aria-describedby={`decision-recommendation-${index}`} autoComplete="off"
-                              placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required />
+                              placeholder="选择建议或填写具体决定" maxLength={1000} pattern={'.*\\S.*'} required={!plan?.reviewStatus} />
                           </label>
                           <datalist id={`decision-options-${index}`}>{options.map((option) => <option key={option} value={option} />)}</datalist>
                           <p className="muted" id={`decision-recommendation-${index}`}>推荐 · {options[0]}</p>
+                          {impact && <p className="muted">{impact}</p>}
+                          <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul>
                         </div>)}
-                        <div className="form-actions"><SubmitButton pendingLabel="正在提交…">补充决策并重新送审</SubmitButton></div>
+                        <div className="form-actions"><SubmitButton pendingLabel="正在提交…">{plan?.reviewStatus ? '提交决定' : '补充决策并重新送审'}</SubmitButton></div>
                       </form>
-                      : <ul>{pendingDecisions.map(({ id, question, options }) =>
-                        <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p></li>)}</ul>}
+                      : <ul>{pendingDecisions.map(({ id, question, options, impact }) =>
+                        <li key={id}><strong>{question}</strong><p>推荐 · {options[0]}</p>{impact && <p>{impact}</p>}
+                          <ul>{options.map((option) => <li key={option}>{option}</li>)}</ul></li>)}</ul>}
                   </>}
                 </section>}
               <Executions project={project} task={task} runsResult={runsResult}

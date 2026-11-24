@@ -6,6 +6,8 @@ export interface DecisionQuestion {
 export interface TaskDecision extends DecisionQuestion {
   id: string;
   answer?: string;
+  impact?: string;
+  reviewers?: ('ARCHITECT' | 'UI_UX_DESIGNER')[];
 }
 
 export function parseDecisionQuestions(value: unknown): DecisionQuestion[] | null {
