@@ -37,8 +37,9 @@ export interface PlanWorkflow {
 
 export function isAdvisoryRequest(request: string) {
   const text = request.normalize('NFKC');
-  return /(?:给出|提供|输出|制定|提交|出具?|生成)(?:一个|一份|可选的?)?[^。；;，,\n]{0,14}方案|(?:方案|设计)(?:即可|先行)|\b(?:proposal only|plan only|options only|(?:provide|propose|draft|outline) (?:a |the )?(?:plan|proposal|options))\b/iu.test(text)
-    && !/(?:并(?:且)?|然后|随后|同时|直接|请|按.{0,12}方案)(?:开始|进行|落地)?(?:实现|开发|部署|上线|修改|执行|修复|实施)(?!方案|建议|思路|对比)|\b(?:and|then|also) (?:implement|deploy|fix|ship|merge)\b/iu.test(text);
+  const asksForOptions = /(?:给出?|提供|输出|制定|提交|出具?|生成)[^。；;，,\n]{0,14}方案|(?:方案|设计)(?:即可|先行)|(?:只要|仅需)方案|\b(?:proposal only|plan only|options only|(?:provide|propose|draft|outline) (?:a |the )?(?:plan|proposal|options))\b/iu;
+  const asksForImplementation = /(?:再|并(?:且)?|然后|随后|同时|直接|请|按.{0,12}方案)(?:开始|进行|落地)?(?:实现|开发|部署|上线|修改|执行|修复|实施)(?!方案|建议|思路|对比)|\b(?:and|then|also) (?:implement|deploy|fix|ship|merge)\b/iu;
+  return asksForOptions.test(text) && !asksForImplementation.test(text);
 }
 
 export function newWorkflow(source: PlanningSource, advisory = false): PlanWorkflow {

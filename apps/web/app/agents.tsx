@@ -300,7 +300,7 @@ export function PlanProgress({ projectId, plan, canRetry, canRefresh, showDiagno
         <SubmitButton pendingLabel="正在重新规划…">{proposal || evidenceMissing ? '刷新评审证据' : '重试规划'}</SubmitButton>
       </form>}
       {plan.steps.map(({ role, version, model, output, phase }, index) => (
-        <details key={`${role}:${index}`} open={!proposal && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')}>
+        <details key={`${role}:${index}`} open={!proposal && !advisory && (role === 'ARCHITECT' || role === 'UI_UX_DESIGNER')}>
           <summary>{agentRoleLabels[role]}{phase === 'revise' ? ' · 修订' : phase === 'coordinate' ? ' · 协调' : phase?.endsWith('_review') ? ' · 复核' : ''} · v{version} · {model}</summary>
           <dl>
             {Object.entries(output).filter(([field]) => Object.hasOwn(fieldLabels, field)).map(([field, value]) => (
