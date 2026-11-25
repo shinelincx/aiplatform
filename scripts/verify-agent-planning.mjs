@@ -33,8 +33,10 @@ const registry = new AgentRegistryService(db, projects);
 const tasks = new TasksService(db, projects, registry);
 let sourceCommit = 'a'.repeat(40);
 let sourceAvailable = true;
+let sourceLookupFailed = false;
 class FixtureGitHub extends GitHubApp {
   async planningSource() {
+    if (sourceLookupFailed) throw new Error('Fixture branch lookup failed');
     return { commit: sourceCommit };
   }
 
@@ -427,11 +429,24 @@ try {
   assert.equal((await request(planPath, { token })).plan.approvedVersion, complete.proposal.version);
   assert.deepEqual(planApproval.developer, { role: 'FRONTEND_DEVELOPER', version: 2, model: config.model });
   await updateChecks({ ...repositoryChecks, independentChecks: [] });
-  await assert.rejects(executions.queue(account, first.id, queued.taskId), /verification settings changed/);
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), (error) =>
+    error.getResponse().code === 'approved-target-changed');
   await updateChecks();
   sourceCommit = 'b'.repeat(40);
-  await assert.rejects(executions.queue(account, first.id, queued.taskId), /approved commit/);
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), (error) => {
+    const result = error.getResponse();
+    assert.equal(result.code, 'approved-source-changed');
+    assert.equal(result.approvedCommit, complete.proposal.commit);
+    assert.equal(result.currentCommit, sourceCommit);
+    return true;
+  });
   sourceCommit = 'a'.repeat(40);
+  sourceLookupFailed = true;
+  await assert.rejects(executions.queue(account, first.id, queued.taskId), (error) =>
+    error.getResponse().code === 'approved-source-unavailable');
+  sourceLookupFailed = false;
+  assert.deepEqual(await request(`${taskPath}/executions`, { token }), []);
+  assert.equal((await request(planPath, { token })).plan.approvedVersion, complete.proposal.version);
   const credential = await request(`${prefix}/workers`, {
     token, method: 'POST', status: 201, body: { name: 'Planning handoff fixture' },
   });
