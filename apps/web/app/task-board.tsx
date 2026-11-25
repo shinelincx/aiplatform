@@ -87,16 +87,23 @@ export function TaskBoard({ projectId, items, canWrite, lane }: {
               const { status } = task;
               const statusLabel = typeof status === 'string' && Object.hasOwn(taskStatusLabels, status)
                 ? taskStatusLabels[status as TaskStatus] : status || '—';
+              const priorityLabel = task.priority || '—';
               const cutoff = [...titleSegmenter.segment(task.title)][20]?.index;
               const createdAt = boardDate.format(new Date(task.createdAt));
               return <Link className="tcard" key={task.id}
                 href={workspaceHref(projectId, 'tasks', { ...(lane && { lane }), task: task.id })} scroll={false}>
-                <h3 title={cutoff === undefined ? undefined : task.title}>
-                  {cutoff === undefined ? task.title : `${task.title.slice(0, cutoff)}…`}
-                </h3>
-                <div className="tcard__metadata">
-                  <span>优先级：{task.priority || '—'}</span>
-                  <span>状态：{statusLabel}</span>
+                <div className="tcard__headline">
+                  <span className="tcard__field">
+                    <span className="sr-only">优先级：</span>
+                    <span className="tcard__value" title={priorityLabel}>{priorityLabel}</span>
+                  </span>
+                  <h3 aria-label={task.title} title={task.title}>
+                    {cutoff === undefined ? task.title : `${task.title.slice(0, cutoff)}…`}
+                  </h3>
+                  <span className="tcard__field">
+                    <span className="sr-only">状态：</span>
+                    <span className="tcard__value" title={statusLabel}>{statusLabel}</span>
+                  </span>
                 </div>
                 <time dateTime={task.createdAt}>{createdAt.slice(0, 4) === currentYear ? createdAt.slice(5) : createdAt}</time>
                 {task.failure && <p className="tcard__reason">{task.failure}</p>}
