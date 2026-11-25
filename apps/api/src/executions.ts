@@ -301,13 +301,18 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
            ${planExecutionTarget} = $3::jsonb AS "approvedTarget"
          FROM repositories WHERE project_id = $1 AND id = $2 FOR SHARE`,
         [projectId, task.repositoryId, planned.approvedTarget]);
-      if (!binding?.approvedTarget || binding.repository !== proposal.repository || binding.branch !== proposal.branch) {
-        throw new ConflictException({ code: 'stale-plan-version', message: 'The approved repository or verification settings changed' });
+      if (!binding?.approvedTarget || binding.repository !== proposal.repository || binding.branch !== proposal.branch
+        || (checkedSource && (checkedSource.binding.repository !== binding.repository || checkedSource.binding.branch !== binding.branch
+          || checkedSource.binding.installationId !== Number(binding.installationId)
+          || checkedSource.binding.githubId !== Number(binding.githubId)))) {
+        throw new ConflictException({ code: 'approved-target-changed', message: 'The approved repository or verification settings changed' });
       }
-      if (!checkedSource || checkedSource.commit !== proposal.commit
-        || checkedSource.binding.repository !== binding.repository || checkedSource.binding.branch !== binding.branch
-        || checkedSource.binding.installationId !== Number(binding.installationId) || checkedSource.binding.githubId !== Number(binding.githubId)) {
-        throw new ConflictException({ code: 'stale-plan-version', message: 'Cannot verify the approved commit. Refresh the plan and reapprove' });
+      if (!checkedSource?.commit) {
+        throw new ConflictException({ code: 'approved-source-unavailable', message: 'Cannot read the approved branch from GitHub' });
+      }
+      if (checkedSource.commit !== proposal.commit) {
+        throw new ConflictException({ code: 'approved-source-changed', message: 'The branch moved since the plan was approved',
+          approvedCommit: proposal.commit, currentCommit: checkedSource.commit });
       }
     }
     const agent = await this.tasks.approvedDeveloper(client, task, planned?.agent);

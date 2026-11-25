@@ -286,7 +286,8 @@ function taskIssue(response: Response | null) {
 async function planConflict(response: Response | null) {
   if (response?.status !== 409) return null;
   const code = (await response.json().catch(() => null))?.code;
-  return code === 'pending-decisions' || code === 'stale-plan-version' || code === 'versioned-worker-required' ? code : null;
+  return typeof code === 'string' && ['pending-decisions', 'stale-plan-version', 'versioned-worker-required',
+    'approved-source-changed', 'approved-target-changed', 'approved-source-unavailable'].includes(code) ? code : null;
 }
 
 export async function startAgentPlan(form: FormData) {
@@ -517,6 +518,12 @@ export async function startExecution(form: FormData) {
   if (revisionOf && !isWorkerId(revisionOf)) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
   const response = await execute(`${endpoint}/executions`, { method: 'POST', body: JSON.stringify({ workerId, revisionOf }) });
   const conflict = await planConflict(response);
+  if (conflict === 'approved-source-changed' || conflict === 'approved-target-changed' || conflict === 'stale-plan-version') {
+    redirect(`${query}&issue=${conflict}#task-plan`);
+  }
+  if (conflict === 'approved-source-unavailable') {
+    redirect(`${query}&issue=${conflict}#execution-heading`);
+  }
   if (conflict) redirect(`${query}&issue=${conflict}#task-detail`);
   if (!response?.ok && revisionOf) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
   if (!response?.ok) redirect(`${atDialog(query, 'dispatch')}&issue=${workerId && response?.status === 409 ? 'worker-assignment' : taskIssue(response)}`);
