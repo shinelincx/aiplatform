@@ -26,7 +26,8 @@ const executionDialogs = ['dispatch', 'worker-assignment', 'independent-evidence
 
 export function TaskDetailTabs({ initialTab, panels }: { initialTab: TaskDetailTab; panels: Record<TaskDetailTab, ReactNode> }) {
   const id = useId();
-  const dialog = useSearchParams().get('dialog');
+  const searchParams = useSearchParams();
+  const dialog = searchParams.get('dialog');
   const [selected, select] = useState<TaskDetailTab>();
   const current = dialog && executionDialogs.includes(dialog) ? 'execution' : selected ?? initialTab;
 
@@ -38,7 +39,7 @@ export function TaskDetailTabs({ initialTab, panels }: { initialTab: TaskDetailT
     syncHash();
     window.addEventListener('hashchange', syncHash);
     return () => window.removeEventListener('hashchange', syncHash);
-  }, []);
+  }, [searchParams]);
 
   function handleKey(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     const offsets: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, Home: -index, End: tabOrder.length - index - 1 };

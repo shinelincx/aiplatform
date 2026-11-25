@@ -522,7 +522,7 @@ export async function startExecution(form: FormData) {
     redirect(`${query}&issue=${conflict}#task-plan`);
   }
   if (conflict === 'approved-source-unavailable') {
-    redirect(`${atDialog(query, 'dispatch')}&issue=${conflict}#task-detail`);
+    redirect(`${query}&issue=${conflict}#execution-heading`);
   }
   if (conflict) redirect(`${query}&issue=${conflict}#task-detail`);
   if (!response?.ok && revisionOf) redirect(`${atDialog(query, 'dispatch')}&issue=revision#task-detail`);
